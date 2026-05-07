@@ -8,20 +8,20 @@
 
 ## Milestones
 
-### M0 — Scaffold (v0.1.0) — **current**
+### M0 — Scaffold (v0.1.0) — **gate cleared**
 
 Repo exists, compiles, runs, exits cleanly. Nothing useful happens yet.
 
 - [x] Repo structure (`src/`, `docs/`, `tests/`)
-- [x] `cyrius.cyml` manifest, toolchain pinned
+- [x] `cyrius.cyml` manifest, toolchain pinned (post-fix: `time` → `chrono`, `termios` deferred to M2)
 - [x] `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `CLAUDE.md`
 - [x] `docs/design-spec.md`
 - [x] ADR 0001 (binary name)
-- [x] `src/main.cyr` skeleton with `--help` / `--version`
-- [x] `tests/chakshu.tcyr` smoke test
-- [ ] Listed in `agnosticos` shared-crates registry
+- [x] `src/main.cyr` skeleton with `--help` / `--version` (rewritten against real stdlib API — `argc`/`argv`/`streq`/`println`/`eprint`)
+- [x] `tests/chakshu.tcyr` smoke test (10 assertions passing)
+- [ ] Listed in `agnosticos` shared-crates registry — open; lives in a different repo
 
-**Gate to M1**: `cyrius build src/main.cyr build/shu` succeeds; `./build/shu --version` prints version; `cyrius test` passes.
+**Gate to M1** *(cleared 2026-05-07)*: `cyrius build src/main.cyr build/shu` succeeds; `./build/shu --version` prints version; `cyrius test` passes.
 
 ---
 
@@ -58,6 +58,8 @@ Interactive full-screen monitor. Parity with `htop`. The point at which chakshu 
 - [ ] Color: 16-color default, `--color=auto|always|never`
 - [ ] Resize handling (SIGWINCH)
 - [ ] Smoke gate: TUI starts, refreshes, exits cleanly
+
+**Pre-M2 — TTY/termios lib extraction.** chakshu is the second AGNOS first-party tool to need raw mode (`cyim/src/tty.cyr` is the working donor — TCGETS/TCSETS, alt-screen, cursor, ANSI helpers; `cyrius-doom/src/input.cyr` is adjacent). On entering M2, extract `cyim/src/tty.cyr` into a new shared first-party repo (working name TBD — observation/sense family, e.g. `darshana` / `drishya`) rather than vendoring termios into `chakshu/lib/`. The second-consumer moment is when the right API seams become visible (chakshu wants SIGWINCH + render-loop integration that cyim does not need); deferring to M2 entry lets chakshu drive that surface instead of designing it in the abstract. Termios is **not** stdlib and the cyrius toolchain should not grow it.
 
 **Gate to M3**: chakshu is a usable `htop` replacement. Bazaar default switches from `htop` to `chakshu` (Bazaar recipe still ships `htop` for users who prefer it).
 
