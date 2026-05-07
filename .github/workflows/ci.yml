@@ -1,0 +1,197 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_call:                    # reusable by release.yml as a gate
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Cyrius toolchain
+        # Pulls the version pinned in cyrius.cyml [package].cyrius from
+        # the upstream toolchain release artifact. Mirrors owl/cyim CI.
+        run: |
+          CYRIUS_VERSION="${CYRIUS_VERSION:-$(grep 'cyrius *= *"' cyrius.cyml 2>/dev/null | head -1 | sed 's/.*"\(.*\)"/\1/')}"
+          echo "Installing Cyrius $CYRIUS_VERSION"
+          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          tar xzf "cyrius-$CYRIUS_VERSION-x86_64-linux.tar.gz"
+          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-x86_64-linux"
+          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
+          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
+          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
+          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
+          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
+          echo "CYRIUS_HOME=$HOME/.cyrius" >> $GITHUB_ENV
+
+      - name: Resolve dependencies
+        # Pulls cyrius.cyml [deps].stdlib into lib/. Manifest currently
+        # lists only stdlib deps (chrono, hashmap, etc.); termios is
+        # deferred per roadmap M2 "Pre-M2 — TTY/termios lib extraction".
+        run: cyrius deps
+
+      - name: Build
+        run: |
+          mkdir -p build
+          cyrius build src/main.cyr build/shu
+
+      - name: Verify ELF
+        # `7f 45 4c 46` = ELF magic. Cheap sanity that the build
+        # produced an actual Linux executable, not a partial output.
+        run: xxd -l 4 build/shu | grep -q "7f45 4c46"
+
+      - name: Lint
+        # Every src file clean; the only tolerated warning is the
+        # `exceeds 120 characters` rule on comment-divider lines
+        # (cosmetic only). Anything else is a hard fail.
+        #
+        # cyrius lint exits non-zero when it has anything to report
+        # (even "0 warnings"), so both the tool invocation and the
+        # inner grep need `|| true` to coexist with the implicit
+        # `set -e` on `run:` blocks.
+        run: |
+          fail=0
+          for f in src/*.cyr; do
+            out=$(cyrius lint "$f" 2>&1 || true)
+            echo "$out"
+            bad=$(echo "$out" | grep -E '^\s*warn ' | grep -v 'exceeds 120 characters' || true)
+            if [ -n "$bad" ]; then
+              fail=1
+            fi
+          done
+          [ $fail -eq 0 ] || { echo "lint: non-cosmetic warnings present"; exit 1; }
+
+      - name: Test
+        # Bare `cyrius test` auto-discovers tests/*.tcyr (cc5 v5.6.28+).
+        run: cyrius test
+
+      - name: Smoke test (M0–M1 surface)
+        # scripts/smoke.sh exercises the closed milestones — version
+        # / help parity, plain-snapshot shape, --sort/--top behavior,
+        # error-exit-code matrix. Bash (not /bin/sh dash) — the script
+        # uses process substitution.
+        run: bash scripts/smoke.sh build/shu
+
+      - name: DCE parity check
+        # Release builds set CYRIUS_DCE=1 to dead-code-eliminate
+        # unused stdlib functions. The DCE'd binary must produce the
+        # same observable behavior as the debug build, or the DCE
+        # pass dropped something live.
+        run: |
+          mkdir -p build
+          CYRIUS_DCE=1 cyrius build src/main.cyr build/shu-dce
+          echo "shu-dce: $(wc -c < build/shu-dce) bytes"
+          bash scripts/smoke.sh build/shu-dce
+
+  security:
+    name: Security scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan for forbidden patterns in src/
+        # Encodes the CLAUDE.md "Don't" invariants: no libc, no FFI,
+        # no ncurses; AI prompts must not touch /home, env, or raw
+        # cmdline. M1 ships only the /proc reader + plain renderer,
+        # so most rules below are forward-looking guards. The AI
+        # privacy block stays inert until src/ai/ lands at M3.
+        run: |
+          FAIL=0
+
+          # CLAUDE.md "Don't introduce libc / FFI / ncurses". cffi /
+          # dynlib / fdlopen / pam are the FFI on-ramps in the cyrius
+          # stdlib; importing any of them violates the sovereign-stack
+          # rule. Tolerate references in comments — only flag includes
+          # / function calls.
+          ffi_hits=$(grep -rnE 'include "lib/(cffi|dynlib|fdlopen|pam)\.cyr"' src/ 2>/dev/null || true)
+          if [ -n "$ffi_hits" ]; then
+            echo "FAIL: FFI/dynlib/pam library import"
+            echo "$ffi_hits"
+            FAIL=1
+          fi
+
+          # CLAUDE.md "heap-allocate large data". Static `var X[N]`
+          # at N >= 64 KiB lives on the stack and risks overflow on
+          # the kernel's 8 MB default stack ulimit. Same threshold
+          # owl/cyim use.
+          awk -F: '
+            /var [A-Za-z_][A-Za-z0-9_]*\[[0-9]+\]/ {
+              match($0, /\[[0-9]+\]/); s=substr($0,RSTART+1,RLENGTH-2); n=s+0;
+              if (n >= 65536) print FILENAME":"NR": large stack buffer ("n" bytes): "$0
+            }' src/*.cyr > /tmp/bigbuf.txt
+          if [ -s /tmp/bigbuf.txt ]; then
+            cat /tmp/bigbuf.txt
+            FAIL=1
+          fi
+
+          # M3+ AI-privacy guards (inert until src/ai/ exists).
+          # When the AI module lands, the prompt-assembly path must
+          # not reach for /home/, getenv(), or unredacted cmdline.
+          # Scaffold the rule here so adding it is a one-line flip.
+          if [ -d src/ai ]; then
+            home_hits=$(grep -rn '"/home/' src/ai/ 2>/dev/null || true)
+            if [ -n "$home_hits" ]; then
+              echo "FAIL: AI prompt path references /home/"
+              echo "$home_hits"
+              FAIL=1
+            fi
+            # getenv-equivalent in cyrius is `env` lib — same rule.
+            env_hits=$(grep -rn 'env_get\|getenv' src/ai/ 2>/dev/null || true)
+            if [ -n "$env_hits" ]; then
+              echo "FAIL: AI prompt path reads env vars"
+              echo "$env_hits"
+              FAIL=1
+            fi
+          fi
+
+          echo "security scan complete (fail: $FAIL)"
+          exit $FAIL
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required files
+        # The set below is what chakshu commits to maintaining at
+        # v0.2.0. SECURITY.md / CODE_OF_CONDUCT.md will join when we
+        # have content for them — not before.
+        run: |
+          MISSING=0
+          for f in README.md CHANGELOG.md VERSION CONTRIBUTING.md LICENSE \
+                   cyrius.cyml CLAUDE.md \
+                   docs/design-spec.md docs/development/roadmap.md \
+                   docs/development/state.md docs/adr/0001-binary-name-shu.md; do
+            if [ -f "$f" ]; then echo "  OK: $f"
+            else echo "  MISSING: $f"; MISSING=1; fi
+          done
+          exit $MISSING
+
+      - name: Verify version consistency
+        # Single source of truth is the VERSION file. Three derived
+        # surfaces must agree: the CHANGELOG section header, the
+        # cyrius.cyml indirection, and CHAKSHU_VERSION baked into the
+        # binary by src/main.cyr. CI fails closed on drift — version
+        # bump is a deliberate per-milestone act per CLAUDE.md, not
+        # something to fix up after the fact.
+        run: |
+          VERSION=$(cat VERSION | tr -d '[:space:]')
+          echo "VERSION file: $VERSION"
+          grep -qE "^## \[${VERSION}\]" CHANGELOG.md \
+            || { echo "FAIL: CHANGELOG.md missing section [${VERSION}]"; exit 1; }
+          grep -qE '^version *= *"\$\{file:VERSION\}"' cyrius.cyml \
+            || { echo "FAIL: cyrius.cyml version no longer pulls from VERSION"; exit 1; }
+          grep -qE "CHAKSHU_VERSION *= *\"chakshu ${VERSION}\"" src/main.cyr \
+            || { echo "FAIL: CHAKSHU_VERSION in src/main.cyr != $VERSION"; exit 1; }
+          echo "Version consistent: VERSION = CHANGELOG = cyrius.cyml = CHAKSHU_VERSION = $VERSION"

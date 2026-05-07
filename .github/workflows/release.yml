@@ -1,0 +1,221 @@
+name: Release
+
+# Triggers on semver tags only (1.0.0, 1.2.3, 2.0.0-rc1). An optional
+# leading `v` is accepted (v1.0.0). Non-numeric tags are ignored.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - '[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+
+jobs:
+  # ────────────────────────────────────────────────────────────────
+  # Gate — full CI must pass before anything builds for release.
+  # Reuses ci.yml via workflow_call so the release path can never
+  # ship a binary that hasn't passed lint / tests / smoke / DCE
+  # parity / security scan / docs check.
+  # ────────────────────────────────────────────────────────────────
+  ci:
+    name: CI gate
+    uses: ./.github/workflows/ci.yml
+
+  # ────────────────────────────────────────────────────────────────
+  # Verify — VERSION file, cyrius.cyml indirection, CHAKSHU_VERSION
+  # literal, and the git tag must all agree before anything is
+  # packaged. Same set as the docs job in ci.yml plus the tag.
+  # ────────────────────────────────────────────────────────────────
+  version-verify:
+    name: Version verify
+    needs: ci
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract VERSION / tag / cyml / src version
+        id: extract
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"   # strip optional leading 'v'
+          echo "$TAG" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+' \
+            || { echo "::error::tag ($TAG) is not semver"; exit 1; }
+
+          VERSION=$(cat VERSION | tr -d '[:space:]')
+          echo "VERSION file:  $VERSION"
+          echo "git tag:       $TAG"
+
+          if ! grep -qE '^version *= *"\$\{file:VERSION\}"' cyrius.cyml; then
+            echo "::error::cyrius.cyml version no longer resolves via \${file:VERSION}" >&2
+            exit 1
+          fi
+
+          if ! grep -qE "CHAKSHU_VERSION *= *\"chakshu ${VERSION}\"" src/main.cyr; then
+            echo "::error::CHAKSHU_VERSION in src/main.cyr != VERSION ($VERSION)" >&2
+            exit 1
+          fi
+
+          if [ "$VERSION" != "$TAG" ]; then
+            echo "::error::VERSION ($VERSION) != git tag ($TAG)" >&2
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  # ────────────────────────────────────────────────────────────────
+  # Build — DCE'd release binary per target platform.
+  # Matrix scoped to targets the Cyrius toolchain ships installers
+  # for today (x86_64-linux). Expand with aarch64-linux when chakshu
+  # picks up a second consumer arch — AGNOS targets both, but no
+  # M1/M2 user is on aarch64 yet.
+  # ────────────────────────────────────────────────────────────────
+  build:
+    name: Build (${{ matrix.target }})
+    needs: version-verify
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux
+            runs-on: ubuntu-latest
+    env:
+      CYRIUS_DCE: '1'
+      VERSION: ${{ needs.version-verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Cyrius toolchain
+        run: |
+          CYRIUS_VERSION=$(grep 'cyrius *= *"' cyrius.cyml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "Installing Cyrius $CYRIUS_VERSION"
+          curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-${{ matrix.target }}.tar.gz"
+          tar xzf "cyrius-$CYRIUS_VERSION-${{ matrix.target }}.tar.gz"
+          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-${{ matrix.target }}"
+          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
+          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
+          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
+          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
+          echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
+
+      - name: Resolve dependencies
+        run: cyrius deps
+
+      - name: Build DCE'd binary
+        run: |
+          mkdir -p build
+          cyrius build src/main.cyr build/shu
+          echo "shu: $(wc -c < build/shu) bytes"
+
+      - name: Re-run smoke on the release binary
+        run: bash scripts/smoke.sh build/shu
+
+      - name: Package release artifact
+        # Ships the binary + project metadata. No vendored lib/ —
+        # consumers building from source run `cyrius deps` themselves.
+        # No runtime data dir (chakshu reads /proc and /sys, no
+        # bundled grammars or fixtures to ship).
+        run: |
+          PKG="chakshu-${VERSION}-${{ matrix.target }}"
+          mkdir -p "pkg/$PKG"
+          cp build/shu "pkg/$PKG/"
+          cp README.md LICENSE CHANGELOG.md VERSION "pkg/$PKG/"
+          mkdir -p out
+          tar czf "out/${PKG}.tar.gz" -C pkg "$PKG"
+
+      - name: Generate SHA256
+        run: |
+          cd out
+          sha256sum *.tar.gz > SHA256SUMS.${{ matrix.target }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            out/*.tar.gz
+            out/SHA256SUMS.*
+
+  # ────────────────────────────────────────────────────────────────
+  # Source tarball — language-agnostic, always linux runner.
+  # ────────────────────────────────────────────────────────────────
+  source:
+    name: Source tarball
+    needs: version-verify
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version-verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create source tarball
+        run: |
+          mkdir -p out
+          git archive --format=tar.gz \
+            --prefix="chakshu-${VERSION}/" \
+            -o "out/chakshu-${VERSION}-src.tar.gz" HEAD
+          cd out
+          sha256sum "chakshu-${VERSION}-src.tar.gz" > SHA256SUMS.src
+
+      - name: Upload source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-source
+          path: |
+            out/*.tar.gz
+            out/SHA256SUMS.src
+
+  # ────────────────────────────────────────────────────────────────
+  # Release — collect artifacts + checksums, publish GitHub release.
+  # Body pulled from the matching CHANGELOG.md section. Pre-1.0
+  # releases are flagged prerelease so package managers don't
+  # auto-promote them.
+  # ────────────────────────────────────────────────────────────────
+  release:
+    name: GitHub release
+    needs: [build, source, version-verify]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version-verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-raw
+
+      - name: Consolidate artifacts
+        run: |
+          mkdir -p out
+          find dist-raw -type f \( -name '*.tar.gz' -o -name 'SHA256SUMS.*' \) \
+            -exec cp {} out/ \;
+          cd out
+          cat SHA256SUMS.* | sort -u > SHA256SUMS
+          rm -f SHA256SUMS.*
+          ls -la
+
+      - name: Extract release body from CHANGELOG
+        run: |
+          awk -v ver="${VERSION}" '
+            $0 ~ "^## \\[" ver "\\]" { found=1; next }
+            found && /^## \[/         { exit }
+            found                    { print }
+          ' CHANGELOG.md > /tmp/body.md
+          if [ ! -s /tmp/body.md ]; then
+            echo "::warning::CHANGELOG.md has no body for ${VERSION}; falling back to generated notes"
+          fi
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "chakshu ${{ env.VERSION }}"
+          body_path: /tmp/body.md
+          prerelease: ${{ startsWith(env.VERSION, '0.') }}
+          files: |
+            out/*.tar.gz
+            out/SHA256SUMS
+          generate_release_notes: true
+          fail_on_unmatched_files: true

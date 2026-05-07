@@ -58,6 +58,20 @@ args chrono hashmap process tagged assert
 | M4 | Polish + perf | Not started |
 | M5 | v1.0 ship | Not started |
 
+## Release Process
+
+| Surface | Where |
+|---------|-------|
+| CI on push/PR | `.github/workflows/ci.yml` — build, lint, test, smoke, DCE parity, security scan, docs + version consistency |
+| Release on semver tag | `.github/workflows/release.yml` — gates on ci.yml, version-verify against tag, build matrix (x86_64-linux), source tarball, GH release with body from CHANGELOG section |
+| Smoke test | `scripts/smoke.sh` — 17 gates over M0+M1 surface, run by both CI and locally pre-commit |
+| Cutting a release | Bump VERSION + CHANGELOG section + `CHAKSHU_VERSION` literal in `src/main.cyr`, push tag `vX.Y.Z` (or `X.Y.Z`); release.yml takes over. Pre-1.0 tags publish as GH prerelease automatically. |
+
+Patterned on owl's CI/release flow. Differences: no fuzz/bench/PTY
+harnesses (chakshu has none), aarch64 target deferred until a real
+consumer asks (AGNOS targets both arches, but no current user runs
+chakshu on aarch64).
+
 ## Carry-Forward
 
 - ADR 0001 records the `shu` binary-name decision (with `ctop` considered and rejected) — closed; no re-litigation needed barring new namespace pressure on `shu`.

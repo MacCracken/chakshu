@@ -79,6 +79,25 @@ cpu:  4%   disk: rd 0 B/s wr 0 B/s   net: rx 22 KiB/s tx 21 KiB/s
   Replaced manual counts with strlen-based `eprint_cstr` everywhere.
   _Second one caught by reading the user-visible error output._
 
+### Tooling
+
+- **CI/release workflows.** `.github/workflows/ci.yml` (three jobs:
+  build-and-test → lint → tests → smoke → DCE parity; security scan;
+  docs + version-consistency) and `.github/workflows/release.yml`
+  (semver-tag-triggered, gates on CI via `workflow_call`, version-verify
+  against tag, build matrix, source tarball, GH release with body
+  extracted from the matching CHANGELOG section). Patterned on owl's
+  CI; scoped to chakshu's M1 surface (no fuzz/bench/PTY harnesses yet).
+- `scripts/smoke.sh` — 17-gate end-to-end exerciser of the closed
+  M0+M1 surface. Locks down: version/help short-long parity, exit-code
+  matrix (unknown=2, unimplemented=1, usage=2), `-p` line shape
+  (host/mem/cpu/PID-header order), `--top` validation, `--sort` keys
+  (incl. ASC pid ordering check), pipe sanity, wall-time budget.
+  Runs under bash (uses `<(...)` and `$'\x...'` escapes — not posix sh).
+- Version consistency in CI now closed-loop: VERSION = CHANGELOG
+  section header = cyrius.cyml `${file:VERSION}` indirection =
+  CHAKSHU_VERSION literal. CI fails closed on drift.
+
 ### Tests
 
 - 57 assertions across 13 groups, up from 10 at scaffold close.
