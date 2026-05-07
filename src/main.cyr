@@ -8,6 +8,7 @@
 # proc.cyr → proc/{cpu,disk,net,pid}.cyr when M1 Slice B/C land
 # and the file gets unwieldy. Flat is fine while the parsers fit.
 include "src/proc.cyr"
+include "src/processes.cyr"
 include "src/snapshot.cyr"
 
 # Keep CHAKSHU_VERSION in sync with the VERSION file.

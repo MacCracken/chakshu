@@ -149,6 +149,12 @@ fn snapshot_print() {
     proc_stat_cpu_agg (&sb1, &cpu_active1, &cpu_total1);
     proc_diskstats_agg(&db1, d1n, &sec_r1, &sec_w1);
     proc_netdev_agg   (&nb1, n1n, &rx1, &tx1);
+    var ncores = proc_stat_ncores(&sb1, s1n);
+
+    # Slice C — sample 1 of /proc/[pid]/stat (utime+stime per pid).
+    # Same 100ms window as the aggregate cpu/disk/net sampling, so the
+    # per-process CPU% sums correlate with the aggregate cpu line.
+    processes_sample1();
 
     sleep_ms(SNAP_SAMPLE_MS);
 
@@ -198,6 +204,12 @@ fn snapshot_print() {
     syscall(1, 1, " tx ", 4);
     _snap_print_rate_bps(net_tx_bps);
     syscall(1, 1, "\n", 1);
+
+    # Slice C — process table. Sample 2 needs the aggregate cpu_total
+    # delta (already computed) and the core count (parsed from sample
+    # 1's stat buffer above).
+    processes_sample2(total_delta, ncores);
+    processes_render(PROC_DEFAULT_TOPN, mem_total_kb);
 
     return EXIT_OK;
 }

@@ -1,0 +1,195 @@
+# processes.cyr — /proc/[pid] walker, two-sample CPU sampling, sort,
+# and top-N table render. Slice C of the M1 plain-snapshot arc.
+#
+# Per-process record layout (48 bytes; an array of these lives at
+# _proc_recs, sized PROC_MAX records):
+#
+#   off  0  pid           u64
+#   off  8  cpu_pct       u64 (htop convention — per-core × 100 max)
+#   off 16  rss           u64 (pages; ×4096 = bytes on x86_64/aarch64)
+#   off 24  state         u64 (low byte = ASCII state char R/S/D/Z/T)
+#   off 32  comm[16]      bytes (TASK_COMM_LEN, null-terminated)
+#
+# Sampling: sample 1 captures (pid → utime+stime) in a u64 hashmap;
+# sample 2 walks /proc again and computes the per-process tick delta
+# against the map. Processes that exited between samples are absent;
+# processes that exec'd between samples are present with cpu_pct=0
+# (no sample-1 baseline → delta math returns the full sample-2 ticks
+# which we discard via map_u64_get_or default == ticks2).
+#
+# cmdline isn't read here — it's per-line work that dwarfs the per-pid
+# stat parse and only matters for the displayed top-N. Slice D will
+# read cmdline for the post-sort top-N rather than every pid.
+
+var PROC_REC_SIZE      = 48;
+var PROC_MAX           = 1024;
+var PROC_DEFAULT_TOPN  = 10;
+
+# Lazy module globals — alloc'd on first sample, reused across calls.
+var _proc_recs = 0;
+var _proc_n    = 0;
+var _proc_map  = 0;
+
+fn _proc_ensure_init() {
+    if (_proc_recs == 0) {
+        _proc_recs = alloc(PROC_MAX * PROC_REC_SIZE);
+    }
+    if (_proc_map == 0) {
+        _proc_map = map_u64_new();
+    }
+    return 0;
+}
+
+# Sample 1 — populate _proc_map[pid] = utime+stime.
+fn processes_sample1() {
+    _proc_ensure_init();
+    map_u64_clear(_proc_map);
+    var entries = dir_list(str_from("/proc"));
+    var i = 0;
+    while (i < vec_len(entries)) {
+        var nstr = vec_get(entries, i);
+        var name = str_data(nstr);
+        if (proc_is_pid_name(name) == 1) {
+            var pid = atoi(name);
+            var path[64];
+            proc_pid_path(name, "/stat", &path);
+            var sb[1024];
+            var sn = file_read_all(&path, &sb, 1023);
+            if (sn > 0) {
+                store8(&sb + sn, 0);
+                var srec[48];
+                if (proc_pid_stat_parse(&sb, sn, &srec) == 0) {
+                    map_u64_set(_proc_map, pid, load64(&srec + 8));
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Sample 2 — walk /proc, compute cpu_pct, append per-pid record, then
+# insertion-sort by cpu_pct descending. Top-N selection happens in
+# processes_render so a future --sort flag can pick a different key
+# without re-walking /proc.
+fn processes_sample2(total_delta, ncores) {
+    _proc_n = 0;
+    var entries = dir_list(str_from("/proc"));
+    var i = 0;
+    while (i < vec_len(entries)) {
+        if (_proc_n >= PROC_MAX) { break; }
+        var nstr = vec_get(entries, i);
+        var name = str_data(nstr);
+        if (proc_is_pid_name(name) == 1) {
+            var pid = atoi(name);
+            var path[64];
+            proc_pid_path(name, "/stat", &path);
+            var sb[1024];
+            var sn = file_read_all(&path, &sb, 1023);
+            if (sn > 0) {
+                store8(&sb + sn, 0);
+                var srec[48];
+                if (proc_pid_stat_parse(&sb, sn, &srec) == 0) {
+                    var ticks2 = load64(&srec + 8);
+                    # Default to ticks2 so unmapped pids (new since
+                    # sample 1) yield a delta of 0, not a huge number.
+                    var ticks1 = map_u64_get_or(_proc_map, pid, ticks2);
+                    var dt = ticks2 - ticks1;
+                    if (dt < 0) { dt = 0; }
+                    var cpu_pct = 0;
+                    if (total_delta > 0) {
+                        cpu_pct = dt * 100 * ncores / total_delta;
+                    }
+                    var rec = _proc_recs + _proc_n * PROC_REC_SIZE;
+                    store64(rec + 0,  pid);
+                    store64(rec + 8,  cpu_pct);
+                    store64(rec + 16, load64(&srec + 16));
+                    store64(rec + 24, load64(&srec + 0));
+                    memcpy(rec + 32, &srec + 24, 16);
+                    _proc_n = _proc_n + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+
+    # Insertion sort by cpu_pct desc. ~1024 records max → 1M cmps
+    # worst case, fine for plain mode. Slice D may swap for a partial
+    # heapselect once top_n / --sort lands.
+    var s = 1;
+    while (s < _proc_n) {
+        var j = s;
+        while (j > 0) {
+            var a = _proc_recs + j * PROC_REC_SIZE;
+            var b = _proc_recs + (j - 1) * PROC_REC_SIZE;
+            if (load64(a + 8) > load64(b + 8)) {
+                var tmp[48];
+                memcpy(&tmp, b,    PROC_REC_SIZE);
+                memcpy(b,    a,    PROC_REC_SIZE);
+                memcpy(a,    &tmp, PROC_REC_SIZE);
+                j = j - 1;
+            } else {
+                break;
+            }
+        }
+        s = s + 1;
+    }
+    return 0;
+}
+
+# Print integer right-aligned in `width` columns. width must be >=
+# decimal-digits-of-n; otherwise the number prints unpadded (no
+# truncation — better to overflow the column than lie about the
+# value).
+fn _proc_print_int_pad(n, width) {
+    var w = 1;
+    var x = n;
+    while (x >= 10) { w = w + 1; x = x / 10; }
+    var sp = width - w;
+    while (sp > 0) {
+        syscall(1, 1, " ", 1);
+        sp = sp - 1;
+    }
+    print_num(n);
+    return 0;
+}
+
+# Render the top-N rows of the sorted process table to stdout. Layout:
+#
+#      PID S  CPU%  MEM% CMD
+#    1234 R    18     3 firefox
+#     892 S     6     1 Web Content
+#
+# Right-align numeric columns; left-align CMD with one trailing space.
+# mem_pct = rss_pages × 4096 × 100 / (mem_total_kb × 1024) simplifies
+# to rss × 400 / mem_total_kb (integer truncation; sub-1% reads as 0).
+fn processes_render(top_n, mem_total_kb) {
+    syscall(1, 1, "   PID S  CPU%  MEM% CMD\n", 25);
+    var n = _proc_n;
+    if (n > top_n) { n = top_n; }
+    var i = 0;
+    while (i < n) {
+        var rec = _proc_recs + i * PROC_REC_SIZE;
+        var pid = load64(rec + 0);
+        var cpu = load64(rec + 8);
+        var rss = load64(rec + 16);
+        var st  = load64(rec + 24);
+        var mem = 0;
+        if (mem_total_kb > 0) {
+            mem = rss * 400 / mem_total_kb;
+        }
+        _proc_print_int_pad(pid, 6);
+        syscall(1, 1, " ", 1);
+        var sc[2];
+        store8(&sc, st);
+        store8(&sc + 1, 0);
+        syscall(1, 1, &sc, 1);
+        _proc_print_int_pad(cpu, 6);
+        _proc_print_int_pad(mem, 6);
+        syscall(1, 1, " ", 1);
+        syscall(1, 1, rec + 32, strlen(rec + 32));
+        syscall(1, 1, "\n", 1);
+        i = i + 1;
+    }
+    return 0;
+}

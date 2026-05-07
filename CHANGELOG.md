@@ -11,6 +11,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   L1 L5 L15` and `mem: <used> MiB used / <total> MiB total`. Reads
   `/proc/sys/kernel/hostname`, `/proc/uptime`, `/proc/loadavg`,
   `/proc/meminfo`. No terminal escapes — pipeable per design-spec §2.2.
+- **M1 Slice C — `-p` process table.** Appends a top-10 process table
+  sorted by CPU% descending. Walks `/proc/<pid>/stat` twice (paired
+  with the slice B 100ms window) and computes per-process CPU% in the
+  htop convention (per-core × 100 max, so a thread pegging one core
+  reads 100% regardless of how many cores are idle). Uses `chrono`'s
+  sleep window already taken for slice B — no additional latency.
+  Columns: `PID S CPU% MEM% CMD` where MEM% = rss_pages × page / total
+  and CMD is the kernel TASK_COMM_LEN-capped name (cmdline rendering
+  for long-form names lands in slice D).
+- New `src/processes.cyr` — walker, sampling orchestration, insertion
+  sort by cpu_pct, top-N renderer. Stores per-process records in a
+  module-global 48 KB heap block (1024 × 48 bytes). Uses `map_u64` to
+  lookup sample-1 ticks from sample-2 by pid.
+- `proc.cyr` adds `proc_pid_stat_parse` (handles comm field with
+  embedded spaces/parens via "find LAST `)`" trick), `proc_stat_ncores`
+  (count cpuN lines), `proc_is_pid_name` (numeric-only validator),
+  `proc_pid_path` ("/proc/<pid>/<suffix>" builder).
+- **Bug fix:** `_proc_next_uint` previously stalled on `-1` (the stat
+  line's `tpgid` field for processes without a controlling tty),
+  silently returning 0 for every subsequent field. Now consumes a
+  leading `-` so signed fields can be skipped past.
+
 - **M1 Slice B — `-p` delta-source line.** Adds a third snapshot line
   `cpu: NN%   disk: rd <rate> wr <rate>   net: rx <rate> tx <rate>`
   computed from two samples 100ms apart (`chrono.sleep_ms`). Aggregates:

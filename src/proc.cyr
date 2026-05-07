@@ -120,12 +120,24 @@ fn _proc_skip_line(buf, cursor) {
     return 0;
 }
 
-# Skip whitespace then read an unsigned decimal integer at *cursor.
-# Returns the value (0 if no digits at the position). Advances *cursor
-# to one past the last digit. Stops on null, newline, or any non-digit.
+# Skip whitespace then read a decimal integer at *cursor. Handles a
+# single leading '-' so the parser can advance past signed fields like
+# /proc/[pid]/stat's `tpgid` (-1 when there's no controlling tty) and
+# `nice` (negative for boosted-priority processes). Returns the parsed
+# value (0 if no digits). Advances *cursor to one past the last digit.
+# Stops on null, newline, or any other non-digit.
+#
+# Name kept as _uint for back-compat with the slice B callers that only
+# ever see unsigned counters; the sign handling is purely a parse-skip
+# robustness fix and doesn't change their behavior.
 fn _proc_next_uint(buf, cursor) {
     _proc_skip_ws(buf, cursor);
     var i = load64(cursor);
+    var neg = 0;
+    if (load8(buf + i) == 45) {     # '-'
+        neg = 1;
+        i = i + 1;
+    }
     var v = 0;
     while (1 == 1) {
         var c = load8(buf + i);
@@ -135,6 +147,7 @@ fn _proc_next_uint(buf, cursor) {
         i = i + 1;
     }
     store64(cursor, i);
+    if (neg == 1) { return 0 - v; }
     return v;
 }
 
@@ -249,6 +262,152 @@ fn proc_diskstats_agg(buf, n, out_sec_read, out_sec_writ) {
     }
     store64(out_sec_read, sec_read_total);
     store64(out_sec_writ, sec_writ_total);
+    return 0;
+}
+
+# Count the number of online CPU cores by counting "cpuN" lines in a
+# /proc/stat buffer (the aggregate "cpu " line at the top is skipped).
+# Used to scale per-process CPU% from share-of-system to htop-style
+# share-of-one-core (a thread pegging one core reads ~100%, regardless
+# of how many other cores are idle).
+fn proc_stat_ncores(buf, n) {
+    var cores = 0;
+    var i = 0;
+    # Skip the aggregate "cpu " line.
+    _proc_skip_line(buf, &i);
+    while (i < n) {
+        # Match "cpu" + digit at line start.
+        if (load8(buf + i) == 99) {            # 'c'
+            if (load8(buf + i + 1) == 112) {   # 'p'
+                if (load8(buf + i + 2) == 117) { # 'u'
+                    var c = load8(buf + i + 3);
+                    if (c >= 48) { if (c <= 57) { cores = cores + 1; } }
+                }
+            }
+        }
+        _proc_skip_line(buf, &i);
+    }
+    if (cores == 0) { cores = 1; }   # always at least one core
+    return cores;
+}
+
+# True if `name` (null-terminated cstring) is a /proc PID directory —
+# i.e. all-digit, non-empty. /proc contains both numeric PID dirs and
+# symbolic ones ("self", "thread-self", "kcore", "cpuinfo", etc.) and
+# we want only the former.
+fn proc_is_pid_name(name) {
+    var i = 0;
+    while (1 == 1) {
+        var c = load8(name + i);
+        if (c == 0) { break; }
+        if (c < 48) { return 0; }
+        if (c > 57) { return 0; }
+        i = i + 1;
+    }
+    if (i == 0) { return 0; }
+    return 1;
+}
+
+# Build "/proc/<pid>/<suffix>" into out_buf as a null-terminated
+# cstring. Returns the byte length (excl. null). pid_str and suffix
+# are both null-terminated cstrings.
+fn proc_pid_path(pid_str, suffix, out_buf) {
+    var off = 0;
+    var prefix = "/proc/";
+    var pi = 0;
+    while (pi < 6) {
+        store8(out_buf + off, load8(prefix + pi));
+        off = off + 1; pi = pi + 1;
+    }
+    var p = 0;
+    while (1 == 1) {
+        var c = load8(pid_str + p);
+        if (c == 0) { break; }
+        store8(out_buf + off, c);
+        off = off + 1; p = p + 1;
+    }
+    var s = 0;
+    while (1 == 1) {
+        var c = load8(suffix + s);
+        if (c == 0) { break; }
+        store8(out_buf + off, c);
+        off = off + 1; s = s + 1;
+    }
+    store8(out_buf + off, 0);
+    return off;
+}
+
+# Parse /proc/[pid]/stat into a 48-byte output record laid out as:
+#   off  0  state  (i64; low byte holds the ASCII state char R/S/D/Z/T)
+#   off  8  ticks  (i64; utime + stime — caller deltas across samples)
+#   off 16  rss    (i64; pages — multiply by page size for bytes)
+#   off 24  comm   (16 bytes; null-terminated, TASK_COMM_LEN-capped name)
+#
+# The stat line shape per `man 5 proc` is:
+#   pid (comm) state ppid pgrp ... [13 ints] utime stime [8 ints] rss [...]
+# `comm` is in parens and may itself contain spaces and parens (kernel
+# truncates to 15 chars but doesn't escape internal punctuation).
+# Parse strategy: pid is before the first '('; comm spans first '(' to
+# the LAST ')' in the buffer; the rest is plain space-separated ints.
+#
+# Returns 0 on success; non-zero on malformed input.
+fn proc_pid_stat_parse(buf, n, out_rec) {
+    # Locate first '(' and last ')' — robust against comm containing
+    # nested parens (rare but possible).
+    var first_paren = 0 - 1;
+    var last_paren  = 0 - 1;
+    var i = 0;
+    while (i < n) {
+        var c = load8(buf + i);
+        if (c == 40) { if (first_paren < 0) { first_paren = i; } }
+        if (c == 41) { last_paren = i; }
+        i = i + 1;
+    }
+    if (first_paren < 0) { return 1; }
+    if (last_paren  < 0) { return 1; }
+    if (last_paren <= first_paren) { return 1; }
+
+    var comm_off = first_paren + 1;
+    var comm_len = last_paren - comm_off;
+
+    var cursor = last_paren + 1;
+    if (load8(buf + cursor) == 32) { cursor = cursor + 1; }
+    # State char.
+    var state = load8(buf + cursor);
+    cursor = cursor + 1;
+
+    # Skip 10 ints: ppid pgrp session tty_nr tpgid flags minflt cminflt majflt cmajflt
+    var skip = 0;
+    while (skip < 10) {
+        _proc_next_uint(buf, &cursor);
+        skip = skip + 1;
+    }
+    var utime = _proc_next_uint(buf, &cursor);
+    var stime = _proc_next_uint(buf, &cursor);
+    # Skip 8 ints: cutime cstime priority nice num_threads itrealvalue starttime vsize
+    skip = 0;
+    while (skip < 8) {
+        _proc_next_uint(buf, &cursor);
+        skip = skip + 1;
+    }
+    var rss = _proc_next_uint(buf, &cursor);
+
+    store64(out_rec + 0,  state);
+    store64(out_rec + 8,  utime + stime);
+    store64(out_rec + 16, rss);
+
+    # Copy comm into out_rec+24, cap at 15 bytes + null.
+    var copy_len = comm_len;
+    if (copy_len > 15) { copy_len = 15; }
+    var k = 0;
+    while (k < copy_len) {
+        store8(out_rec + 24 + k, load8(buf + comm_off + k));
+        k = k + 1;
+    }
+    while (k < 16) {
+        store8(out_rec + 24 + k, 0);
+        k = k + 1;
+    }
     return 0;
 }
 

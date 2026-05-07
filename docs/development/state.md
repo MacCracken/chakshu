@@ -1,6 +1,6 @@
 # chakshu — State
 
-> **Status**: Active | **Last Updated**: 2026-05-07 (M1 Slice B landed)
+> **Status**: Active | **Last Updated**: 2026-05-07 (M1 Slice C landed)
 >
 > Volatile state — version, toolchain pin, milestone progress, binary size.
 > Refreshed every release. Durable rules live in
@@ -16,12 +16,13 @@
 | Version | **0.1.0** |
 | Cyrius toolchain pin | `5.9.32` (cyrius.cyml `[package].cyrius`) |
 | Genesis cycle | v5.9.x — niyama-fold opener / catchup arc |
-| Active milestone | **M1 — Plain snapshot** (Slices A+B landed; C/D pending) |
+| Active milestone | **M1 — Plain snapshot** (Slices A+B+C landed; D pending) |
 | Next milestone | **M2 — Full TUI** |
 | Binary | `shu` (build/shu) — System Health Utility, per ADR 0001 |
-| Binary size (DCE) | 128 536 bytes (~126 KB) — was 95 KB after Slice A; +31 KB for delta parsers + chrono |
-| Lines of Cyrius | src/{main,snapshot,proc}.cyr (~500 LoC) |
-| Test count | 35 assertions across 10 groups |
+| Binary size (DCE) | 137 304 bytes (~134 KB) — was 126 KB after Slice B; +8 KB for processes module + hashmap |
+| Lines of Cyrius | src/{main,snapshot,proc,processes}.cyr (~700 LoC) |
+| Test count | 57 assertions across 13 groups |
+| `shu -p` wall time | 110 ms (~100 ms sample window + ~10 ms work) on dev box |
 
 ## Dependency Envelope
 
@@ -51,7 +52,7 @@ args chrono hashmap process tagged assert
 | M | Title | Status |
 |---|-------|--------|
 | M0 | Scaffold | **Gate cleared** — `cyrius deps`/`build`/`test` all green; `shu --version` / `--help` / `--watch` (placeholder) / unknown-flag paths exercised |
-| M1 | Plain snapshot | **In progress** — Slices A (host/uptime/load/mem) + B (cpu/disk/net 100ms-window deltas) ✓; C (process walker), D (`--sort`/`--top` + perf gate) pending |
+| M1 | Plain snapshot | **In progress** — Slices A (host/uptime/load/mem) + B (cpu/disk/net 100ms-window deltas) + C (top-10 process table sorted by CPU%) ✓; D (`--sort`/`--top` + perf gate) pending |
 | M2 | Full TUI | Not started |
 | M3 | AI integration | Not started |
 | M4 | Polish + perf | Not started |

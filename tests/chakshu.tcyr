@@ -98,6 +98,52 @@ fn main() {
     assert_eq(dr2, 42, "mdctl (no digit after md) is included");
     assert_eq(dw2, 7,  "mdctl write counted");
 
+    test_group("proc.cyr — ncores from /proc/stat");
+    # Aggregate "cpu " line then 4 per-core lines → 4 cores.
+    var stat4 = "cpu  100 0 200 5000 0 0 0 0 0 0\ncpu0 25 0 50 1250 0 0 0 0 0 0\ncpu1 25 0 50 1250 0 0 0 0 0 0\ncpu2 25 0 50 1250 0 0 0 0 0 0\ncpu3 25 0 50 1250 0 0 0 0 0 0\nintr 1234\n";
+    assert_eq(proc_stat_ncores(stat4, strlen(stat4)), 4, "4 cpuN lines counted as 4 cores");
+    # No per-core lines — fallback to 1.
+    var stat0 = "cpu  100 0 200 5000 0 0 0 0 0 0\nintr 0\n";
+    assert_eq(proc_stat_ncores(stat0, strlen(stat0)), 1, "no cpuN lines → fallback 1");
+
+    test_group("proc.cyr — pid name validation");
+    assert_eq(proc_is_pid_name("1"),     1, "single digit is pid");
+    assert_eq(proc_is_pid_name("26665"), 1, "multi digit is pid");
+    assert_eq(proc_is_pid_name("self"),  0, "self is not pid");
+    assert_eq(proc_is_pid_name("cpuinfo"), 0, "cpuinfo is not pid");
+    assert_eq(proc_is_pid_name(""),      0, "empty is not pid");
+    assert_eq(proc_is_pid_name("12a"),   0, "trailing letter rejected");
+
+    test_group("proc.cyr — /proc/<pid>/<suffix> path builder");
+    var pbuf[64];
+    assert_eq(proc_pid_path("1234", "/stat", &pbuf), 15, "len of /proc/1234/stat (excl null)");
+    assert_eq(memeq(&pbuf, "/proc/1234/stat", 15), 1, "path bytes correct");
+    assert_eq(load8(&pbuf + 15), 0, "null-terminated");
+
+    test_group("proc.cyr — /proc/<pid>/stat parse");
+    # Real stat line shape; comm is "(zsh)". State R, utime 100, stime 50,
+    # rss 1444 pages. Field layout per `man 5 proc`. After the last ')':
+    # state(R) ppid(3037) pgrp(26665) session(26665) tty_nr(0) tpgid(-1)
+    # flags(4194304) minflt(209) cminflt(66) majflt(0) cmajflt(0)
+    # utime(100) stime(50) cutime(0) cstime(0) priority(20) nice(0)
+    # num_threads(1) itrealvalue(0) starttime(432947) vsize(8699904) rss(1444)
+    var stat_line = "26665 (zsh) R 3037 26665 26665 0 -1 4194304 209 66 0 0 100 50 0 0 20 0 1 0 432947 8699904 1444 18446744073709551615\n";
+    var srec[48];
+    assert_eq(proc_pid_stat_parse(stat_line, strlen(stat_line), &srec), 0, "parse OK");
+    assert_eq(load64(&srec + 0), 82,    "state R = ASCII 82");
+    assert_eq(load64(&srec + 8), 150,   "ticks = utime+stime = 100+50");
+    assert_eq(load64(&srec + 16), 1444, "rss = 1444 pages");
+    assert_eq(memeq(&srec + 24, "zsh", 3), 1, "comm starts with 'zsh'");
+    assert_eq(load8(&srec + 24 + 3), 0, "comm null-terminated after 3 chars");
+    # comm with internal parens — pick the LAST ')' as the boundary.
+    var stat_line2 = "100 (foo (bar) baz) S 1 1 1 0 -1 0 0 0 0 0 5 6 0 0 20 0 1 0 100 1024 99 0\n";
+    var srec2[48];
+    assert_eq(proc_pid_stat_parse(stat_line2, strlen(stat_line2), &srec2), 0, "parens-in-comm OK");
+    assert_eq(load64(&srec2 + 0),  83, "state S = ASCII 83");
+    assert_eq(load64(&srec2 + 8),  11, "ticks = 5+6");
+    assert_eq(load64(&srec2 + 16), 99, "rss = 99");
+    assert_eq(memeq(&srec2 + 24, "foo (bar) baz", 13), 1, "comm preserves internal parens");
+
     test_group("proc.cyr — /proc/net/dev aggregation + lo exclusion");
     # 2 header lines, then lo (excluded) + eth0 (included).
     # Expected: rx = 1000000; tx = 50000.
