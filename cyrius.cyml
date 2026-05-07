@@ -1,0 +1,45 @@
+[package]
+name = "chakshu"
+version = "${file:VERSION}"
+description = "The eye — AI-augmented system monitor for AGNOS / Cyrius"
+license = "GPL-3.0-only"
+repository = "https://github.com/MacCracken/chakshu"
+language = "cyrius"
+cyrius = "5.9.32"
+
+[build]
+entry = "src/main.cyr"
+output = "shu"
+
+# Stdlib footprint for the M0–M2 arc (process + resource view, no AI yet):
+#   syscalls/alloc/fmt/io — baseline
+#   fs                    — /proc/* and /sys/* reads
+#   str/string/vec        — line parsing, process lists
+#   args                  — CLI flag parsing
+#   time                  — refresh-tick scheduling
+#   termios               — raw mode for the TUI
+#   hashmap               — pid → process-row caching across refresh ticks
+#   process               — sending signals (-k / kill key)
+#   assert                — tests/chakshu.tcyr
+# Pulled in later cycles (kept off the M0 critical path):
+#   net    — /proc/net parsing for the network panel (M2)
+#   sandhi — daimon/hoosh JSON-RPC for AI explanations (M3)
+#   niyama — log-tail filtering for the "why is X spiking" context (M3)
+[deps]
+stdlib = [
+    "syscalls",
+    "alloc",
+    "fmt",
+    "io",
+    "fs",
+    "str",
+    "string",
+    "vec",
+    "args",
+    "time",
+    "termios",
+    "hashmap",
+    "process",
+    "tagged",
+    "assert",
+]

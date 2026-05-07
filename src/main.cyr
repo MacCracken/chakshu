@@ -1,0 +1,94 @@
+# chakshu — main entry point
+# The eye — AI-augmented system monitor for AGNOS / Cyrius.
+# Stdlib auto-included via cyrius.cyml.
+#
+# v0.1.0 — scaffold. Only --help and --version work today. The
+# milestone arc to a useful monitor lives in
+# docs/development/roadmap.md. Don't add features beyond M0 here.
+
+# Keep CHAKSHU_VERSION in sync with the VERSION file.
+# A future CI check will enforce equality; for now, manual.
+var CHAKSHU_VERSION = "chakshu 0.1.0";
+
+# Exit codes per design-spec §9
+var EXIT_OK    = 0;
+var EXIT_ERR   = 1;
+var EXIT_USAGE = 2;
+
+fn print_version() {
+    println(CHAKSHU_VERSION);
+    return EXIT_OK;
+}
+
+fn print_help() {
+    println("chakshu — AI-augmented system monitor for AGNOS");
+    println("");
+    println("Usage:");
+    println("  shu [OPTIONS]            Full TUI (M2+)");
+    println("  shu -p                   Plain snapshot (M1+)");
+    println("  shu --pid <PID>          Focus a single process (M2+)");
+    println("  shu --explain <PID>      AI explanation (M3+)");
+    println("  shu --watch              Anomaly stream (M3+)");
+    println("");
+    println("Options:");
+    println("  -p                        Plain snapshot mode");
+    println("  --rate <HZ>               Refresh rate (0.2-10, default 1)");
+    println("  --color <when>            auto | always | never (default auto)");
+    println("  --pid <PID>               Focus a single process");
+    println("  --explain <PID>           Print AI explanation and exit");
+    println("  --watch                   Anomaly stream mode");
+    println("  --with-logs               Allow AI prompts to include sakshi log context");
+    println("  -h, --help                Show this help");
+    println("  -V, --version             Show version");
+    println("");
+    println("Status: v0.1.0 scaffold. Most flags are placeholders pending");
+    println("M1-M3. See docs/development/roadmap.md.");
+    return EXIT_OK;
+}
+
+fn print_unimplemented(flag) {
+    print("chakshu: ");
+    print(flag);
+    println(" not implemented yet — see docs/development/roadmap.md");
+    return EXIT_ERR;
+}
+
+fn main() {
+    var argc = args_count();
+    var i = 1;
+
+    if (argc < 2) {
+        # No args — would launch TUI at M2+. Until then, print help.
+        return print_help();
+    }
+
+    while (i < argc) {
+        var a = args_get(i);
+
+        if (str_eq(a, "-h") == 1) { return print_help(); }
+        if (str_eq(a, "--help") == 1) { return print_help(); }
+        if (str_eq(a, "-V") == 1) { return print_version(); }
+        if (str_eq(a, "--version") == 1) { return print_version(); }
+
+        # Recognized flags that are not yet implemented — emit a
+        # clear placeholder rather than a generic "unknown flag".
+        if (str_eq(a, "-p") == 1) { return print_unimplemented("-p"); }
+        if (str_eq(a, "--pid") == 1) { return print_unimplemented("--pid"); }
+        if (str_eq(a, "--explain") == 1) { return print_unimplemented("--explain"); }
+        if (str_eq(a, "--watch") == 1) { return print_unimplemented("--watch"); }
+        if (str_eq(a, "--rate") == 1) { return print_unimplemented("--rate"); }
+        if (str_eq(a, "--color") == 1) { return print_unimplemented("--color"); }
+        if (str_eq(a, "--with-logs") == 1) { return print_unimplemented("--with-logs"); }
+
+        # Unknown flag — usage error.
+        print("chakshu: unknown flag: ");
+        println(a);
+        println("Try 'shu --help' for usage.");
+        return EXIT_USAGE;
+    }
+
+    return EXIT_OK;
+}
+
+var r = main();
+syscall(SYS_EXIT, r);
