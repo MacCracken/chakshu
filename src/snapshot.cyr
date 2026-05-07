@@ -12,11 +12,43 @@
 # Slice B will append a CPU+disk+net resource line; Slice C will append
 # the top-N process table. The on-screen order matches design-spec §4.
 
+# Sleep window for the two-sample CPU/disk/net delta. 100ms per the M1
+# roadmap ("computed across two samples ~100ms apart"). The M1 perf
+# target of <30ms refers to parse+render work, not the sleep window —
+# `watch -n 1 shu -p` will still tick comfortably within its second.
+var SNAP_SAMPLE_MS = 100;
+
 # Print n with a leading zero if n < 10. Used for HH and MM in the
 # uptime "Nd HH:MM" format. Negative n is undefined (uptime never is).
 fn _snap_print_pad2(n) {
     if (n < 10) { syscall(1, 1, "0", 1); }
     print_num(n);
+    return 0;
+}
+
+# Format an integer bytes-per-second rate to stdout with auto-selected
+# units (B/s, KiB/s, MiB/s, GiB/s). Truncates to integer at the chosen
+# unit — losing sub-unit precision is fine for plain mode (the TUI
+# will show one decimal at M2). Matches the design-spec §4 mockup
+# style ("↓ 2.4M/s") modulo the decimal.
+fn _snap_print_rate_bps(bps) {
+    if (bps < 1024) {
+        print_num(bps);
+        syscall(1, 1, " B/s", 4);
+        return 0;
+    }
+    if (bps < 1048576) {                # 1024 * 1024
+        print_num(bps / 1024);
+        syscall(1, 1, " KiB/s", 6);
+        return 0;
+    }
+    if (bps < 1073741824) {             # 1024 * 1024 * 1024
+        print_num(bps / 1048576);
+        syscall(1, 1, " MiB/s", 6);
+        return 0;
+    }
+    print_num(bps / 1073741824);
+    syscall(1, 1, " GiB/s", 6);
     return 0;
 }
 
@@ -95,6 +127,77 @@ fn snapshot_print() {
     syscall(1, 1, " MiB used / ", 12);
     print_num(mem_total_mib);
     syscall(1, 1, " MiB total\n", 11);
+
+    # Line 3: cpu + disk + net (delta-based) ---------------------------
+    # Sample 1
+    var sb1[8192];
+    var db1[8192];
+    var nb1[8192];
+    var s1n = proc_read("/proc/stat",      &sb1, 8192);
+    var d1n = proc_read("/proc/diskstats", &db1, 8192);
+    var n1n = proc_read("/proc/net/dev",   &nb1, 8192);
+    if (s1n < 0) { eprint("chakshu: cannot read /proc/stat\n", 32);      return EXIT_ERR; }
+    if (d1n < 0) { eprint("chakshu: cannot read /proc/diskstats\n", 37); return EXIT_ERR; }
+    if (n1n < 0) { eprint("chakshu: cannot read /proc/net/dev\n", 35);   return EXIT_ERR; }
+
+    var cpu_active1 = 0;
+    var cpu_total1  = 0;
+    var sec_r1 = 0;
+    var sec_w1 = 0;
+    var rx1 = 0;
+    var tx1 = 0;
+    proc_stat_cpu_agg (&sb1, &cpu_active1, &cpu_total1);
+    proc_diskstats_agg(&db1, d1n, &sec_r1, &sec_w1);
+    proc_netdev_agg   (&nb1, n1n, &rx1, &tx1);
+
+    sleep_ms(SNAP_SAMPLE_MS);
+
+    # Sample 2 (reuse the same buffers — sample 1's parsed ints are safe)
+    var s2n = proc_read("/proc/stat",      &sb1, 8192);
+    var d2n = proc_read("/proc/diskstats", &db1, 8192);
+    var n2n = proc_read("/proc/net/dev",   &nb1, 8192);
+    if (s2n < 0) { eprint("chakshu: cannot read /proc/stat (resample)\n", 42);      return EXIT_ERR; }
+    if (d2n < 0) { eprint("chakshu: cannot read /proc/diskstats (resample)\n", 47); return EXIT_ERR; }
+    if (n2n < 0) { eprint("chakshu: cannot read /proc/net/dev (resample)\n", 45);   return EXIT_ERR; }
+
+    var cpu_active2 = 0;
+    var cpu_total2  = 0;
+    var sec_r2 = 0;
+    var sec_w2 = 0;
+    var rx2 = 0;
+    var tx2 = 0;
+    proc_stat_cpu_agg (&sb1, &cpu_active2, &cpu_total2);
+    proc_diskstats_agg(&db1, d2n, &sec_r2, &sec_w2);
+    proc_netdev_agg   (&nb1, n2n, &rx2, &tx2);
+
+    # CPU% = 100 * active_delta / total_delta. Guard div-by-zero on the
+    # off-chance both samples capture the exact same tick (USER_HZ is
+    # typically 100, so a 100ms window yields ~10 ticks — non-zero in
+    # practice, but defensive).
+    var cpu_pct = 0;
+    var total_delta = cpu_total2 - cpu_total1;
+    if (total_delta > 0) {
+        cpu_pct = (cpu_active2 - cpu_active1) * 100 / total_delta;
+    }
+
+    # Sectors → bytes (×512), then bytes/sample-window → bytes/sec
+    # (×1000/SNAP_SAMPLE_MS). For the 100ms default, that's ×5120.
+    var disk_rd_bps = (sec_r2 - sec_r1) * 512 * 1000 / SNAP_SAMPLE_MS;
+    var disk_wr_bps = (sec_w2 - sec_w1) * 512 * 1000 / SNAP_SAMPLE_MS;
+    var net_rx_bps  = (rx2 - rx1) * 1000 / SNAP_SAMPLE_MS;
+    var net_tx_bps  = (tx2 - tx1) * 1000 / SNAP_SAMPLE_MS;
+
+    syscall(1, 1, "cpu:  ", 6);
+    print_num(cpu_pct);
+    syscall(1, 1, "%   disk: rd ", 13);
+    _snap_print_rate_bps(disk_rd_bps);
+    syscall(1, 1, " wr ", 4);
+    _snap_print_rate_bps(disk_wr_bps);
+    syscall(1, 1, "   net: rx ", 11);
+    _snap_print_rate_bps(net_rx_bps);
+    syscall(1, 1, " tx ", 4);
+    _snap_print_rate_bps(net_tx_bps);
+    syscall(1, 1, "\n", 1);
 
     return EXIT_OK;
 }

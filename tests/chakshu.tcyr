@@ -68,6 +68,51 @@ fn main() {
     store8(&hbuf + 0, 120); store8(&hbuf + 1, 0);
     assert_eq(proc_trim_trailing_nl(&hbuf, 1), 1, "no-newline length preserved");
 
+    # ----- M1 Slice B — delta-source parsers --------------------------
+
+    test_group("proc.cyr — /proc/stat aggregate cpu");
+    # Real cpu line: user=117395 nice=18 sys=32723 idle=6033958 iowait=945
+    # irq=10 softirq=1282 steal/guest/guest_nice=0
+    # idle = 6033958 + 945 = 6034903; total = 6186331; active = 151428
+    var stat_fix = "cpu  117395 18 32723 6033958 945 10 1282 0 0 0\ncpu0 ...\n";
+    var sa = 0; var st = 0;
+    assert_eq(proc_stat_cpu_agg(stat_fix, &sa, &st), 0, "parser returns 0 on cpu line");
+    assert_eq(st, 6186331, "cpu total = sum of 10 fields");
+    assert_eq(sa, 151428,  "cpu active = total - (idle + iowait)");
+    # Buffer that doesn't start with "cpu" → reject
+    var sa2 = 0; var st2 = 0;
+    assert_eq(proc_stat_cpu_agg("intr 1 2 3\n", &sa2, &st2), 1, "non-cpu prefix rejected");
+
+    test_group("proc.cyr — /proc/diskstats aggregation + exclusion");
+    # sda is included; loop0 / zram0 / md0 / dm-0 are excluded.
+    # Expected: sec_read = 1000 (sda only); sec_writ = 200 (sda only).
+    var disk_fix = "   8       0 sda 100 0 1000 5 50 0 200 3 0 7 8 0 0 0 0 0 0\n   7       0 loop0 1 0 9999 0 1 0 8888 0 0 0 0 0 0 0 0 0 0\n253       0 zram0 1 0 7777 0 1 0 6666 1 0 1 1 0 0 0 0 0 0\n   9       0 md0 1 0 5555 0 1 0 4444 0 0 0 0 0 0 0 0 0 0\n254       0 dm-0 1 0 3333 0 1 0 2222 0 0 0 0 0 0 0 0 0 0\n";
+    var dr = 0; var dw = 0;
+    proc_diskstats_agg(disk_fix, strlen(disk_fix), &dr, &dw);
+    assert_eq(dr, 1000, "sectors_read summed only over real devices");
+    assert_eq(dw, 200,  "sectors_written summed only over real devices");
+    # mdctl-style names that begin with 'md' but aren't mdN must NOT be excluded
+    var disk_fix2 = "   1       0 mdctl 1 0 42 0 1 0 7 0 0 0 0 0 0 0 0 0 0\n";
+    var dr2 = 0; var dw2 = 0;
+    proc_diskstats_agg(disk_fix2, strlen(disk_fix2), &dr2, &dw2);
+    assert_eq(dr2, 42, "mdctl (no digit after md) is included");
+    assert_eq(dw2, 7,  "mdctl write counted");
+
+    test_group("proc.cyr — /proc/net/dev aggregation + lo exclusion");
+    # 2 header lines, then lo (excluded) + eth0 (included).
+    # Expected: rx = 1000000; tx = 50000.
+    var net_fix = "Inter-|   Receive  ...\n face |bytes ...\n    lo:     264       3    0    0    0     0          0         0      264       3    0    0    0     0       0          0\n  eth0: 1000000     500    0    0    0     0          0         0    50000     200    0    0    0     0       0          0\n";
+    var nrx = 0; var ntx = 0;
+    proc_netdev_agg(net_fix, strlen(net_fix), &nrx, &ntx);
+    assert_eq(nrx, 1000000, "rx summed across non-lo interfaces");
+    assert_eq(ntx, 50000,   "tx summed across non-lo interfaces");
+    # Two interfaces, both non-lo: rx and tx accumulate
+    var net_fix2 = "Inter-|...\n face |...\n  eth0: 100 1 0 0 0 0 0 0 200 1 0 0 0 0 0 0\n wlan0: 300 2 0 0 0 0 0 0 400 2 0 0 0 0 0 0\n";
+    var nrx2 = 0; var ntx2 = 0;
+    proc_netdev_agg(net_fix2, strlen(net_fix2), &nrx2, &ntx2);
+    assert_eq(nrx2, 400, "two non-lo interfaces sum rx");
+    assert_eq(ntx2, 600, "two non-lo interfaces sum tx");
+
     return assert_summary();
 }
 

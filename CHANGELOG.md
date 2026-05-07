@@ -11,12 +11,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   L1 L5 L15` and `mem: <used> MiB used / <total> MiB total`. Reads
   `/proc/sys/kernel/hostname`, `/proc/uptime`, `/proc/loadavg`,
   `/proc/meminfo`. No terminal escapes — pipeable per design-spec §2.2.
+- **M1 Slice B — `-p` delta-source line.** Adds a third snapshot line
+  `cpu: NN%   disk: rd <rate> wr <rate>   net: rx <rate> tx <rate>`
+  computed from two samples 100ms apart (`chrono.sleep_ms`). Aggregates:
+  `/proc/stat` first cpu line (idle = idle + iowait), `/proc/diskstats`
+  summed sectors × 512 across non-loop/ram/zram/dm-/mdN devices,
+  `/proc/net/dev` summed bytes across non-loopback interfaces. Auto-unit
+  rate formatter (B/s → KiB/s → MiB/s → GiB/s).
 - New `src/proc.cyr` — /proc read + parse layer (`proc_read`,
   `proc_meminfo_field`, `proc_uptime_secs`, `proc_loadavg_prefix_len`,
-  `proc_trim_trailing_nl`). Stack-buffer based, no module globals.
+  `proc_trim_trailing_nl`, plus Slice B parsers
+  `proc_stat_cpu_agg` / `proc_diskstats_agg` / `proc_netdev_agg` and
+  shared `_proc_skip_ws` / `_proc_skip_line` / `_proc_next_uint` /
+  `_proc_word_start` / `_proc_skip_word` helpers). Stack-buffer based,
+  no module globals; out-pointers (`&local`) for multi-value returns.
 - New `src/snapshot.cyr` — `-p` orchestration / renderer.
-- 13 new parser unit tests against captured /proc fixtures
-  (23 assertions total, was 10).
+- Parser unit tests against captured /proc fixtures
+  (35 assertions total — was 10 at scaffold close).
 
 ### Fixed
 

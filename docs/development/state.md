@@ -1,6 +1,6 @@
 # chakshu — State
 
-> **Status**: Active | **Last Updated**: 2026-05-07 (M1 Slice A landed)
+> **Status**: Active | **Last Updated**: 2026-05-07 (M1 Slice B landed)
 >
 > Volatile state — version, toolchain pin, milestone progress, binary size.
 > Refreshed every release. Durable rules live in
@@ -16,12 +16,12 @@
 | Version | **0.1.0** |
 | Cyrius toolchain pin | `5.9.32` (cyrius.cyml `[package].cyrius`) |
 | Genesis cycle | v5.9.x — niyama-fold opener / catchup arc |
-| Active milestone | **M1 — Plain snapshot** (Slice A landed; B/C/D pending) |
+| Active milestone | **M1 — Plain snapshot** (Slices A+B landed; C/D pending) |
 | Next milestone | **M2 — Full TUI** |
 | Binary | `shu` (build/shu) — System Health Utility, per ADR 0001 |
-| Binary size (DCE) | 97 328 bytes (~95 KB) — was 85 KB at M0; +12 KB for proc/snapshot |
-| Lines of Cyrius | src/{main,snapshot,proc}.cyr (~250 LoC) |
-| Test count | 23 assertions across 7 groups (added proc.cyr parser tests) |
+| Binary size (DCE) | 128 536 bytes (~126 KB) — was 95 KB after Slice A; +31 KB for delta parsers + chrono |
+| Lines of Cyrius | src/{main,snapshot,proc}.cyr (~500 LoC) |
+| Test count | 35 assertions across 10 groups |
 
 ## Dependency Envelope
 
@@ -51,7 +51,7 @@ args chrono hashmap process tagged assert
 | M | Title | Status |
 |---|-------|--------|
 | M0 | Scaffold | **Gate cleared** — `cyrius deps`/`build`/`test` all green; `shu --version` / `--help` / `--watch` (placeholder) / unknown-flag paths exercised |
-| M1 | Plain snapshot | **In progress** — Slice A (host/uptime/load/mem) ✓; B (cpu/disk/net deltas), C (process walker), D (`--sort`/`--top` + perf gate) pending |
+| M1 | Plain snapshot | **In progress** — Slices A (host/uptime/load/mem) + B (cpu/disk/net 100ms-window deltas) ✓; C (process walker), D (`--sort`/`--top` + perf gate) pending |
 | M2 | Full TUI | Not started |
 | M3 | AI integration | Not started |
 | M4 | Polish + perf | Not started |

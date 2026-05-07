@@ -85,3 +85,232 @@ fn proc_trim_trailing_nl(buf, n) {
     store8(buf + n - 1, 0);
     return n - 1;
 }
+
+# ===================================================================
+# Slice B — delta-based parsers (/proc/stat, /proc/diskstats,
+# /proc/net/dev). Each helper takes a `cursor` pointer (address of an
+# i64 local in the caller) so successive helpers can chew through the
+# same buffer without redundant scans.
+# ===================================================================
+
+# Skip horizontal whitespace at *cursor (space, tab); leave newline /
+# null / digit alone. Updates *cursor in place.
+fn _proc_skip_ws(buf, cursor) {
+    var i = load64(cursor);
+    while (1 == 1) {
+        var c = load8(buf + i);
+        if (c != 32) { if (c != 9) { break; } }
+        i = i + 1;
+    }
+    store64(cursor, i);
+    return 0;
+}
+
+# Skip everything up to and including the next '\n', or until '\0'.
+# Used to advance past a record we've finished parsing.
+fn _proc_skip_line(buf, cursor) {
+    var i = load64(cursor);
+    while (1 == 1) {
+        var c = load8(buf + i);
+        if (c == 0) { break; }
+        if (c == 10) { i = i + 1; break; }
+        i = i + 1;
+    }
+    store64(cursor, i);
+    return 0;
+}
+
+# Skip whitespace then read an unsigned decimal integer at *cursor.
+# Returns the value (0 if no digits at the position). Advances *cursor
+# to one past the last digit. Stops on null, newline, or any non-digit.
+fn _proc_next_uint(buf, cursor) {
+    _proc_skip_ws(buf, cursor);
+    var i = load64(cursor);
+    var v = 0;
+    while (1 == 1) {
+        var c = load8(buf + i);
+        if (c < 48) { break; }
+        if (c > 57) { break; }
+        v = v * 10 + (c - 48);
+        i = i + 1;
+    }
+    store64(cursor, i);
+    return v;
+}
+
+# Skip whitespace, return the offset of the next non-whitespace byte
+# (the start of the next "word" — name, label, etc.). *cursor is left
+# at that offset; caller should follow with _proc_skip_word to consume.
+fn _proc_word_start(buf, cursor) {
+    _proc_skip_ws(buf, cursor);
+    return load64(cursor);
+}
+
+# Skip a "word" — non-whitespace bytes — at *cursor. Stops at any
+# whitespace, null, newline, or ':' (so it works for both diskstats
+# device names and netdev "iface:" labels — the colon stays under
+# the cursor for the caller to handle).
+fn _proc_skip_word(buf, cursor) {
+    var i = load64(cursor);
+    while (1 == 1) {
+        var c = load8(buf + i);
+        if (c == 0)  { break; }
+        if (c == 10) { break; }
+        if (c == 32) { break; }
+        if (c == 9)  { break; }
+        if (c == 58) { break; }   # ':' — netdev label terminator
+        i = i + 1;
+    }
+    store64(cursor, i);
+    return 0;
+}
+
+# Parse the aggregate "cpu " line from /proc/stat (the first line). The
+# 10 fields per `man 5 proc` are user, nice, system, idle, iowait, irq,
+# softirq, steal, guest, guest_nice. Idle = idle + iowait; Active =
+# Total - Idle. Caller saves Active+Total at sample 1, again at sample
+# 2, and computes pct = 100 * (active2-active1) / (total2-total1).
+#
+# Returns 0 on success, non-zero if the buffer doesn't begin with "cpu ".
+fn proc_stat_cpu_agg(buf, out_active, out_total) {
+    if (load8(buf + 0) != 99) { return 1; }   # 'c'
+    if (load8(buf + 1) != 112) { return 1; }  # 'p'
+    if (load8(buf + 2) != 117) { return 1; }  # 'u'
+    var cursor = 3;
+    var total = 0;
+    var idle = 0;
+    var f = 0;
+    while (f < 10) {
+        var v = _proc_next_uint(buf, &cursor);
+        total = total + v;
+        if (f == 3) { idle = idle + v; }
+        if (f == 4) { idle = idle + v; }
+        f = f + 1;
+    }
+    store64(out_active, total - idle);
+    store64(out_total, total);
+    return 0;
+}
+
+# Should this diskstats device line be excluded from the aggregate?
+# Excludes synthetic / virtual block devices that would otherwise
+# inflate the I/O total: loop, ram, zram, dm-, mdN. Partitions still
+# double-count their parent disk in slice B's sum (qualitative I/O
+# view); a precise filter using sysfs lives at M2.
+fn _proc_diskstats_excluded(buf, name_off) {
+    if (memeq(buf + name_off, "loop", 4) == 1) { return 1; }
+    if (memeq(buf + name_off, "ram",  3) == 1) { return 1; }
+    if (memeq(buf + name_off, "zram", 4) == 1) { return 1; }
+    if (memeq(buf + name_off, "dm-",  3) == 1) { return 1; }
+    if (memeq(buf + name_off, "md",   2) == 1) {
+        var c = load8(buf + name_off + 2);
+        if (c >= 48) { if (c <= 57) { return 1; } }
+    }
+    return 0;
+}
+
+# Sum sectors_read and sectors_written across all "real" block devices
+# in a /proc/diskstats buffer of length n. Sector size is 512 bytes
+# (Linux convention regardless of physical sector size). Caller diffs
+# two samples and multiplies by 512 for bytes.
+#
+# Per kernel Documentation/admin-guide/iostats.rst, the per-line layout
+# after the leading <major> <minor> <name> header is:
+#   [0] reads completed   [1] reads merged       [2] sectors read
+#   [3] read time (ms)    [4] writes completed   [5] writes merged
+#   [6] sectors written   [7] write time (ms)    [8] I/Os in flight
+#   [9] time in queue     [10] weighted time     [11+] discard / flush
+fn proc_diskstats_agg(buf, n, out_sec_read, out_sec_writ) {
+    var sec_read_total = 0;
+    var sec_writ_total = 0;
+    var cursor = 0;
+    while (cursor < n) {
+        # major, minor — discard
+        _proc_next_uint(buf, &cursor);
+        _proc_next_uint(buf, &cursor);
+        # device name
+        var name_off = _proc_word_start(buf, &cursor);
+        if (cursor >= n) { return 0; }
+        _proc_skip_word(buf, &cursor);
+        # 7 numeric fields up to and including sectors_written
+        _proc_next_uint(buf, &cursor);                       # reads
+        _proc_next_uint(buf, &cursor);                       # read_merges
+        var sec_r = _proc_next_uint(buf, &cursor);           # sectors_read
+        _proc_next_uint(buf, &cursor);                       # read_time
+        _proc_next_uint(buf, &cursor);                       # writes
+        _proc_next_uint(buf, &cursor);                       # write_merges
+        var sec_w = _proc_next_uint(buf, &cursor);           # sectors_written
+        # Skip the rest of the line
+        _proc_skip_line(buf, &cursor);
+        if (_proc_diskstats_excluded(buf, name_off) == 0) {
+            sec_read_total = sec_read_total + sec_r;
+            sec_writ_total = sec_writ_total + sec_w;
+        }
+    }
+    store64(out_sec_read, sec_read_total);
+    store64(out_sec_writ, sec_writ_total);
+    return 0;
+}
+
+# Sum rx_bytes and tx_bytes across non-loopback interfaces in a
+# /proc/net/dev buffer of length n. The first two lines are headers
+# ("Inter-|..." and " face |..."); they're skipped by line count, not
+# by content match, since the heading text varies by kernel version.
+#
+# Per-interface line shape (after leading whitespace):
+#   <iface>: <16 numeric fields>
+# Fields: rx_bytes rx_pkts rx_errs rx_drop rx_fifo rx_frame rx_compressed
+#         rx_multicast tx_bytes tx_pkts tx_errs tx_drop tx_fifo tx_colls
+#         tx_carrier tx_compressed
+fn proc_netdev_agg(buf, n, out_rx, out_tx) {
+    var rx_total = 0;
+    var tx_total = 0;
+    var cursor = 0;
+
+    # Skip the two header lines.
+    _proc_skip_line(buf, &cursor);
+    _proc_skip_line(buf, &cursor);
+
+    while (cursor < n) {
+        _proc_skip_ws(buf, &cursor);
+        if (cursor >= n) { break; }
+        if (load8(buf + cursor) == 0) { break; }
+        var name_off = cursor;
+        _proc_skip_word(buf, &cursor);
+        var name_len = cursor - name_off;
+        # Expect ':' here
+        if (load8(buf + cursor) != 58) {
+            _proc_skip_line(buf, &cursor);
+            continue;
+        }
+        cursor = cursor + 1;   # past ':'
+        # 16 numeric fields; we keep [0]=rx_bytes and [8]=tx_bytes.
+        var rx_bytes = 0;
+        var tx_bytes = 0;
+        var f = 0;
+        while (f < 16) {
+            var v = _proc_next_uint(buf, &cursor);
+            if (f == 0) { rx_bytes = v; }
+            if (f == 8) { tx_bytes = v; }
+            f = f + 1;
+        }
+        _proc_skip_line(buf, &cursor);
+        # Exclude loopback (name == "lo"). Loopback traffic isn't
+        # network traffic in the sense the user cares about for `-p`.
+        var is_lo = 0;
+        if (name_len == 2) {
+            if (load8(buf + name_off) == 108) {       # 'l'
+                if (load8(buf + name_off + 1) == 111) { # 'o'
+                    is_lo = 1;
+                }
+            }
+        }
+        if (is_lo == 0) {
+            rx_total = rx_total + rx_bytes;
+            tx_total = tx_total + tx_bytes;
+        }
+    }
+    store64(out_rx, rx_total);
+    store64(out_tx, tx_total);
+    return 0;
+}
