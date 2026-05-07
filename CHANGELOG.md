@@ -4,6 +4,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **M1 Slice A — `-p` plain snapshot (single-read fields).** `shu -p` now
+  prints a two-line snapshot to stdout: `host: <name>  up: Nd HH:MM  load:
+  L1 L5 L15` and `mem: <used> MiB used / <total> MiB total`. Reads
+  `/proc/sys/kernel/hostname`, `/proc/uptime`, `/proc/loadavg`,
+  `/proc/meminfo`. No terminal escapes — pipeable per design-spec §2.2.
+- New `src/proc.cyr` — /proc read + parse layer (`proc_read`,
+  `proc_meminfo_field`, `proc_uptime_secs`, `proc_loadavg_prefix_len`,
+  `proc_trim_trailing_nl`). Stack-buffer based, no module globals.
+- New `src/snapshot.cyr` — `-p` orchestration / renderer.
+- 13 new parser unit tests against captured /proc fixtures
+  (23 assertions total, was 10).
+
 ### Fixed
 
 - `cyrius.cyml` declared two stdlib deps that don't exist in the toolchain:

@@ -1,0 +1,100 @@
+# snapshot.cyr — plain-mode (`-p`) snapshot orchestration.
+#
+# Per design-spec §2.2: "Plain mode is sacred. -p produces a deterministic
+# single-frame text dump suitable for piping into other tools." That means
+# no terminal escapes, no color (unless --color=always — M2+), no tabs.
+# Just printable ASCII columns terminated by \n.
+#
+# Slice A renders the four single-read fields on two lines:
+#   host: <hostname>  up: <Nd HH:MM>  load: <L1 L5 L15>
+#   mem:  <used> MiB used / <total> MiB total
+#
+# Slice B will append a CPU+disk+net resource line; Slice C will append
+# the top-N process table. The on-screen order matches design-spec §4.
+
+# Print n with a leading zero if n < 10. Used for HH and MM in the
+# uptime "Nd HH:MM" format. Negative n is undefined (uptime never is).
+fn _snap_print_pad2(n) {
+    if (n < 10) { syscall(1, 1, "0", 1); }
+    print_num(n);
+    return 0;
+}
+
+# Print uptime in "Nd HH:MM" form. N is unbounded (a server up for
+# 400 days gets "400d HH:MM", which is the right call — truncating
+# would lie about the box's age).
+fn snapshot_print_uptime(secs) {
+    var days = secs / 86400;
+    var rem  = secs - days * 86400;
+    var hrs  = rem / 3600;
+    var mins = (rem - hrs * 3600) / 60;
+    print_num(days);
+    syscall(1, 1, "d ", 2);
+    _snap_print_pad2(hrs);
+    syscall(1, 1, ":", 1);
+    _snap_print_pad2(mins);
+    return 0;
+}
+
+# Render the single-frame snapshot to stdout. Returns EXIT_OK on success,
+# EXIT_ERR if any /proc read failed (shouldn't happen on Linux — these
+# are kernel-synthesised files — but a hardened ENOENT path is one
+# eprint away and surfaces real bugs early).
+fn snapshot_print() {
+    var buf[8192];
+
+    # Line 1: host + uptime + loadavg ----------------------------------
+    syscall(1, 1, "host: ", 6);
+
+    var hn_n = proc_read("/proc/sys/kernel/hostname", &buf, 8192);
+    if (hn_n < 0) {
+        eprint("chakshu: cannot read /proc/sys/kernel/hostname\n", 47);
+        return EXIT_ERR;
+    }
+    hn_n = proc_trim_trailing_nl(&buf, hn_n);
+    syscall(1, 1, &buf, hn_n);
+
+    syscall(1, 1, "  up: ", 6);
+    var up_n = proc_read("/proc/uptime", &buf, 8192);
+    if (up_n < 0) {
+        eprint("chakshu: cannot read /proc/uptime\n", 34);
+        return EXIT_ERR;
+    }
+    snapshot_print_uptime(proc_uptime_secs(&buf));
+
+    syscall(1, 1, "  load: ", 8);
+    var la_n = proc_read("/proc/loadavg", &buf, 8192);
+    if (la_n < 0) {
+        eprint("chakshu: cannot read /proc/loadavg\n", 35);
+        return EXIT_ERR;
+    }
+    var la_prefix = proc_loadavg_prefix_len(&buf, la_n);
+    syscall(1, 1, &buf, la_prefix);
+    syscall(1, 1, "\n", 1);
+
+    # Line 2: memory ---------------------------------------------------
+    var mi_n = proc_read("/proc/meminfo", &buf, 8192);
+    if (mi_n < 0) {
+        eprint("chakshu: cannot read /proc/meminfo\n", 35);
+        return EXIT_ERR;
+    }
+    var mem_total_kb = proc_meminfo_field(&buf, "MemTotal:");
+    var mem_avail_kb = proc_meminfo_field(&buf, "MemAvailable:");
+    # On kernels old enough to predate MemAvailable (pre-3.14), the
+    # field is absent → 0. Fall back to MemFree, which is a less honest
+    # number but better than reporting 100% used. AGNOS tracks current
+    # kernels so this is belt-and-braces.
+    if (mem_avail_kb == 0) {
+        mem_avail_kb = proc_meminfo_field(&buf, "MemFree:");
+    }
+    var mem_used_mib  = (mem_total_kb - mem_avail_kb) / 1024;
+    var mem_total_mib = mem_total_kb / 1024;
+
+    syscall(1, 1, "mem:  ", 6);
+    print_num(mem_used_mib);
+    syscall(1, 1, " MiB used / ", 12);
+    print_num(mem_total_mib);
+    syscall(1, 1, " MiB total\n", 11);
+
+    return EXIT_OK;
+}

@@ -1,6 +1,12 @@
 # chakshu test suite
 # Stdlib auto-included via cyrius.cyml
 
+# Pull in the M1 parsers under test. Including main.cyr would also pull
+# in main()/syscall(SYS_EXIT) at top-level, so we include the parser
+# module directly. The render orchestration in snapshot.cyr is exercised
+# by the integration smoke (build/shu -p) rather than asserted here.
+include "src/proc.cyr"
+
 fn main() {
     alloc_init();
 
@@ -23,6 +29,44 @@ fn main() {
     var v = "chakshu 0.1.0";
     assert(strlen(v) > 8, "version string is longer than 8 chars");
     assert_eq(memeq(v, "chakshu ", 8), 1, "version string starts with 'chakshu '");
+
+    # ----- M1 Slice A — /proc parsers ---------------------------------
+    # Fixtures are real /proc shapes captured from a Linux box; null
+    # terminators come for free with cstring literals so strstr/atoi
+    # in the parsers have a valid buffer.
+
+    test_group("proc.cyr — meminfo field extraction");
+    var mi = "MemTotal:       62662196 kB\nMemFree:        58880840 kB\nMemAvailable:   60482036 kB\nBuffers:            2664 kB\n";
+    assert_eq(proc_meminfo_field(mi, "MemTotal:"),     62662196, "MemTotal parsed");
+    assert_eq(proc_meminfo_field(mi, "MemAvailable:"), 60482036, "MemAvailable parsed");
+    assert_eq(proc_meminfo_field(mi, "MemFree:"),      58880840, "MemFree parsed");
+    assert_eq(proc_meminfo_field(mi, "Buffers:"),          2664, "Buffers parsed (single-digit-leading)");
+    assert_eq(proc_meminfo_field(mi, "SwapTotal:"),           0, "missing key returns 0 sentinel");
+
+    test_group("proc.cyr — uptime");
+    assert_eq(proc_uptime_secs("3413.71 53493.88\n"), 3413, "fractional seconds truncated");
+    assert_eq(proc_uptime_secs("0.05 0.10\n"),           0, "sub-second uptime → 0");
+    assert_eq(proc_uptime_secs("1209600.00 0.00\n"), 1209600, "14d uptime");
+
+    test_group("proc.cyr — loadavg prefix length");
+    var la = "0.31 0.42 0.36 1/383 9272\n";
+    # "0.31 0.42 0.36" — 3rd space is at offset 14
+    assert_eq(proc_loadavg_prefix_len(la, strlen(la)), 14, "3rd-space offset");
+    # Truncated buffer with only one space → returns full length (safe-print fallback)
+    var la2 = "0.00 ";
+    assert_eq(proc_loadavg_prefix_len(la2, strlen(la2)), 5, "fallback to full length");
+
+    test_group("proc.cyr — trailing-newline trim");
+    var hbuf[16];
+    # Lay down "host\n" then trim
+    store8(&hbuf + 0, 104); store8(&hbuf + 1, 111);
+    store8(&hbuf + 2, 115); store8(&hbuf + 3, 116);
+    store8(&hbuf + 4, 10);
+    assert_eq(proc_trim_trailing_nl(&hbuf, 5), 4, "newline trimmed → length 4");
+    assert_eq(load8(&hbuf + 4), 0,                 "newline replaced with null");
+    # Buffer without trailing newline → unchanged
+    store8(&hbuf + 0, 120); store8(&hbuf + 1, 0);
+    assert_eq(proc_trim_trailing_nl(&hbuf, 1), 1, "no-newline length preserved");
 
     return assert_summary();
 }

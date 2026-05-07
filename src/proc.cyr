@@ -1,0 +1,87 @@
+# proc.cyr — /proc parsers (M1 Slice A surface)
+#
+# Per design-spec §3, all data comes from the Linux /proc and /sys
+# interfaces — no libc, no procps, no FFI. This module owns the read
+# + parse layer; src/snapshot.cyr owns the rendering / orchestration.
+#
+# All parsers operate on a caller-provided buffer (see snapshot.cyr).
+# Single shared buffer is fine because the snapshot path is sequential:
+# read → parse → print → reuse for next file. No concurrent borrows.
+#
+# Slice A (this file) covers the four single-read sources:
+#   /proc/sys/kernel/hostname  — string
+#   /proc/uptime               — "<secs>.<frac> <idle>.<frac>"
+#   /proc/loadavg              — "L1 L5 L15 R/T LASTPID"
+#   /proc/meminfo              — "Key:  <kB> kB" lines
+#
+# Slice B will add /proc/stat, /proc/diskstats, /proc/net/dev (delta-based).
+# Slice C will add the /proc/[pid]/{stat,status,cmdline} walker.
+# When Slice B/C land we may promote to src/proc/{cpu,disk,net,pid}.cyr —
+# the CLAUDE.md architecture stub already pre-supposes a proc/ subdir.
+
+# Read a /proc file fully into `buf` (must be at least maxlen bytes), then
+# null-terminate. Returns bytes read, or the negative file_open errno on
+# error. The null terminator goes at buf[n] so callers can hand the buffer
+# to strstr / atoi without re-doing length math.
+fn proc_read(path, buf, maxlen) {
+    var n = file_read_all(path, buf, maxlen - 1);
+    if (n < 0) { return n; }
+    store8(buf + n, 0);
+    return n;
+}
+
+# Find a "Key:" line in a /proc/meminfo-style buffer and return its
+# integer value (in kB for meminfo). The scan keys on "<key>" + skip
+# whitespace + atoi. Returns 0 if the key is not present — meminfo
+# values are never legitimately zero for any field chakshu reads
+# (MemTotal, MemAvailable, SwapTotal, etc.), so 0 is an unambiguous
+# "not found" sentinel without needing an out-param error channel.
+fn proc_meminfo_field(buf, key) {
+    var off = strstr(buf, key);
+    if (off < 0) { return 0; }
+    var i = off + strlen(key);
+    # Skip spaces and tabs after the colon.
+    while (1 == 1) {
+        var c = load8(buf + i);
+        if (c != 32) { if (c != 9) { break; } }
+        i = i + 1;
+    }
+    return atoi(buf + i);
+}
+
+# Parse the integer second-count from /proc/uptime, which is shaped
+# "<secs>.<frac> <idle>.<frac>\n". atoi stops at the first '.', giving
+# us whole-second uptime — the fractional part is below the resolution
+# of the "Nd HH:MM" display anyway.
+fn proc_uptime_secs(buf) {
+    return atoi(buf);
+}
+
+# Return the byte offset of the 3rd space in a /proc/loadavg buffer of
+# length n. The first three space-separated fields are L1/L5/L15; the
+# rest is "R/T LASTPID\n" which we don't show in plain mode. Returns n
+# (the full length) if fewer than 3 spaces are present, so callers can
+# safely print buf..buf+result without bounds-checking again.
+fn proc_loadavg_prefix_len(buf, n) {
+    var i: i64 = 0;
+    var spaces: i64 = 0;
+    while (i < n) {
+        if (load8(buf + i) == 32) {
+            spaces = spaces + 1;
+            if (spaces == 3) { return i; }
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+# Trim a single trailing '\n' from a length-n buffer in place by
+# replacing it with a null terminator and returning the new length.
+# /proc files almost universally end in \n; the hostname read in
+# particular benefits from this so println() doesn't double-newline.
+fn proc_trim_trailing_nl(buf, n) {
+    if (n <= 0) { return n; }
+    if (load8(buf + n - 1) != 10) { return n; }
+    store8(buf + n - 1, 0);
+    return n - 1;
+}

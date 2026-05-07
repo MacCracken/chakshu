@@ -2,9 +2,13 @@
 # The eye — AI-augmented system monitor for AGNOS / Cyrius.
 # Stdlib auto-included via cyrius.cyml.
 #
-# v0.1.0 — scaffold. Only --help and --version work today. The
-# milestone arc to a useful monitor lives in
-# docs/development/roadmap.md. Don't add features beyond M0 here.
+# Project modules — split per design-spec §1 (proc reads / snapshot
+# rendering / TUI / AI all separate concerns). The CLAUDE.md
+# architecture stub pre-supposes a proc/ subdir; we'll promote
+# proc.cyr → proc/{cpu,disk,net,pid}.cyr when M1 Slice B/C land
+# and the file gets unwieldy. Flat is fine while the parsers fit.
+include "src/proc.cyr"
+include "src/snapshot.cyr"
 
 # Keep CHAKSHU_VERSION in sync with the VERSION file.
 # A future CI check will enforce equality; for now, manual.
@@ -25,13 +29,13 @@ fn print_help() {
     println("");
     println("Usage:");
     println("  shu [OPTIONS]            Full TUI (M2+)");
-    println("  shu -p                   Plain snapshot (M1+)");
+    println("  shu -p                   Plain snapshot (host/uptime/load/mem; cpu+procs in M1 B/C)");
     println("  shu --pid <PID>          Focus a single process (M2+)");
     println("  shu --explain <PID>      AI explanation (M3+)");
     println("  shu --watch              Anomaly stream (M3+)");
     println("");
     println("Options:");
-    println("  -p                        Plain snapshot mode");
+    println("  -p                        Plain snapshot mode (single frame to stdout)");
     println("  --rate <HZ>               Refresh rate (0.2-10, default 1)");
     println("  --color <when>            auto | always | never (default auto)");
     println("  --pid <PID>               Focus a single process");
@@ -88,9 +92,13 @@ fn main() {
         if (streq(a, "-V") == 1)        { return print_version(); }
         if (streq(a, "--version") == 1) { return print_version(); }
 
+        # M1 Slice A — `-p` plain snapshot. Top-N process table, --sort,
+        # and --top come in Slices C/D; for now `-p` ignores any trailing
+        # args so callers can prototype against the M1 surface today.
+        if (streq(a, "-p") == 1)          { return snapshot_print(); }
+
         # Recognized flags that are not yet implemented — emit a
         # clear placeholder rather than a generic "unknown flag".
-        if (streq(a, "-p") == 1)          { return print_unimplemented("-p"); }
         if (streq(a, "--pid") == 1)       { return print_unimplemented("--pid"); }
         if (streq(a, "--explain") == 1)   { return print_unimplemented("--explain"); }
         if (streq(a, "--watch") == 1)     { return print_unimplemented("--watch"); }
