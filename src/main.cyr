@@ -13,7 +13,7 @@ include "src/snapshot.cyr"
 
 # Keep CHAKSHU_VERSION in sync with the VERSION file.
 # A future CI check will enforce equality; for now, manual.
-var CHAKSHU_VERSION = "chakshu 0.1.0";
+var CHAKSHU_VERSION = "chakshu 0.2.0";
 
 # Exit codes per design-spec §9
 var EXIT_OK    = 0;
@@ -37,12 +37,14 @@ fn print_help() {
     println("");
     println("Options:");
     println("  -p                        Plain snapshot mode (single frame to stdout)");
-    println("  --rate <HZ>               Refresh rate (0.2-10, default 1)");
-    println("  --color <when>            auto | always | never (default auto)");
-    println("  --pid <PID>               Focus a single process");
-    println("  --explain <PID>           Print AI explanation and exit");
-    println("  --watch                   Anomaly stream mode");
-    println("  --with-logs               Allow AI prompts to include sakshi log context");
+    println("  --sort cpu|mem|pid|name   Process-table sort key (default cpu)");
+    println("  --top N                   Process-table row count (default 10)");
+    println("  --rate <HZ>               Refresh rate (0.2-10, default 1) [M2+]");
+    println("  --color <when>            auto | always | never (default auto) [M2+]");
+    println("  --pid <PID>               Focus a single process [M2+]");
+    println("  --explain <PID>           Print AI explanation and exit [M3+]");
+    println("  --watch                   Anomaly stream mode [M3+]");
+    println("  --with-logs               Allow AI prompts to include sakshi log context [M3+]");
     println("  -h, --help                Show this help");
     println("  -V, --version             Show version");
     println("");
@@ -52,23 +54,32 @@ fn print_help() {
 }
 
 # Per design-spec §9: errors go to stderr as `chakshu: <reason>`.
-# Helper: write a c-string + newline to stderr without manual byte counting
-# (the em dash in the unimplemented message is 3 UTF-8 bytes, easy to miscount).
-fn eprintln(s) {
+# Helpers: write a c-string (with/without newline) to stderr without
+# manual byte counting. The em dash in the unimplemented message is
+# 3 UTF-8 bytes; manual counts on multi-fragment messages have already
+# bitten us twice (off-by-one on the unimplemented dash; off-by-one
+# on the --sort error literal yielding a stray leading space). Use
+# these for any new stderr writes.
+fn eprint_cstr(s) {
     eprint(s, strlen(s));
+    return 0;
+}
+
+fn eprintln(s) {
+    eprint_cstr(s);
     eprint("\n", 1);
     return 0;
 }
 
 fn print_unimplemented(flag) {
-    eprint("chakshu: ", 9);
-    eprint(flag, strlen(flag));
+    eprint_cstr("chakshu: ");
+    eprint_cstr(flag);
     eprintln(" not implemented yet — see docs/development/roadmap.md");
     return EXIT_ERR;
 }
 
 fn print_unknown_flag(flag) {
-    eprint("chakshu: unknown flag: ", 23);
+    eprint_cstr("chakshu: unknown flag: ");
     eprintln(flag);
     eprintln("Try 'shu --help' for usage.");
     return EXIT_USAGE;
@@ -84,19 +95,63 @@ fn main() {
         return print_help();
     }
 
+    # Accumulate flags first, then dispatch at the bottom. Mode flags
+    # (-h, -V, -p) are mutually exclusive; the last one in the args
+    # list wins (matches the convention of most CLIs).
+    var mode_help    = 0;
+    var mode_version = 0;
+    var mode_p       = 0;
+
+    var sort_key = SORT_CPU;
+    var top_n    = PROC_DEFAULT_TOPN;
+
     var i = 1;
     while (i < n) {
         var a = argv(i);
 
-        if (streq(a, "-h") == 1)        { return print_help(); }
-        if (streq(a, "--help") == 1)    { return print_help(); }
-        if (streq(a, "-V") == 1)        { return print_version(); }
-        if (streq(a, "--version") == 1) { return print_version(); }
+        if (streq(a, "-h") == 1)        { mode_help = 1;    i = i + 1; continue; }
+        if (streq(a, "--help") == 1)    { mode_help = 1;    i = i + 1; continue; }
+        if (streq(a, "-V") == 1)        { mode_version = 1; i = i + 1; continue; }
+        if (streq(a, "--version") == 1) { mode_version = 1; i = i + 1; continue; }
+        if (streq(a, "-p") == 1)        { mode_p = 1;       i = i + 1; continue; }
 
-        # M1 Slice A — `-p` plain snapshot. Top-N process table, --sort,
-        # and --top come in Slices C/D; for now `-p` ignores any trailing
-        # args so callers can prototype against the M1 surface today.
-        if (streq(a, "-p") == 1)          { return snapshot_print(); }
+        # --sort cpu|mem|pid|name (default cpu).
+        if (streq(a, "--sort") == 1) {
+            if (i + 1 >= n) {
+                eprintln("chakshu: --sort requires a value (cpu|mem|pid|name)");
+                return EXIT_USAGE;
+            }
+            var v = argv(i + 1);
+            if      (streq(v, "cpu")  == 1) { sort_key = SORT_CPU; }
+            elif    (streq(v, "mem")  == 1) { sort_key = SORT_MEM; }
+            elif    (streq(v, "pid")  == 1) { sort_key = SORT_PID; }
+            elif    (streq(v, "name") == 1) { sort_key = SORT_NAME; }
+            else {
+                eprint_cstr("chakshu: --sort: unknown key '");
+                eprint_cstr(v);
+                eprintln("' (want cpu|mem|pid|name)");
+                return EXIT_USAGE;
+            }
+            i = i + 2;
+            continue;
+        }
+
+        # --top N (default 10). Negative or zero is rejected — those
+        # would show no rows and waste the parse work.
+        if (streq(a, "--top") == 1) {
+            if (i + 1 >= n) {
+                eprintln("chakshu: --top requires N (positive integer)");
+                return EXIT_USAGE;
+            }
+            var nv = atoi(argv(i + 1));
+            if (nv < 1) {
+                eprintln("chakshu: --top: N must be >= 1");
+                return EXIT_USAGE;
+            }
+            top_n = nv;
+            i = i + 2;
+            continue;
+        }
 
         # Recognized flags that are not yet implemented — emit a
         # clear placeholder rather than a generic "unknown flag".
@@ -110,7 +165,13 @@ fn main() {
         return print_unknown_flag(a);
     }
 
-    return EXIT_OK;
+    # Dispatch. Mode precedence: help > version > -p > default-help.
+    if (mode_help    == 1) { return print_help(); }
+    if (mode_version == 1) { return print_version(); }
+    if (mode_p       == 1) { return snapshot_print(sort_key, top_n); }
+
+    # No mode flag — print help. M2+ will launch the TUI here.
+    return print_help();
 }
 
 var r = main();

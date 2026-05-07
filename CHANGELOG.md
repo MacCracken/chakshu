@@ -4,74 +4,97 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.2.0] — 2026-05-07 — M1 close
+
+The plain-snapshot milestone. `shu -p` is now a complete single-frame
+system view — header + memory + cpu/disk/net rates + top-N process
+table — pipeable, deterministic, sub-30 ms work-budget on the dev box.
+Replaces `htop -d 1 -t -n 1` for the "what's the box doing right now?"
+use case from a script. Interactive TUI is the M2 work.
+
+Output shape (default `shu -p`):
+
+```
+host: archaemenid  up: 0d 01:33  load: 1.15 0.74 0.64
+mem:  2994 MiB used / 61193 MiB total
+cpu:  4%   disk: rd 0 B/s wr 0 B/s   net: rx 22 KiB/s tx 21 KiB/s
+   PID S  CPU%  MEM% CMD
+  3037 S    29     0 claude --dangerously-skip-permissions
+  ...
+```
+
 ### Added
 
-- **M1 Slice A — `-p` plain snapshot (single-read fields).** `shu -p` now
-  prints a two-line snapshot to stdout: `host: <name>  up: Nd HH:MM  load:
-  L1 L5 L15` and `mem: <used> MiB used / <total> MiB total`. Reads
+- **Slice A — single-read fields.** Lines 1–2 of `-p`. Reads
   `/proc/sys/kernel/hostname`, `/proc/uptime`, `/proc/loadavg`,
-  `/proc/meminfo`. No terminal escapes — pipeable per design-spec §2.2.
-- **M1 Slice C — `-p` process table.** Appends a top-10 process table
-  sorted by CPU% descending. Walks `/proc/<pid>/stat` twice (paired
-  with the slice B 100ms window) and computes per-process CPU% in the
-  htop convention (per-core × 100 max, so a thread pegging one core
-  reads 100% regardless of how many cores are idle). Uses `chrono`'s
-  sleep window already taken for slice B — no additional latency.
-  Columns: `PID S CPU% MEM% CMD` where MEM% = rss_pages × page / total
-  and CMD is the kernel TASK_COMM_LEN-capped name (cmdline rendering
-  for long-form names lands in slice D).
-- New `src/processes.cyr` — walker, sampling orchestration, insertion
-  sort by cpu_pct, top-N renderer. Stores per-process records in a
-  module-global 48 KB heap block (1024 × 48 bytes). Uses `map_u64` to
-  lookup sample-1 ticks from sample-2 by pid.
-- `proc.cyr` adds `proc_pid_stat_parse` (handles comm field with
-  embedded spaces/parens via "find LAST `)`" trick), `proc_stat_ncores`
-  (count cpuN lines), `proc_is_pid_name` (numeric-only validator),
-  `proc_pid_path` ("/proc/<pid>/<suffix>" builder).
-- **Bug fix:** `_proc_next_uint` previously stalled on `-1` (the stat
-  line's `tpgid` field for processes without a controlling tty),
-  silently returning 0 for every subsequent field. Now consumes a
-  leading `-` so signed fields can be skipped past.
+  `/proc/meminfo`. Uptime formatted `Nd HH:MM`; mem in MiB used / total.
+- **Slice B — delta-source line.** Line 3 of `-p`. Two samples 100 ms
+  apart (`chrono.sleep_ms`); aggregates `/proc/stat` first cpu line
+  (idle = idle + iowait), `/proc/diskstats` summed sectors × 512 across
+  non-loop/ram/zram/dm-/mdN devices, `/proc/net/dev` summed bytes
+  across non-loopback interfaces. Auto-unit rate formatter
+  (B/s → KiB/s → MiB/s → GiB/s).
+- **Slice C — process table.** Walks `/proc/<pid>/stat` twice (paired
+  with the slice B 100 ms window — no extra latency). Per-process CPU%
+  in the htop convention (per-core × 100 max, so a thread pegging one
+  core reads 100 % regardless of how many cores are idle). Columns
+  `PID S CPU% MEM% CMD`; MEM% = rss_pages × page-size / mem_total.
+  `map_u64` for pid → ticks lookup across samples; insertion sort
+  on the records array.
+- **Slice D — `--sort` / `--top` / cmdline / M1 close.**
+  - `--sort cpu|mem|pid|name` (default cpu). CPU/MEM descending,
+    PID/NAME ascending. Pluggable comparator so M2 can grow the key
+    set without touching the walker.
+  - `--top N` (default 10). Negative or zero rejected with EXIT_USAGE.
+  - CMD column now reads `/proc/<pid>/cmdline` (null separators →
+    spaces) for the displayed top-N rows only. Kernel threads (empty
+    cmdline) fall back to `[<comm>]` per htop convention. Caps reads
+    at N per snapshot, not one per pid.
+  - Mode-flag accumulation refactor in `main.cyr` so `--sort mem -p`
+    works (CLI parsing collects flags, then dispatches).
+  - `eprint_cstr` helper — strlen-based stderr writes, no manual
+    byte counts.
 
-- **M1 Slice B — `-p` delta-source line.** Adds a third snapshot line
-  `cpu: NN%   disk: rd <rate> wr <rate>   net: rx <rate> tx <rate>`
-  computed from two samples 100ms apart (`chrono.sleep_ms`). Aggregates:
-  `/proc/stat` first cpu line (idle = idle + iowait), `/proc/diskstats`
-  summed sectors × 512 across non-loop/ram/zram/dm-/mdN devices,
-  `/proc/net/dev` summed bytes across non-loopback interfaces. Auto-unit
-  rate formatter (B/s → KiB/s → MiB/s → GiB/s).
-- New `src/proc.cyr` — /proc read + parse layer (`proc_read`,
-  `proc_meminfo_field`, `proc_uptime_secs`, `proc_loadavg_prefix_len`,
-  `proc_trim_trailing_nl`, plus Slice B parsers
-  `proc_stat_cpu_agg` / `proc_diskstats_agg` / `proc_netdev_agg` and
-  shared `_proc_skip_ws` / `_proc_skip_line` / `_proc_next_uint` /
-  `_proc_word_start` / `_proc_skip_word` helpers). Stack-buffer based,
-  no module globals; out-pointers (`&local`) for multi-value returns.
-- New `src/snapshot.cyr` — `-p` orchestration / renderer.
-- Parser unit tests against captured /proc fixtures
-  (35 assertions total — was 10 at scaffold close).
+### Module layout
+
+- `src/main.cyr` — CLI parse + mode dispatch.
+- `src/proc.cyr` — `/proc` read + parse layer (single-read fields,
+  delta-source aggregates, `/proc/<pid>/stat` parser, helpers).
+- `src/processes.cyr` — pid walker, sample-1/sample-2 orchestration,
+  sort, top-N renderer with cmdline reads.
+- `src/snapshot.cyr` — `-p` mode: assembles the three header lines
+  and calls processes_render for the table.
 
 ### Fixed
 
-- `cyrius.cyml` declared two stdlib deps that don't exist in the toolchain:
-  `time` (the lib is named `chrono`) and `termios` (no equivalent provided
-  by cyrius today). `cyrius deps` now resolves cleanly.
-- `src/main.cyr` was wired against an imaginary stdlib API
-  (`args_count` / `args_get` / `str_eq` / 1-arg `print`). Rewrote against
-  the real surface — `argc()` / `argv()` (with required `args_init()`),
-  `streq` for c-string compare (matches `tests/chakshu.tcyr`), and
-  `println` / `eprint` for output. Patterned on
-  [`owl/src/main.cyr`](https://github.com/MacCracken/owl).
+- `_proc_next_uint` previously stalled on `-1` (the `tpgid` field in
+  `/proc/<pid>/stat` for processes with no controlling tty), silently
+  returning 0 for every subsequent field. Now consumes a leading `-`
+  so signed fields can be skipped past. _Caught by parser unit test
+  before integration could mask it._
+- Two off-by-one byte counts in stderr literals (em dash in slice A's
+  unimplemented message; leading space in `--sort: unknown key '...'`).
+  Replaced manual counts with strlen-based `eprint_cstr` everywhere.
+  _Second one caught by reading the user-visible error output._
 
-### Changed
+### Tests
 
-- Errors (unknown flags, unimplemented placeholders) now go to **stderr**
-  per design-spec §9; `--help` / `--version` continue to write stdout.
-- Manifest comment now lists `termios` under "pulled in later cycles"
-  alongside `net` / `sandhi` / `niyama` — to be vendored or contributed
-  upstream when M2 (TUI raw mode) work begins.
+- 57 assertions across 13 groups, up from 10 at scaffold close.
+  Coverage: meminfo/uptime/loadavg/trim helpers; aggregate cpu line;
+  diskstats + exclusion rules (incl. `mdctl` not-excluded edge case);
+  netdev + lo exclusion; ncores counting; pid name validator; path
+  builder; `/proc/<pid>/stat` parser including `(foo (bar) baz)`
+  comm with internal parens; signed-field skip via the `-1` bug fix.
 
-## [0.1.0] — 2026-05-07
+### Performance
+
+- 110 ms wall (~100 ms sample window + ~10 ms work) on dev box.
+  Roadmap M1 perf gate was `< 30 ms` per frame (work portion); met
+  with 3× margin.
+- Binary size: 141 KB (was 85 KB at M0; +56 KB for proc/snapshot/
+  processes modules + chrono + hashmap + vec).
 
 ## [0.1.0] — 2026-05-07
 
@@ -92,3 +115,5 @@ Initial scaffold.
 ### Notes
 
 - No system-monitor functionality yet. Use `htop` or `btop` from the Bazaar in the meantime.
+- The scaffold's `cyrius.cyml` declared `time` (real name: `chrono`) and `termios` (no toolchain equivalent — TUI lib extraction is M2 work, recorded in roadmap M2). Both fixed in v0.2.0; see that entry's _Fixed_ section.
+- The scaffold's `src/main.cyr` was wired against an imaginary stdlib API (`args_count` / `args_get` / `str_eq` / 1-arg `print`); rewritten against the real surface in v0.2.0.

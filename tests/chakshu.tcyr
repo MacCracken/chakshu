@@ -26,7 +26,7 @@ fn main() {
     # CHAKSHU_VERSION in src/main.cyr and with VERSION. A future CI
     # check will enforce equality across the three.
     test_group("version string shape");
-    var v = "chakshu 0.1.0";
+    var v = "chakshu 0.2.0";
     assert(strlen(v) > 8, "version string is longer than 8 chars");
     assert_eq(memeq(v, "chakshu ", 8), 1, "version string starts with 'chakshu '");
 

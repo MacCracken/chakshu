@@ -25,6 +25,17 @@ var PROC_REC_SIZE      = 48;
 var PROC_MAX           = 1024;
 var PROC_DEFAULT_TOPN  = 10;
 
+# Sort-key constants for processes_sample2 / _proc_cmp.
+var SORT_CPU  = 0;   # cpu_pct desc — default
+var SORT_MEM  = 1;   # rss desc
+var SORT_PID  = 2;   # pid asc
+var SORT_NAME = 3;   # comm asc (lexicographic)
+
+# Cmdline display cap. /proc/[pid]/cmdline can be ARG_MAX (2 MB) but
+# the displayed line wants to fit comfortably in a typical terminal /
+# pipe. 256 bytes covers ~99% of real cmdlines; longer ones truncate.
+var PROC_CMDLINE_MAX = 256;
+
 # Lazy module globals — alloc'd on first sample, reused across calls.
 var _proc_recs = 0;
 var _proc_n    = 0;
@@ -68,11 +79,38 @@ fn processes_sample1() {
     return 0;
 }
 
-# Sample 2 — walk /proc, compute cpu_pct, append per-pid record, then
-# insertion-sort by cpu_pct descending. Top-N selection happens in
-# processes_render so a future --sort flag can pick a different key
-# without re-walking /proc.
-fn processes_sample2(total_delta, ncores) {
+# Lexicographic comparator for two 16-byte comm cstrings. Returns
+# positive if a < b alphabetically, negative if a > b, 0 if equal.
+# Stops at the first null in either string (TASK_COMM_LEN-padded).
+fn _proc_cmp_comm(a, b) {
+    var i = 0;
+    while (i < 16) {
+        var ca = load8(a + i);
+        var cb = load8(b + i);
+        if (ca < cb) { return 1; }
+        if (ca > cb) { return 0 - 1; }
+        if (ca == 0) { return 0; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Returns positive if record `a` should sort before record `b` under
+# `sort_key`. Used by the insertion sort loop. Default sort directions:
+# CPU/MEM descending (highest first), PID/NAME ascending.
+fn _proc_cmp(a, b, sort_key) {
+    if (sort_key == SORT_CPU)  { return load64(a + 8)  - load64(b + 8); }
+    if (sort_key == SORT_MEM)  { return load64(a + 16) - load64(b + 16); }
+    if (sort_key == SORT_PID)  { return load64(b + 0)  - load64(a + 0); }
+    if (sort_key == SORT_NAME) { return _proc_cmp_comm(a + 32, b + 32); }
+    return 0;
+}
+
+# Sample 2 — walk /proc, compute cpu_pct from delta against sample 1,
+# append per-pid record, then sort by `sort_key`. Top-N selection
+# happens in processes_render so callers can change top-N without
+# re-walking /proc.
+fn processes_sample2(total_delta, ncores, sort_key) {
     _proc_n = 0;
     var entries = dir_list(str_from("/proc"));
     var i = 0;
@@ -113,16 +151,17 @@ fn processes_sample2(total_delta, ncores) {
         i = i + 1;
     }
 
-    # Insertion sort by cpu_pct desc. ~1024 records max → 1M cmps
-    # worst case, fine for plain mode. Slice D may swap for a partial
-    # heapselect once top_n / --sort lands.
+    # Insertion sort under the chosen comparator. ~1024 records max →
+    # 1M cmps worst case; in practice ~300 procs, mostly already in
+    # the right order. Partial heapselect for the displayed top_n
+    # would help if perf tightens — not needed for the M1 budget.
     var s = 1;
     while (s < _proc_n) {
         var j = s;
         while (j > 0) {
             var a = _proc_recs + j * PROC_REC_SIZE;
             var b = _proc_recs + (j - 1) * PROC_REC_SIZE;
-            if (load64(a + 8) > load64(b + 8)) {
+            if (_proc_cmp(a, b, sort_key) > 0) {
                 var tmp[48];
                 memcpy(&tmp, b,    PROC_REC_SIZE);
                 memcpy(b,    a,    PROC_REC_SIZE);
@@ -135,6 +174,51 @@ fn processes_sample2(total_delta, ncores) {
         s = s + 1;
     }
     return 0;
+}
+
+# Convert non-negative integer to a null-terminated decimal cstring
+# in `buf`. Returns byte length (excl null). Caller's buf must be at
+# least 24 bytes (max i64 = 19 digits + sign + null + slack).
+# Used to build /proc/<pid>/cmdline paths from numeric pids.
+fn _proc_int_to_cstr(n, buf) {
+    var pbuf[24];
+    var pi = 23;
+    if (n == 0) { store8(&pbuf + pi, 48); pi = pi - 1; }
+    while (n > 0) {
+        store8(&pbuf + pi, 48 + n % 10);
+        pi = pi - 1;
+        n = n / 10;
+    }
+    var len = 23 - pi;
+    var ci = 0;
+    while (ci < len) {
+        store8(buf + ci, load8(&pbuf + pi + 1 + ci));
+        ci = ci + 1;
+    }
+    store8(buf + len, 0);
+    return len;
+}
+
+# Read /proc/<pid>/cmdline, replace null separators with spaces, trim
+# trailing whitespace, null-terminate. Returns bytes (excl null), or 0
+# for kernel threads (empty cmdline) and unreadable cases. Caller falls
+# back to a bracketed `comm` for the kernel-thread case.
+fn _proc_read_cmdline(pid_str, out_buf, max_len) {
+    var path[64];
+    proc_pid_path(pid_str, "/cmdline", &path);
+    var n = file_read_all(&path, out_buf, max_len - 1);
+    if (n <= 0) { return 0; }
+    var i = 0;
+    while (i < n) {
+        if (load8(out_buf + i) == 0) { store8(out_buf + i, 32); }
+        i = i + 1;
+    }
+    while (n > 0) {
+        if (load8(out_buf + n - 1) != 32) { break; }
+        n = n - 1;
+    }
+    store8(out_buf + n, 0);
+    return n;
 }
 
 # Print integer right-aligned in `width` columns. width must be >=
@@ -187,7 +271,20 @@ fn processes_render(top_n, mem_total_kb) {
         _proc_print_int_pad(cpu, 6);
         _proc_print_int_pad(mem, 6);
         syscall(1, 1, " ", 1);
-        syscall(1, 1, rec + 32, strlen(rec + 32));
+        # CMD: prefer /proc/<pid>/cmdline (full command line, joined
+        # by spaces). Kernel threads have empty cmdline — fall back to
+        # the TASK_COMM_LEN comm in brackets, matching htop convention.
+        var pid_str[24];
+        _proc_int_to_cstr(pid, &pid_str);
+        var cmd_buf[256];
+        var cmd_n = _proc_read_cmdline(&pid_str, &cmd_buf, PROC_CMDLINE_MAX);
+        if (cmd_n > 0) {
+            syscall(1, 1, &cmd_buf, cmd_n);
+        } else {
+            syscall(1, 1, "[", 1);
+            syscall(1, 1, rec + 32, strlen(rec + 32));
+            syscall(1, 1, "]", 1);
+        }
         syscall(1, 1, "\n", 1);
         i = i + 1;
     }

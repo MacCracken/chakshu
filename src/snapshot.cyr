@@ -72,7 +72,11 @@ fn snapshot_print_uptime(secs) {
 # EXIT_ERR if any /proc read failed (shouldn't happen on Linux — these
 # are kernel-synthesised files — but a hardened ENOENT path is one
 # eprint away and surfaces real bugs early).
-fn snapshot_print() {
+#
+# `sort_key` is a SORT_* constant from processes.cyr; `top_n` is the
+# row count for the process table. Both come from main.cyr after CLI
+# flag parsing.
+fn snapshot_print(sort_key, top_n) {
     var buf[8192];
 
     # Line 1: host + uptime + loadavg ----------------------------------
@@ -207,9 +211,10 @@ fn snapshot_print() {
 
     # Slice C — process table. Sample 2 needs the aggregate cpu_total
     # delta (already computed) and the core count (parsed from sample
-    # 1's stat buffer above).
-    processes_sample2(total_delta, ncores);
-    processes_render(PROC_DEFAULT_TOPN, mem_total_kb);
+    # 1's stat buffer above). Sort key + top-N come from CLI flags
+    # parsed in main.cyr.
+    processes_sample2(total_delta, ncores, sort_key);
+    processes_render(top_n, mem_total_kb);
 
     return EXIT_OK;
 }

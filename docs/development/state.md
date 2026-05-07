@@ -1,6 +1,6 @@
 # chakshu — State
 
-> **Status**: Active | **Last Updated**: 2026-05-07 (M1 Slice C landed)
+> **Status**: Active | **Last Updated**: 2026-05-07 (M1 closed; v0.2.0 cut)
 >
 > Volatile state — version, toolchain pin, milestone progress, binary size.
 > Refreshed every release. Durable rules live in
@@ -13,16 +13,16 @@
 
 | Field | Value |
 |-------|-------|
-| Version | **0.1.0** |
+| Version | **0.2.0** |
 | Cyrius toolchain pin | `5.9.32` (cyrius.cyml `[package].cyrius`) |
 | Genesis cycle | v5.9.x — niyama-fold opener / catchup arc |
-| Active milestone | **M1 — Plain snapshot** (Slices A+B+C landed; D pending) |
+| Active milestone | **M1 — Plain snapshot** ✓ closed |
 | Next milestone | **M2 — Full TUI** |
 | Binary | `shu` (build/shu) — System Health Utility, per ADR 0001 |
-| Binary size (DCE) | 137 304 bytes (~134 KB) — was 126 KB after Slice B; +8 KB for processes module + hashmap |
-| Lines of Cyrius | src/{main,snapshot,proc,processes}.cyr (~700 LoC) |
+| Binary size (DCE) | 141 488 bytes (~138 KB) — was 85 KB at M0; +53 KB for proc/snapshot/processes + chrono/hashmap/vec |
+| Lines of Cyrius | src/{main,snapshot,proc,processes}.cyr (~800 LoC) |
 | Test count | 57 assertions across 13 groups |
-| `shu -p` wall time | 110 ms (~100 ms sample window + ~10 ms work) on dev box |
+| `shu -p` wall time | ~110 ms (100 ms sample window + ~10 ms work). Roadmap gate `< 30 ms` work-budget met with 3× margin. |
 
 ## Dependency Envelope
 
@@ -52,7 +52,7 @@ args chrono hashmap process tagged assert
 | M | Title | Status |
 |---|-------|--------|
 | M0 | Scaffold | **Gate cleared** — `cyrius deps`/`build`/`test` all green; `shu --version` / `--help` / `--watch` (placeholder) / unknown-flag paths exercised |
-| M1 | Plain snapshot | **In progress** — Slices A (host/uptime/load/mem) + B (cpu/disk/net 100ms-window deltas) + C (top-10 process table sorted by CPU%) ✓; D (`--sort`/`--top` + perf gate) pending |
+| M1 | Plain snapshot | **Closed (v0.2.0)** — all four slices landed. `shu -p` produces a header + memory + cpu/disk/net rates + sortable top-N process table with cmdline. Perf gate met. |
 | M2 | Full TUI | Not started |
 | M3 | AI integration | Not started |
 | M4 | Polish + perf | Not started |
