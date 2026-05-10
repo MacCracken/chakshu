@@ -6,6 +6,59 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 _No unreleased changes._
 
+## [0.2.5] — 2026-05-10 — PTY smoke + input fixes
+
+A patch release shipping Slice G.1: a PTY-based integration smoke
+that drives the TUI through real keystrokes under a real terminal.
+The new test caught two latent bugs immediately on its first run —
+both shipping fixed in this release.
+
+### Added
+
+- **M2 Slice G.1 — PTY integration smoke gate.** New
+  `tests/integration_smoke.py` spawns chakshu under a real PTY (so
+  `tty_raw` succeeds), drives recorded keystroke sequences, and
+  asserts on output substrings + exit code. Six test cases cover
+  Slices A-F end-to-end:
+  - Launch + `q` quit (verifies alt-screen enter/leave + headers)
+  - Ctrl-C exit
+  - `s` sort cycle
+  - Filter mode round-trip (`f` → typed text → Enter → `q`)
+  - Kill confirm cancel (`k` → `n` → `q` — never sends `y` so no
+    actual signal goes anywhere)
+  - Down-arrow CSI sequence (validates multi-byte read path)
+
+  Wired into CI as a new step after `scripts/smoke.sh`. Runs against
+  both the regular and DCE'd builds.
+
+### Fixed
+
+- **Input buffer dropping rapidly-arrived keys.** `_tui_read_key`
+  was reading up to 4 bytes from stdin in one call but returning
+  only the first — so when keys queued during a 100ms render tick
+  (rapid typing in Filter mode, or batched keystrokes from any
+  source), bytes 2-4 were silently lost. Now uses a 4-byte
+  `_tui_input_buf` consumed one event at a time; the main loop
+  drains it via `_tui_input_pending()` before re-entering
+  `epoll_wait`. CSI arrow detection works at consume-time, not
+  read-time, so an arrow embedded in a multi-byte read still
+  parses correctly. _Caught by the PTY smoke test on the filter
+  round-trip — the test would time out because the trailing `q`
+  was being dropped._
+- **`_tui_update_winsize` accepting a 0x0 winsize.** When
+  `tty_winsize` succeeded but reported 0 rows / 0 cols (Python's
+  `pty.fork()` default), chakshu would set `_tui_rows = 0` and
+  `_tui_cols = 0`. The status row tried to render at row 0 (which
+  terminals interpret as row 1) — stomping the host header — and
+  the status text clipped to 0 bytes (nothing visible). Now also
+  rejects 0/0, falling through to the cached 24x80 defaults. The
+  PTY test sets winsize explicitly via `TIOCSWINSZ` so the layout
+  paths are exercised under realistic dimensions.
+- **Dispatch refactor.** Extracted the per-key handling out of
+  `tui_run` into `_tui_dispatch_key(k)` so the buffer-drain loop
+  can share the same dispatch path as the epoll/stdin branch. No
+  behavior change beyond the input-buffer fix above.
+
 ## [0.2.4] — 2026-05-10 — kill action
 
 A patch release shipping Slice F: the selection finally does

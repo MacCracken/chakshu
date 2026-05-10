@@ -88,6 +88,17 @@ jobs:
         # uses process substitution.
         run: bash scripts/smoke.sh build/shu
 
+      - name: PTY integration smoke (M2 TUI surface)
+        # tests/integration_smoke.py spawns shu under a real PTY (so
+        # tty_raw succeeds), drives recorded keystrokes covering each
+        # mode (Normal / Filter / Confirm-Kill) plus arrow CSI
+        # sequences, and asserts on output substrings + exit code.
+        # Catches TUI-path regressions that the parser-level unit
+        # tests can't see — patterned on cyim/tests/integration_smoke.py.
+        # Sets the PTY winsize to 24x80 so chakshu's tty_winsize
+        # returns non-zero rows/cols (pty.fork() default is 0x0).
+        run: python3 tests/integration_smoke.py build/shu
+
       - name: DCE parity check
         # Release builds set CYRIUS_DCE=1 to dead-code-eliminate
         # unused stdlib functions. The DCE'd binary must produce the

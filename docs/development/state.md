@@ -1,6 +1,6 @@
 # chakshu — State
 
-> **Status**: Active | **Last Updated**: 2026-05-10 (v0.2.4 cut — Slice F kill action ships)
+> **Status**: Active | **Last Updated**: 2026-05-10 (v0.2.5 cut — PTY smoke + input/winsize fixes ship)
 >
 > Volatile state — version, toolchain pin, milestone progress, binary size.
 > Refreshed every release. Durable rules live in
@@ -13,7 +13,7 @@
 
 | Field | Value |
 |-------|-------|
-| Version | **0.2.4** — M2 in-progress checkpoint (Slices A+B+C+D+E+E.5+F); next minor (0.5.0) cuts at M2 close (Slice G) |
+| Version | **0.2.5** — M2 in-progress checkpoint (Slices A+B+C+D+E+E.5+F + G.1 PTY smoke); next bumps: G.2 color → 0.3.0, G.3 --pid → 0.4.0, G.4 M2 close → 0.5.0 |
 | Cyrius toolchain pin | `5.10.20` (cyrius.cyml `[package].cyrius`) — bumped from 5.9.32 alongside the darshana v0.1.0 scaffold |
 | Genesis cycle | v5.9.x — niyama-fold opener / catchup arc |
 | Active milestone | **M2 — Full TUI** (Slice A landed; B–G pending) |
@@ -53,7 +53,7 @@ args chrono hashmap process tagged assert
 |---|-------|--------|
 | M0 | Scaffold | **Gate cleared** — `cyrius deps`/`build`/`test` all green; `shu --version` / `--help` / `--watch` (placeholder) / unknown-flag paths exercised |
 | M1 | Plain snapshot | **Closed (v0.2.0)** — all four slices landed. `shu -p` produces a header + memory + cpu/disk/net rates + sortable top-N process table with cmdline. Perf gate met. |
-| M2 | Full TUI | **In progress** — Slices A (alt-screen + raw mode + q/Ctrl-C) + B (exit-signalfd cleanup) + C (1Hz render loop + `--rate`) + D (SIGWINCH + dynamic window size) + E (↑/↓ + `s` + viewport scrolling) + E.5 (filter mode `f` + bottom status line) + F (`k` kill with confirm dialog → SIGTERM) ✓; Slice G (--pid + color + PTY smoke + close) pending — last slice before M2 closes at v0.5.0. Powered by **darshana 0.3.0** — chakshu has zero termios/ANSI code of its own. |
+| M2 | Full TUI | **In progress** — Slices A+B+C+D+E+E.5+F + G.1 (PTY smoke gate + 2 input/winsize bugs caught) ✓; G.2 (color, cuts as 0.3.0), G.3 (--pid focus, cuts as 0.4.0), G.4 (M2 close review + audit, cuts as 0.5.0) pending. Powered by **darshana 0.3.0** — chakshu has zero termios/ANSI code of its own. |
 | M2 | Full TUI | Not started |
 | M3 | AI integration | Not started |
 | M4 | Polish + perf | Not started |

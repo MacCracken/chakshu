@@ -54,37 +54,59 @@
 # `tty_winsize` / `tty_open_signalfd` / `tty_clear_to_eol/end`.
 # The dist bundle lands at `lib/darshana.cyr` via cyrius deps.
 
-# Read one key event from stdin. With VMIN=1/VTIME=0 (set by
-# darshana's tty_apply_raw_flags), the first byte blocks; subsequent
-# bytes already buffered by the terminal driver are returned in the
-# same read() call.
-#
-# Multi-byte CSI escape sequences (arrow keys: ESC [ A/B/C/D) arrive
-# as one packet from xterm-family terminals, so a single read with
-# len=4 captures them in one call. Returns the raw byte for normal
-# keys, or one of the KEY_* constants (>= 1000) for arrows.
-#
-# Bare Esc (no follow-up): returns 0x1b. Caller decides what to do
-# (chakshu currently ignores; could repurpose as "cancel filter
-# mode" in Slice E.5).
+# Input buffer for _tui_read_key. Why we need this:
+#   1. file_read(0, &b, 4) with VMIN=1 returns 1-4 bytes — whatever
+#      the kernel has queued. If we discard the trailing 1-3 bytes
+#      we lose key events whenever multiple keys arrive during a
+#      render tick (100ms — easily a few rapid keypresses).
+#   2. Multi-byte CSI sequences (arrows: ESC [ A/B/C/D) need to be
+#      detected at consume time, not read time, so an arrow embedded
+#      in a multi-byte read still parses correctly.
+# The fix: a 4-byte buffer that _tui_read_key consumes one event at
+# a time. Combined with the buffer-drain loop at the top of tui_run's
+# main loop (which consumes pending bytes before re-entering
+# epoll_wait), no key gets dropped regardless of arrival batching.
+var _tui_input_buf[4];
+var _tui_input_n   = 0;
+var _tui_input_pos = 0;
+
+# Read one key event. Returns:
+#   - a byte value (0..255) for a single-byte key
+#   - one of KEY_UP/KEY_DOWN/KEY_LEFT/KEY_RIGHT for arrow CSI sequences
+#   - -1 on EOF / read error
+# Refills the buffer with file_read(0, ., 4) when empty; subsequent
+# calls consume from the buffer before going back to the kernel.
 fn _tui_read_key() {
-    var b[4];
-    var i = 0;
-    while (i < 4) { store8(&b + i, 0); i = i + 1; }
-    var n = file_read(0, &b, 4);
-    if (n <= 0) { return 0 - 1; }
-    if (n >= 3) {
-        if (load8(&b + 0) == 0x1b) {
-            if (load8(&b + 1) == 0x5b) {        # '['
-                var c = load8(&b + 2);
-                if (c == 0x41) { return KEY_UP; }
-                if (c == 0x42) { return KEY_DOWN; }
-                if (c == 0x43) { return KEY_RIGHT; }
-                if (c == 0x44) { return KEY_LEFT; }
+    if (_tui_input_pos >= _tui_input_n) {
+        _tui_input_n   = file_read(0, &_tui_input_buf, 4);
+        _tui_input_pos = 0;
+        if (_tui_input_n <= 0) { return 0 - 1; }
+    }
+    # Detect a CSI arrow sequence at the current position. Needs
+    # 3 bytes available (ESC [ <letter>); falls through to single-
+    # byte handling otherwise (including bare Esc → 0x1b).
+    var avail = _tui_input_n - _tui_input_pos;
+    if (avail >= 3) {
+        if (load8(&_tui_input_buf + _tui_input_pos) == 0x1b) {
+            if (load8(&_tui_input_buf + _tui_input_pos + 1) == 0x5b) {
+                var c = load8(&_tui_input_buf + _tui_input_pos + 2);
+                if (c == 0x41) { _tui_input_pos = _tui_input_pos + 3; return KEY_UP; }
+                if (c == 0x42) { _tui_input_pos = _tui_input_pos + 3; return KEY_DOWN; }
+                if (c == 0x43) { _tui_input_pos = _tui_input_pos + 3; return KEY_RIGHT; }
+                if (c == 0x44) { _tui_input_pos = _tui_input_pos + 3; return KEY_LEFT; }
             }
         }
     }
-    return load8(&b + 0);
+    var b = load8(&_tui_input_buf + _tui_input_pos);
+    _tui_input_pos = _tui_input_pos + 1;
+    return b;
+}
+
+# True if there are unconsumed bytes in the input buffer. Used by
+# tui_run to drain pending events before going back to epoll_wait.
+fn _tui_input_pending() {
+    if (_tui_input_pos < _tui_input_n) { return 1; }
+    return 0;
 }
 
 # Restore terminal state. Idempotent — safe to call from multiple
@@ -110,12 +132,23 @@ var _tui_cols = 80;
 # Refresh the cached terminal size from TIOCGWINSZ. Called once in
 # tui_run setup and on every SIGWINCH event. Swallows ioctl failure
 # silently — caller already has the (possibly stale) cached values.
+#
+# Defensive: also rejects rows=0/cols=0 even though the ioctl reports
+# success. PTYs created without an explicit winsize (e.g. Python's
+# pty.fork() without TIOCSWINSZ) return that "successful zero" — we'd
+# end up writing the status line at row 0 (= row 1 per VT spec) and
+# stomping the header, plus clipping all status text to 0 bytes.
+# Falls through to the cached defaults (24x80) when this happens.
 fn _tui_update_winsize() {
     var rows = 0;
     var cols = 0;
     if (tty_winsize(0, &rows, &cols) == 0) {
-        _tui_rows = rows;
-        _tui_cols = cols;
+        if (rows > 0) {
+            if (cols > 0) {
+                _tui_rows = rows;
+                _tui_cols = cols;
+            }
+        }
     }
     return 0;
 }
@@ -645,6 +678,67 @@ fn _tui_render_status() {
     return 0;
 }
 
+# Dispatch one key event according to current mode. Returns 1 if
+# the caller should exit the main loop (q / Ctrl-C / EOF in Normal
+# mode; EOF in any mode), 0 otherwise. Each non-exit dispatch
+# triggers an immediate re-render so the user sees feedback before
+# the next refresh tick.
+#
+# Extracted from tui_run's epoll/stdin branch into a separate fn
+# so the buffer-drain loop at the top of tui_run can share the
+# same dispatch path — without this, batched keys (e.g., rapid
+# typing in Filter mode) get dropped because epoll never refires.
+fn _tui_dispatch_key(k) {
+    if (_tui_mode == TUI_MODE_FILTER) {
+        # Filter mode: typed printables append to buffer, Backspace
+        # deletes, Enter exits to Normal (filter persists), Esc
+        # clears + exits to Normal.
+        if (k < 0)       { return 1; }
+        elif (k == 0x1b) { _tui_filter_clear(); _tui_mode = TUI_MODE_NORMAL; tui_render_frame(); }
+        elif (k == 13)   { _tui_mode = TUI_MODE_NORMAL; tui_render_frame(); }
+        elif (k == 0x7f) { _tui_filter_backspace(); tui_render_frame(); }
+        elif (k == 8)    { _tui_filter_backspace(); tui_render_frame(); }
+        else {
+            if (k >= 32) {
+                if (k <= 126) {
+                    _tui_filter_append_byte(k);
+                    tui_render_frame();
+                }
+            }
+        }
+        return 0;
+    }
+    if (_tui_mode == TUI_MODE_CONFIRM_KILL) {
+        # 'y'/'Y' confirms; anything else cancels back to Normal.
+        # q intentionally cancels-only here so an accidental q during
+        # confirm doesn't quit the whole app.
+        if (k == 121)  { sys_kill(_tui_kill_pid, TUI_KILL_SIGNUM); _tui_mode = TUI_MODE_NORMAL; tui_render_frame(); }
+        elif (k == 89) { sys_kill(_tui_kill_pid, TUI_KILL_SIGNUM); _tui_mode = TUI_MODE_NORMAL; tui_render_frame(); }
+        elif (k < 0)   { return 1; }
+        else { _tui_mode = TUI_MODE_NORMAL; tui_render_frame(); }
+        return 0;
+    }
+    # Normal mode
+    if (k == 113)        { return 1; }                                                      # 'q'
+    elif (k == 3)        { return 1; }                                                      # Ctrl-C
+    elif (k < 0)         { return 1; }                                                      # EOF / read error
+    elif (k == KEY_UP)   { _tui_select_up();   tui_render_frame(); }
+    elif (k == KEY_DOWN) { _tui_select_down(); tui_render_frame(); }
+    elif (k == 115)      { _tui_cycle_sort();  tui_render_frame(); }                        # 's'
+    elif (k == 102)      { _tui_mode = TUI_MODE_FILTER; tui_render_frame(); }               # 'f'
+    elif (k == 107)      {                                                                  # 'k'
+        if (_tui_filtered_n > 0) {
+            var sel_filt = _tui_selected_idx;
+            if (sel_filt >= _tui_filtered_n) { sel_filt = _tui_filtered_n - 1; }
+            var abs_idx = load64(&_tui_filtered_idx + sel_filt * 8);
+            _tui_kill_pid = load64(_proc_recs + abs_idx * PROC_REC_SIZE + 0);
+            _tui_mode = TUI_MODE_CONFIRM_KILL;
+            tui_render_frame();
+        }
+    }
+    return 0;
+}
+
 # Run the TUI. Returns EXIT_OK on clean quit, EXIT_ERR on setup
 # failure (most likely: stdin is not a TTY — e.g. `shu < /dev/null`
 # or invoked from a CI runner).
@@ -721,8 +815,20 @@ fn tui_run(refresh_ms, sort_key, top_n) {
     #   n > 0, data=0 → stdin, read key, dispatch q/Ctrl-C/EOF
     # If epoll setup failed, fall back to a blocking stdin read with
     # no refresh and no signal handling — degraded but functional.
+    #
+    # Before each epoll_wait, drain any buffered input bytes
+    # left over from a previous read (rapid typing or batched arrivals
+    # during a render tick can leave 1-3 bytes pending). Without this
+    # drain, epoll_wait would block waiting for new bytes to arrive
+    # while we still have unprocessed events on hand.
     var loop = 1;
     while (loop == 1) {
+        while (_tui_input_pending() == 1) {
+            var k_drain = _tui_read_key();
+            if (_tui_dispatch_key(k_drain) == 1) { loop = 0; }
+            if (loop == 0) { break; }
+        }
+        if (loop == 0) { break; }
         if (epfd >= 0) {
             var events[16];
             var n = sys_epoll_wait(epfd, &events, 1, refresh_ms);
@@ -753,79 +859,13 @@ fn tui_run(refresh_ms, sort_key, top_n) {
             else {
                 # stdin — dispatch by mode
                 var k = _tui_read_key();
-                if (_tui_mode == TUI_MODE_FILTER) {
-                    # Filter mode: typed printables append to buffer,
-                    # Backspace deletes, Enter exits to Normal (filter
-                    # persists), Esc clears + exits to Normal.
-                    if (k < 0) { loop = 0; }
-                    elif (k == 0x1b) {
-                        _tui_filter_clear();
-                        _tui_mode = TUI_MODE_NORMAL;
-                        tui_render_frame();
-                    }
-                    elif (k == 13) {
-                        _tui_mode = TUI_MODE_NORMAL;
-                        tui_render_frame();
-                    }
-                    elif (k == 0x7f) { _tui_filter_backspace(); tui_render_frame(); }
-                    elif (k == 8)    { _tui_filter_backspace(); tui_render_frame(); }
-                    else {
-                        if (k >= 32) {
-                            if (k <= 126) {
-                                _tui_filter_append_byte(k);
-                                tui_render_frame();
-                            }
-                        }
-                    }
-                }
-                elif (_tui_mode == TUI_MODE_CONFIRM_KILL) {
-                    # 'y' or 'Y' confirms — send SIGTERM, return to Normal.
-                    # Anything else (including 'n', Esc, q) cancels back
-                    # to Normal without sending the signal. q intentionally
-                    # cancels-only here so an accidental q during confirm
-                    # doesn't quit the whole app — user has to press q
-                    # again from Normal to actually exit.
-                    if (k == 121) { sys_kill(_tui_kill_pid, TUI_KILL_SIGNUM); _tui_mode = TUI_MODE_NORMAL; tui_render_frame(); }       # 'y'
-                    elif (k == 89) { sys_kill(_tui_kill_pid, TUI_KILL_SIGNUM); _tui_mode = TUI_MODE_NORMAL; tui_render_frame(); }      # 'Y'
-                    elif (k < 0)   { loop = 0; }                                                                                       # EOF
-                    else { _tui_mode = TUI_MODE_NORMAL; tui_render_frame(); }
-                }
-                else {
-                    # Normal mode
-                    if (k == 113) { loop = 0; }                          # 'q'
-                    elif (k == 3) { loop = 0; }                          # Ctrl-C
-                    elif (k < 0)  { loop = 0; }                          # EOF / read error
-                    elif (k == KEY_UP)   { _tui_select_up();   tui_render_frame(); }
-                    elif (k == KEY_DOWN) { _tui_select_down(); tui_render_frame(); }
-                    elif (k == 115)      { _tui_cycle_sort();  tui_render_frame(); }   # 's'
-                    elif (k == 102)      {                                              # 'f'
-                        _tui_mode = TUI_MODE_FILTER;
-                        tui_render_frame();
-                    }
-                    elif (k == 107)      {                                              # 'k'
-                        # Capture the selected pid + switch to confirm mode.
-                        # Resolve the filtered position to an absolute proc_recs
-                        # index, then read the pid (offset 0 in the record).
-                        # Guard against an empty list (filter matches nothing).
-                        if (_tui_filtered_n > 0) {
-                            var sel_filt = _tui_selected_idx;
-                            if (sel_filt >= _tui_filtered_n) { sel_filt = _tui_filtered_n - 1; }
-                            var abs_idx = load64(&_tui_filtered_idx + sel_filt * 8);
-                            _tui_kill_pid = load64(_proc_recs + abs_idx * PROC_REC_SIZE + 0);
-                            _tui_mode = TUI_MODE_CONFIRM_KILL;
-                            tui_render_frame();
-                        }
-                    }
-                    # Other keys ignored.
-                }
+                if (_tui_dispatch_key(k) == 1) { loop = 0; }
             }
         } else {
             # Degraded path — no signal multiplexing AND no refresh
             # (blocking stdin only). Keystroke needed to exit.
             var k = _tui_read_key();
-            if (k == 113) { loop = 0; }
-            elif (k == 3) { loop = 0; }
-            elif (k < 0)  { loop = 0; }
+            if (_tui_dispatch_key(k) == 1) { loop = 0; }
         }
     }
 
