@@ -6,6 +6,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **M2 Slice C — render loop + real layout.** The TUI now refreshes
+  every 1 second (configurable via `--rate <Hz>`, integer 1-10).
+  `epoll_wait` runs with a finite timeout — on timeout it re-renders
+  the frame; stdin and signalfd dispatch unchanged from Slice B.
+  Layout matches plain mode: row 1 host/up/load, row 2 mem,
+  row 3 cpu/disk/net deltas, row 4 process-table header, rows 5-N
+  process rows. Cursor positioned with `tty_move` per row + clear-
+  to-eol so successive frames overwrite cleanly.
+- New `tui_render_frame(sort_key, top_n)` — duplicates the M1
+  snapshot data gather + format with TUI-friendly output (no
+  `\n` since OPOST is cleared). Uses the same proc.cyr / processes.cyr
+  parsers and the same 100ms inter-sample window. ~150 LoC of
+  duplication with snapshot.cyr, marked as a future-refactor
+  candidate (extract a shared "snapshot data" core that both plain
+  mode and TUI render from).
+- New `_tui_clear_eol` / `_tui_clear_to_end` — inline ANSI helpers
+  (CSI K and CSI J). Two more darshana-extraction candidates when
+  partial-clear gets a second consumer.
+- New `--rate <Hz>` CLI flag with validation (1-10 integer; rejects
+  `0`, `>10`, and non-numeric like `foo`). Help text updated.
+- Bare `shu` now falls through to a single dispatch path at the
+  bottom of `main()` instead of short-circuiting at the top —
+  removes the previous bug where the args-loop accumulators weren't
+  declared yet at the bare-invocation branch.
+
 - **M2 Slice B — signal-safe cleanup.** The TUI now multiplexes stdin
   and a signalfd via epoll, so external SIGHUP / SIGINT / SIGTERM
   (`kill <pid>` from another terminal, parent shell HUP, etc.)

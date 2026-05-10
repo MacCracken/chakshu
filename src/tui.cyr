@@ -7,8 +7,16 @@
 # route them to a signalfd; epoll multiplexes stdin + signalfd so
 # external `kill <pid>` triggers `_tui_teardown` instead of leaving
 # the terminal in raw+alt-screen+cursor-hidden state.
-# Slices C-G grow this:
-#   C — render loop at 1 Hz, real layout, snapshot data
+# M2 Slice C: render loop. epoll_wait now uses a finite timeout
+# (refresh_ms = 1000 / hz, default 1 Hz). On timeout we re-render
+# the frame; on stdin/signalfd we dispatch as before. The render
+# function pulls the same /proc data the M1 plain-mode snapshot
+# does — duplicates the data-gather + format logic with TUI-friendly
+# output (cursor positioning + clear-to-eol per line, no \n which
+# wouldn't carriage-return in raw mode without OPOST). Future
+# refactor candidate: extract a shared "snapshot data" core so
+# plain mode and TUI render from one source.
+# Slices D-G grow this:
 #   D — SIGWINCH + dynamic window size
 #   E — sort/filter/select keybinds
 #   F — kill key with confirm dialog
@@ -85,10 +93,183 @@ fn _tui_open_exit_signalfd() {
     return sys_signalfd(0 - 1, &mask, 0);
 }
 
+# Clear from cursor to end of line. CSI K. 3 bytes. Inline here to
+# avoid a darshana version bump just for one helper; promotes to
+# darshana when partial-clear gets a second consumer.
+fn _tui_clear_eol() {
+    syscall(1, 1, "\x1b[K", 3);
+    return 0;
+}
+
+# Clear from cursor to end of screen. CSI J. 3 bytes. Used at the
+# bottom of each frame to wipe any leftover process rows from a
+# previous frame that had more entries.
+fn _tui_clear_to_end() {
+    syscall(1, 1, "\x1b[J", 3);
+    return 0;
+}
+
+# Render one full frame to the alt-screen. Mirrors snapshot_print()'s
+# data gather but writes line-by-line via tty_move + clear-to-eol so
+# successive frames overwrite cleanly. Same /proc reads + same 100ms
+# inter-sample window for cpu/disk/net deltas — which means each call
+# costs ~100ms wall time. At 1 Hz refresh that's 10% CPU; at 10 Hz
+# it's 100% (do not run TUI at 10 Hz). Future slice optimizes by
+# interleaving sample windows across frames.
+fn tui_render_frame(sort_key, top_n) {
+    var buf[8192];
+
+    # ----- row 1: host / uptime / load -----
+    tty_cursor_home();
+    syscall(1, 1, "host: ", 6);
+    var hn_n = proc_read("/proc/sys/kernel/hostname", &buf, 8192);
+    if (hn_n > 0) {
+        hn_n = proc_trim_trailing_nl(&buf, hn_n);
+        syscall(1, 1, &buf, hn_n);
+    }
+    syscall(1, 1, "  up: ", 6);
+    var up_n = proc_read("/proc/uptime", &buf, 8192);
+    if (up_n > 0) { snapshot_print_uptime(proc_uptime_secs(&buf)); }
+    syscall(1, 1, "  load: ", 8);
+    var la_n = proc_read("/proc/loadavg", &buf, 8192);
+    if (la_n > 0) {
+        var prefix = proc_loadavg_prefix_len(&buf, la_n);
+        syscall(1, 1, &buf, prefix);
+    }
+    _tui_clear_eol();
+
+    # ----- row 2: memory -----
+    tty_move(2, 1);
+    var mem_total_kb = 0;
+    var mem_avail_kb = 0;
+    var mi_n = proc_read("/proc/meminfo", &buf, 8192);
+    if (mi_n > 0) {
+        mem_total_kb = proc_meminfo_field(&buf, "MemTotal:");
+        mem_avail_kb = proc_meminfo_field(&buf, "MemAvailable:");
+        if (mem_avail_kb == 0) {
+            mem_avail_kb = proc_meminfo_field(&buf, "MemFree:");
+        }
+    }
+    var mem_used_mib  = (mem_total_kb - mem_avail_kb) / 1024;
+    var mem_total_mib = mem_total_kb / 1024;
+    syscall(1, 1, "mem:  ", 6);
+    print_num(mem_used_mib);
+    syscall(1, 1, " MiB used / ", 12);
+    print_num(mem_total_mib);
+    syscall(1, 1, " MiB total", 10);
+    _tui_clear_eol();
+
+    # ----- row 3: cpu / disk / net (delta-based, 100ms window) -----
+    var sb1[8192];
+    var db1[8192];
+    var nb1[8192];
+    var s1n = proc_read("/proc/stat",      &sb1, 8192);
+    var d1n = proc_read("/proc/diskstats", &db1, 8192);
+    var n1n = proc_read("/proc/net/dev",   &nb1, 8192);
+    var cpu_active1 = 0; var cpu_total1 = 0;
+    var sec_r1 = 0; var sec_w1 = 0;
+    var rx1 = 0; var tx1 = 0;
+    if (s1n > 0) { proc_stat_cpu_agg(&sb1, &cpu_active1, &cpu_total1); }
+    if (d1n > 0) { proc_diskstats_agg(&db1, d1n, &sec_r1, &sec_w1); }
+    if (n1n > 0) { proc_netdev_agg(&nb1, n1n, &rx1, &tx1); }
+    var ncores = 1;
+    if (s1n > 0) { ncores = proc_stat_ncores(&sb1, s1n); }
+    processes_sample1();
+
+    sleep_ms(SNAP_SAMPLE_MS);
+
+    var s2n = proc_read("/proc/stat",      &sb1, 8192);
+    var d2n = proc_read("/proc/diskstats", &db1, 8192);
+    var n2n = proc_read("/proc/net/dev",   &nb1, 8192);
+    var cpu_active2 = 0; var cpu_total2 = 0;
+    var sec_r2 = 0; var sec_w2 = 0;
+    var rx2 = 0; var tx2 = 0;
+    if (s2n > 0) { proc_stat_cpu_agg(&sb1, &cpu_active2, &cpu_total2); }
+    if (d2n > 0) { proc_diskstats_agg(&db1, d2n, &sec_r2, &sec_w2); }
+    if (n2n > 0) { proc_netdev_agg(&nb1, n2n, &rx2, &tx2); }
+
+    var cpu_pct = 0;
+    var total_delta = cpu_total2 - cpu_total1;
+    if (total_delta > 0) {
+        cpu_pct = (cpu_active2 - cpu_active1) * 100 / total_delta;
+    }
+    var disk_rd_bps = (sec_r2 - sec_r1) * 512 * 1000 / SNAP_SAMPLE_MS;
+    var disk_wr_bps = (sec_w2 - sec_w1) * 512 * 1000 / SNAP_SAMPLE_MS;
+    var net_rx_bps  = (rx2 - rx1) * 1000 / SNAP_SAMPLE_MS;
+    var net_tx_bps  = (tx2 - tx1) * 1000 / SNAP_SAMPLE_MS;
+
+    tty_move(3, 1);
+    syscall(1, 1, "cpu:  ", 6);
+    print_num(cpu_pct);
+    syscall(1, 1, "%   disk: rd ", 13);
+    _snap_print_rate_bps(disk_rd_bps);
+    syscall(1, 1, " wr ", 4);
+    _snap_print_rate_bps(disk_wr_bps);
+    syscall(1, 1, "   net: rx ", 11);
+    _snap_print_rate_bps(net_rx_bps);
+    syscall(1, 1, " tx ", 4);
+    _snap_print_rate_bps(net_tx_bps);
+    _tui_clear_eol();
+
+    # ----- row 4+: process table (header + top-N rows) -----
+    processes_sample2(total_delta, ncores, sort_key);
+    tty_move(4, 1);
+    syscall(1, 1, "   PID S  CPU%  MEM% CMD", 24);
+    _tui_clear_eol();
+
+    var n = _proc_n;
+    if (n > top_n) { n = top_n; }
+    var i = 0;
+    while (i < n) {
+        tty_move(5 + i, 1);
+        var rec = _proc_recs + i * PROC_REC_SIZE;
+        var pid = load64(rec + 0);
+        var cpu = load64(rec + 8);
+        var rss = load64(rec + 16);
+        var st  = load64(rec + 24);
+        var mem = 0;
+        if (mem_total_kb > 0) { mem = rss * 400 / mem_total_kb; }
+        _proc_print_int_pad(pid, 6);
+        syscall(1, 1, " ", 1);
+        var sc[2];
+        store8(&sc, st);
+        store8(&sc + 1, 0);
+        syscall(1, 1, &sc, 1);
+        _proc_print_int_pad(cpu, 6);
+        _proc_print_int_pad(mem, 6);
+        syscall(1, 1, " ", 1);
+        # cmdline read (top-N only — same as plain mode)
+        var pid_str[24];
+        _proc_int_to_cstr(pid, &pid_str);
+        var cmd_buf[256];
+        var cmd_n = _proc_read_cmdline(&pid_str, &cmd_buf, PROC_CMDLINE_MAX);
+        if (cmd_n > 0) {
+            syscall(1, 1, &cmd_buf, cmd_n);
+        } else {
+            syscall(1, 1, "[", 1);
+            syscall(1, 1, rec + 32, strlen(rec + 32));
+            syscall(1, 1, "]", 1);
+        }
+        _tui_clear_eol();
+        i = i + 1;
+    }
+
+    # Wipe any leftover rows below the last process (e.g., a process
+    # exited between frames so this frame has fewer rows than last).
+    tty_move(5 + n, 1);
+    _tui_clear_to_end();
+
+    return 0;
+}
+
 # Run the TUI. Returns EXIT_OK on clean quit, EXIT_ERR on setup
 # failure (most likely: stdin is not a TTY — e.g. `shu < /dev/null`
 # or invoked from a CI runner).
-fn tui_run() {
+#
+# refresh_ms = milliseconds between frame renders (1000 = 1 Hz).
+# sort_key   = SORT_CPU/MEM/PID/NAME passed to processes_sample2.
+# top_n      = process-table row count.
+fn tui_run(refresh_ms, sort_key, top_n) {
     # tty_raw fails if the ioctl can't get termios — typically
     # because the fd isn't a TTY. Surface a clear error and steer
     # the user toward the always-pipeable `-p` mode.
@@ -120,34 +301,31 @@ fn tui_run() {
     tty_alt_enter();
     tty_cursor_hide();
     tty_clear();
-    tty_cursor_home();
 
-    # Placeholder paint — Slice C replaces this with the real
-    # render loop driven by the M1 snapshot data.
-    _tui_print_cstr("chakshu — M2 Slice B placeholder.\r\n");
-    _tui_print_cstr("Press q (or Ctrl-C) to quit.\r\n");
-    _tui_print_cstr("External SIGHUP/SIGINT/SIGTERM also clean up.\r\n");
-    _tui_print_cstr("\r\n");
-    _tui_print_cstr("Real refresh loop + layout in Slice C.\r\n");
+    # Initial render so the user sees content before the first
+    # epoll_wait timeout fires.
+    tui_render_frame(sort_key, top_n);
 
-    # Input loop. With epoll wired, multiplex stdin + signalfd; on
-    # signal (data == 1), drain the signalfd and exit cleanly. On
-    # stdin (data == 0), read the byte and check for q/Ctrl-C/EOF.
-    # If epoll setup failed, fall back to direct stdin read (Slice A).
+    # Input + refresh loop. epoll_wait(timeout=refresh_ms) returns:
+    #   n == 0       → timeout, re-render
+    #   n > 0, data=1 → signal fd, drain + exit
+    #   n > 0, data=0 → stdin, read key, dispatch q/Ctrl-C/EOF
+    # If epoll setup failed (sfd or epfd < 0), fall back to a
+    # blocking stdin read with no refresh — degraded but functional.
     var loop = 1;
     while (loop == 1) {
         if (epfd >= 0) {
-            # epoll_event is {u32 events; u64 data} packed = 12 bytes;
-            # 16-byte stack buffer leaves slack and matches stdlib's
-            # epoll_event_new alloc size.
             var events[16];
-            var n = sys_epoll_wait(epfd, &events, 1, 0 - 1);
-            if (n <= 0) { continue; }
+            var n = sys_epoll_wait(epfd, &events, 1, refresh_ms);
+            if (n == 0) {
+                tui_render_frame(sort_key, top_n);
+                continue;
+            }
+            if (n < 0) { continue; }
             var which = load64(&events + 4);
             if (which == 1) {
-                # Drain the signalfd (struct signalfd_siginfo = 128
-                # bytes) so it doesn't immediately re-fire if we ever
-                # loop back. Then exit.
+                # Drain signalfd (struct signalfd_siginfo = 128 bytes)
+                # then exit.
                 var siginfo[128];
                 file_read(sfd, &siginfo, 128);
                 loop = 0;
@@ -158,7 +336,8 @@ fn tui_run() {
                 if (k < 0)    { loop = 0; }   # EOF / read error
             }
         } else {
-            # Degraded path — no signal multiplexing.
+            # Degraded path — no signal multiplexing AND no refresh
+            # (blocking stdin only). Keystroke needed to exit.
             var k = _tui_read_key();
             if (k == 113) { loop = 0; }
             if (k == 3)   { loop = 0; }

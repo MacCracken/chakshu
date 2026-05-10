@@ -19,9 +19,9 @@
 | Active milestone | **M2 — Full TUI** (Slice A landed; B–G pending) |
 | Next milestone | **M3 — AI integration** |
 | Binary | `shu` (build/shu) — System Health Utility, per ADR 0001 |
-| Binary size (DCE) | 148 736 bytes (~145 KB) — was 138 KB at M1 close; +7 KB for tui.cyr + the darshana symbols actually called |
-| Lines of Cyrius | src/{main,snapshot,proc,processes,tui}.cyr (~875 LoC) — does **not** include lib/darshana.cyr (resolved via cyrius deps from the darshana 0.2.0 release) |
-| Test count | 57 assertions across 13 groups (Slice A's TUI surface needs PTY-based testing — lands at Slice G) |
+| Binary size (DCE) | 187 168 bytes (~183 KB) — was 148 KB at Slice A; +39 KB for the tui_render_frame data-gather/render path |
+| Lines of Cyrius | src/{main,snapshot,proc,processes,tui}.cyr (~1050 LoC) — does **not** include lib/darshana.cyr (resolved via cyrius deps from darshana 0.2.0). tui.cyr ~325 LoC includes ~150 LoC of M1-snapshot duplication marked as future-refactor candidate. |
+| Test count | 57 assertions across 13 groups (TUI render path needs PTY-based testing — lands at Slice G) |
 | `shu -p` wall time | ~110 ms (100 ms sample window + ~10 ms work). Roadmap gate `< 30 ms` work-budget met with 3× margin. |
 
 ## Dependency Envelope
@@ -53,7 +53,7 @@ args chrono hashmap process tagged assert
 |---|-------|--------|
 | M0 | Scaffold | **Gate cleared** — `cyrius deps`/`build`/`test` all green; `shu --version` / `--help` / `--watch` (placeholder) / unknown-flag paths exercised |
 | M1 | Plain snapshot | **Closed (v0.2.0)** — all four slices landed. `shu -p` produces a header + memory + cpu/disk/net rates + sortable top-N process table with cmdline. Perf gate met. |
-| M2 | Full TUI | **In progress** — Slices A (minimum viable TUI: alt-screen + raw mode + q/Ctrl-C exit) + B (signal-safe cleanup via signalfd + epoll multiplexing — external SIGHUP/SIGINT/SIGTERM trigger teardown) ✓; Slices C (render loop + M1 snapshot reuse), D (SIGWINCH), E (keybinds), F (kill+confirm), G (--pid + color + PTY smoke + close) pending. Powered by darshana 0.2.0 — chakshu has no termios code of its own. |
+| M2 | Full TUI | **In progress** — Slices A (alt-screen + raw mode + q/Ctrl-C) + B (signalfd cleanup) + C (1Hz render loop, real layout via tty_move, `--rate` flag) ✓; Slices D (SIGWINCH), E (keybinds), F (kill+confirm), G (--pid + color + PTY smoke + close) pending. Powered by darshana 0.2.0 — chakshu has no termios code of its own. |
 | M2 | Full TUI | Not started |
 | M3 | AI integration | Not started |
 | M4 | Polish + perf | Not started |

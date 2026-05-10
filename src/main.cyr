@@ -31,7 +31,7 @@ fn print_help() {
     println("chakshu — AI-augmented system monitor for AGNOS");
     println("");
     println("Usage:");
-    println("  shu [OPTIONS]            Full TUI (alt-screen + raw mode; M2 Slice A placeholder, real layout in C+)");
+    println("  shu [OPTIONS]            Full TUI (alt-screen, 1Hz refresh; --rate to change, q/Ctrl-C to quit)");
     println("  shu -p                   Plain snapshot (host/uptime/load/mem/cpu/disk/net + top-N process table)");
     println("  shu --pid <PID>          Focus a single process (M2+)");
     println("  shu --explain <PID>      AI explanation (M3+)");
@@ -41,7 +41,7 @@ fn print_help() {
     println("  -p                        Plain snapshot mode (single frame to stdout)");
     println("  --sort cpu|mem|pid|name   Process-table sort key (default cpu)");
     println("  --top N                   Process-table row count (default 10)");
-    println("  --rate <HZ>               Refresh rate (0.2-10, default 1) [M2+]");
+    println("  --rate <HZ>               TUI refresh rate (integer 1-10, default 1; fractional Hz later)");
     println("  --color <when>            auto | always | never (default auto) [M2+]");
     println("  --pid <PID>               Focus a single process [M2+]");
     println("  --explain <PID>           Print AI explanation and exit [M3+]");
@@ -92,14 +92,10 @@ fn main() {
 
     var n = argc();
 
-    if (n < 2) {
-        # M2 entry — bare `shu` launches the TUI. Slice A is a
-        # placeholder paint + q-to-quit; real refresh loop lives
-        # in Slice C. tui_run() handles the not-a-TTY case
-        # (stdin redirected) by exiting EXIT_ERR with a stderr
-        # message pointing the user at `-p`.
-        return tui_run();
-    }
+    # Bare `shu` (no args) falls through to the dispatch at the
+    # bottom — the args loop just doesn't iterate, no mode flag gets
+    # set, and the default-mode line at the bottom launches the TUI
+    # with default sort/top/rate. Single dispatch path.
 
     # Accumulate flags first, then dispatch at the bottom. Mode flags
     # (-h, -V, -p) are mutually exclusive; the last one in the args
@@ -108,8 +104,9 @@ fn main() {
     var mode_version = 0;
     var mode_p       = 0;
 
-    var sort_key = SORT_CPU;
-    var top_n    = PROC_DEFAULT_TOPN;
+    var sort_key    = SORT_CPU;
+    var top_n       = PROC_DEFAULT_TOPN;
+    var tui_rate_hz = 1;                # default 1 Hz (1000 ms refresh)
 
     var i = 1;
     while (i < n) {
@@ -142,6 +139,27 @@ fn main() {
             continue;
         }
 
+        # --rate <Hz> (default 1; integer 1-10 for Slice C — fractional
+        # Hz like 0.2 needs atof which the stdlib doesn't expose yet).
+        if (streq(a, "--rate") == 1) {
+            if (i + 1 >= n) {
+                eprintln("chakshu: --rate requires Hz (integer 1-10)");
+                return EXIT_USAGE;
+            }
+            var rv = atoi(argv(i + 1));
+            if (rv < 1) {
+                eprintln("chakshu: --rate: Hz must be >= 1 (fractional Hz lands later)");
+                return EXIT_USAGE;
+            }
+            if (rv > 10) {
+                eprintln("chakshu: --rate: Hz must be <= 10 (above this each frame can't fit its 100ms sample window)");
+                return EXIT_USAGE;
+            }
+            tui_rate_hz = rv;
+            i = i + 2;
+            continue;
+        }
+
         # --top N (default 10). Negative or zero is rejected — those
         # would show no rows and waste the parse work.
         if (streq(a, "--top") == 1) {
@@ -164,7 +182,6 @@ fn main() {
         if (streq(a, "--pid") == 1)       { return print_unimplemented("--pid"); }
         if (streq(a, "--explain") == 1)   { return print_unimplemented("--explain"); }
         if (streq(a, "--watch") == 1)     { return print_unimplemented("--watch"); }
-        if (streq(a, "--rate") == 1)      { return print_unimplemented("--rate"); }
         if (streq(a, "--color") == 1)     { return print_unimplemented("--color"); }
         if (streq(a, "--with-logs") == 1) { return print_unimplemented("--with-logs"); }
 
@@ -176,8 +193,18 @@ fn main() {
     if (mode_version == 1) { return print_version(); }
     if (mode_p       == 1) { return snapshot_print(sort_key, top_n); }
 
-    # No mode flag — print help. M2+ will launch the TUI here.
-    return print_help();
+    # Default mode — launch the TUI. tui_run handles the not-a-TTY
+    # case (stdin redirected) by exiting EXIT_ERR with a stderr
+    # message pointing at `-p`.
+    return tui_run(_hz_to_ms(tui_rate_hz), sort_key, top_n);
+}
+
+# Convert --rate Hz to epoll_wait timeout in milliseconds. Used by
+# tui_run dispatch above. Out-of-line so the validation lives next
+# to the conversion (and so future fractional-Hz parsing has one
+# place to land).
+fn _hz_to_ms(hz) {
+    return 1000 / hz;
 }
 
 var r = main();
