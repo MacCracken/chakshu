@@ -170,24 +170,47 @@ var _tui_filter_n  = 0;
 var _tui_filtered_idx[8192];
 var _tui_filtered_n = 0;
 
-# True if the proc at absolute index `rec_idx` matches the current
-# filter. Empty filter matches everything. Substring match against
-# the comm field (offset 32 in each rec) — fast, no /proc reads.
-fn _tui_proc_matches_filter(rec_idx) {
-    if (_tui_filter_n == 0) { return 1; }
-    var rec = _proc_recs + rec_idx * PROC_REC_SIZE;
-    var comm = rec + 32;
-    var comm_len = strlen(comm);
-    if (comm_len < _tui_filter_n) { return 0; }
+# Substring search: returns 1 if `haystack[0..hay_len)` contains the
+# current filter buffer. Used for both comm-match and cmdline-match.
+fn _tui_substr_match(haystack, hay_len) {
+    if (hay_len < _tui_filter_n) { return 0; }
     var i = 0;
-    var max_start = comm_len - _tui_filter_n;
+    var max_start = hay_len - _tui_filter_n;
     while (i <= max_start) {
-        if (memeq(comm + i, &_tui_filter_buf, _tui_filter_n) == 1) {
+        if (memeq(haystack + i, &_tui_filter_buf, _tui_filter_n) == 1) {
             return 1;
         }
         i = i + 1;
     }
     return 0;
+}
+
+# True if the proc at absolute index `rec_idx` matches the current
+# filter. Empty filter matches everything. Tries `comm` first
+# (in-memory, no syscall), falls through to a /proc/<pid>/cmdline
+# read if comm doesn't match. comm-first short-circuit means typical
+# process-name filters ("claude", "firefox") never trigger the
+# per-process file read; only filters that need to match args
+# ("--dangerous", "/usr/lib") pay the cost (~50us per cmdline read,
+# so ~15ms total for 300 procs at 1Hz refresh — acceptable).
+fn _tui_proc_matches_filter(rec_idx) {
+    if (_tui_filter_n == 0) { return 1; }
+    var rec = _proc_recs + rec_idx * PROC_REC_SIZE;
+
+    # Pass 1 — match against the 16-byte comm field already in the
+    # record. Cheapest path; covers process-name filters.
+    var comm = rec + 32;
+    if (_tui_substr_match(comm, strlen(comm)) == 1) { return 1; }
+
+    # Pass 2 — read /proc/<pid>/cmdline and try again. Pays for
+    # itself when the user's filter mentions args or paths.
+    var pid = load64(rec + 0);
+    var pid_str[24];
+    _proc_int_to_cstr(pid, &pid_str);
+    var cmd_buf[256];
+    var cmd_n = _proc_read_cmdline(&pid_str, &cmd_buf, PROC_CMDLINE_MAX);
+    if (cmd_n <= 0) { return 0; }
+    return _tui_substr_match(&cmd_buf, cmd_n);
 }
 
 # Reset filter to empty + drop selection/viewport to the top. Called

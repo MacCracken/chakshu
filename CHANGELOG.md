@@ -4,6 +4,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Filter now matches cmdline too.** Initial Slice E.5 only checked
+  the kernel `comm` field (15-char executable name), so substrings
+  containing args or paths — e.g. `claude --dangerously-skip-permissions`,
+  `/usr/lib/Xorg`, `--socket /tmp/sddm` — never matched. Filter now
+  tries comm first (cheap, in-memory), falls through to a
+  `/proc/<pid>/cmdline` read on miss. Comm-first short-circuit means
+  typical process-name filters never trigger the per-process file
+  read; arg-bearing filters pay ~15ms / 300 procs at 1Hz refresh
+  (acceptable). _Caught by user immediately on Slice E.5 first run._
+
 ### Added
 
 - **M2 Slice E.5 — filter mode + status line.** New bottom row
