@@ -29,8 +29,17 @@
 # A/B/C/D for arrows). Selection state lives in module globals so
 # any keypress can mutate it; render highlights the selected row
 # with reverse-video. Sort key + top_n promoted to globals so `s`
-# can cycle them without re-entering tui_run. Filter (`f`) is
-# Slice E.5 (separate state machine + status line).
+# can cycle them without re-entering tui_run.
+# M2 Slice E.5: filter mode + status line. Bottom terminal row
+# reserved for a status line that shows keybind hints (Normal mode)
+# or the active filter string (Filter mode). `f` enters Filter mode;
+# typed printables append to the filter buffer, Backspace deletes,
+# Enter exits to Normal (filter persists), Esc clears the filter +
+# exits to Normal. Substring match against the per-process `comm`
+# field (16-byte cstring, already in proc_recs — no extra /proc
+# reads per frame). Filtered indices materialized in
+# `_tui_filtered_idx[]` so selection/viewport operate in filtered
+# space. Filter against full cmdline is a future polish item.
 # Slices F-G grow this:
 #   F — kill key with confirm dialog
 #   G — --pid focus mode + color + PTY smoke gate
@@ -137,6 +146,82 @@ var KEY_RIGHT = 1003;
 fn _tui_invert_on()  { syscall(1, 1, "\x1b[7m", 4); return 0; }
 fn _tui_invert_off() { syscall(1, 1, "\x1b[0m", 4); return 0; }
 
+# Mode constants for the input state machine.
+var TUI_MODE_NORMAL = 0;
+var TUI_MODE_FILTER = 1;
+
+# Filter buffer: caps at 64 bytes (comm is TASK_COMM_LEN=16, so 64 is
+# overkill but cheap insurance in case future filtering targets the
+# full cmdline). Reset on Esc; mutated by typed printables and
+# Backspace while in Filter mode.
+var TUI_FILTER_MAX = 64;
+var _tui_mode      = 0;          # TUI_MODE_NORMAL
+var _tui_filter_buf[64];
+var _tui_filter_n  = 0;
+
+# Filtered process list — indices into _proc_recs, in sorted order.
+# Built each frame after sample/sort. Selection + view_offset operate
+# in filtered space (index into this array), not absolute proc_recs
+# space. With an empty filter, _tui_filtered_idx[i] == i and
+# _tui_filtered_n == _proc_n (the trivial pass-through).
+#
+# Sized for 1024 u64 entries = 8 KB — matches the PROC_MAX cap on
+# proc_recs. Heap-equivalent footprint, fits comfortably.
+var _tui_filtered_idx[8192];
+var _tui_filtered_n = 0;
+
+# True if the proc at absolute index `rec_idx` matches the current
+# filter. Empty filter matches everything. Substring match against
+# the comm field (offset 32 in each rec) — fast, no /proc reads.
+fn _tui_proc_matches_filter(rec_idx) {
+    if (_tui_filter_n == 0) { return 1; }
+    var rec = _proc_recs + rec_idx * PROC_REC_SIZE;
+    var comm = rec + 32;
+    var comm_len = strlen(comm);
+    if (comm_len < _tui_filter_n) { return 0; }
+    var i = 0;
+    var max_start = comm_len - _tui_filter_n;
+    while (i <= max_start) {
+        if (memeq(comm + i, &_tui_filter_buf, _tui_filter_n) == 1) {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Reset filter to empty + drop selection/viewport to the top. Called
+# on Esc in Filter mode and (implicitly) when the buffer changes via
+# typing/backspace — typing should put the cursor at the top of the
+# newly-filtered list.
+fn _tui_filter_reset_position() {
+    _tui_selected_idx = 0;
+    _tui_view_offset  = 0;
+    return 0;
+}
+
+fn _tui_filter_clear() {
+    _tui_filter_n = 0;
+    _tui_filter_reset_position();
+    return 0;
+}
+
+fn _tui_filter_append_byte(b) {
+    if (_tui_filter_n >= TUI_FILTER_MAX) { return 0; }
+    store8(&_tui_filter_buf + _tui_filter_n, b);
+    _tui_filter_n = _tui_filter_n + 1;
+    _tui_filter_reset_position();
+    return 0;
+}
+
+fn _tui_filter_backspace() {
+    if (_tui_filter_n > 0) {
+        _tui_filter_n = _tui_filter_n - 1;
+        _tui_filter_reset_position();
+    }
+    return 0;
+}
+
 # Cycle through SORT_CPU → MEM → PID → NAME → CPU. Called from `s`.
 fn _tui_cycle_sort() {
     if (_tui_sort_key == SORT_CPU)       { _tui_sort_key = SORT_MEM; }
@@ -171,12 +256,17 @@ fn _tui_select_up() {
 }
 
 fn _tui_select_down() {
-    var max_navigable = _proc_n;
+    # max_navigable now uses _tui_filtered_n (the post-filter count)
+    # so ↓ stops at the bottom of the filtered list, not the absolute
+    # process list. _tui_filtered_n == _proc_n when the filter is empty.
+    var max_navigable = _tui_filtered_n;
     if (max_navigable > _tui_top_n) { max_navigable = _tui_top_n; }
     if (_tui_selected_idx + 1 < max_navigable) {
         _tui_selected_idx = _tui_selected_idx + 1;
     }
-    var max_rows = _tui_rows - 4;
+    # Slice E.5: bottom row reserved for status line, so visible
+    # process rows = _tui_rows - 5 (4 header rows + 1 status row).
+    var max_rows = _tui_rows - 5;
     if (max_rows < 1) { max_rows = 1; }
     if (_tui_selected_idx >= _tui_view_offset + max_rows) {
         _tui_view_offset = _tui_selected_idx - max_rows + 1;
@@ -206,7 +296,10 @@ fn _tui_select_down() {
 fn tui_render_frame() {
     var sort_key = _tui_sort_key;
     var top_n    = _tui_top_n;
-    var max_rows = _tui_rows - 4;
+    # Slice E.5: reserve bottom row for the status line, so visible
+    # process rows = _tui_rows - 5. The render still always paints
+    # rows 1-4 (host/mem/cpu/table-header) and row _tui_rows (status).
+    var max_rows = _tui_rows - 5;
     if (max_rows < 0) { max_rows = 0; }
     var buf[8192];
 
@@ -308,10 +401,23 @@ fn tui_render_frame() {
     syscall(1, 1, "   PID S  CPU%  MEM% CMD", 24);
     tty_clear_to_eol();
 
-    # max_navigable = total selectable rows (bound by --top + actual
+    # Slice E.5: build the filtered index list. Walks _proc_recs in
+    # sorted order; appends matching abs indices to _tui_filtered_idx.
+    # Empty filter → trivial pass-through (filtered_n == _proc_n).
+    _tui_filtered_n = 0;
+    var fi = 0;
+    while (fi < _proc_n) {
+        if (_tui_proc_matches_filter(fi) == 1) {
+            store64(&_tui_filtered_idx + _tui_filtered_n * 8, fi);
+            _tui_filtered_n = _tui_filtered_n + 1;
+        }
+        fi = fi + 1;
+    }
+
+    # max_navigable = total selectable rows (bound by --top + filtered
     # proc count, NOT by terminal height). max_rows = how many fit
     # on screen at once.
-    var max_navigable = _proc_n;
+    var max_navigable = _tui_filtered_n;
     if (max_navigable > top_n) { max_navigable = top_n; }
 
     # Re-clamp selection + view_offset in case state shifted between
@@ -347,13 +453,17 @@ fn tui_render_frame() {
     var i = 0;
     while (i < n) {
         tty_move(5 + i, 1);
-        var abs_idx = _tui_view_offset + i;
+        # filtered_pos = position within the filtered/sorted list;
+        # abs_idx = position within _proc_recs (resolved via filtered_idx).
+        # Selection lives in filtered space — match against filtered_pos.
+        var filtered_pos = _tui_view_offset + i;
+        var abs_idx = load64(&_tui_filtered_idx + filtered_pos * 8);
         # Reverse-video the selected row. The invert sequence stays
         # active through the row content AND the trailing tty_clear_to_eol
         # so the highlight extends edge-to-edge — matches htop's
         # selection bar. Reset before moving to the next row.
         var is_sel = 0;
-        if (abs_idx == _tui_selected_idx) { _tui_invert_on(); is_sel = 1; }
+        if (filtered_pos == _tui_selected_idx) { _tui_invert_on(); is_sel = 1; }
 
         var rec = _proc_recs + abs_idx * PROC_REC_SIZE;
         var pid = load64(rec + 0);
@@ -411,17 +521,81 @@ fn tui_render_frame() {
         i = i + 1;
     }
 
-    # Wipe any leftover rows below the last process row — but only if
-    # there's actually space below. tty_move(row, col) past the
-    # terminal's bottom row scrolls the alt-screen on some terminals
-    # (the cursor reaches the bottom and the next \n / write triggers
-    # a one-line scroll-up), pushing the top header off-screen and
-    # making the bottom highlight appear to vanish. Guard the move.
-    if (5 + n <= _tui_rows) {
+    # Wipe any leftover rows between the last process row and the
+    # status row. tty_move(row, col) past the terminal's bottom row
+    # scrolls the alt-screen on some terminals — guard the move with
+    # `< _tui_rows` (not `<=`) since the status row at `_tui_rows`
+    # is rewritten unconditionally below.
+    if (5 + n < _tui_rows) {
         tty_move(5 + n, 1);
         tty_clear_to_end();
     }
 
+    # ----- row _tui_rows: status line -----
+    _tui_render_status();
+
+    return 0;
+}
+
+# Append `s` (cstring) into `buf` at position `pos`, capped at `max`.
+# Returns bytes appended. Used by _tui_render_status to compose the
+# status line into a stack buffer with truncation, so a narrow
+# terminal can't wrap the status into the table area.
+fn _tui_status_append(buf, pos, max, s) {
+    var slen = strlen(s);
+    var avail = max - pos;
+    if (slen > avail) { slen = avail; }
+    if (slen <= 0) { return 0; }
+    var i = 0;
+    while (i < slen) {
+        store8(buf + pos + i, load8(s + i));
+        i = i + 1;
+    }
+    return slen;
+}
+
+# Append raw bytes from `src` (length `src_n`) into `buf` at `pos`,
+# capped at `max`. Used to copy the filter buffer into the status
+# line — those bytes are NOT cstring-terminated.
+fn _tui_status_append_bytes(buf, pos, max, src, src_n) {
+    var avail = max - pos;
+    if (src_n > avail) { src_n = avail; }
+    if (src_n <= 0) { return 0; }
+    var i = 0;
+    while (i < src_n) {
+        store8(buf + pos + i, load8(src + i));
+        i = i + 1;
+    }
+    return src_n;
+}
+
+# Render the status line at row _tui_rows. Composes into a 256-byte
+# stack buffer with terminal-width clipping, then writes the whole
+# row in one syscall (avoids partial-paint flicker).
+fn _tui_render_status() {
+    tty_move(_tui_rows, 1);
+    var sbuf[256];
+    var pos = 0;
+    var max = _tui_cols;
+    if (max > 256) { max = 256; }
+
+    if (_tui_mode == TUI_MODE_FILTER) {
+        pos = pos + _tui_status_append(&sbuf, pos, max, "filter: ");
+        pos = pos + _tui_status_append_bytes(&sbuf, pos, max, &_tui_filter_buf, _tui_filter_n);
+        pos = pos + _tui_status_append(&sbuf, pos, max, "_  (Enter: apply, Esc: clear)");
+    } else {
+        # ↑↓ are 3-byte UTF-8 each (E2 86 91 / E2 86 93). The literal
+        # below uses the byte escapes directly so the source isn't
+        # sensitive to editor encoding.
+        pos = pos + _tui_status_append(&sbuf, pos, max, "[\xe2\x86\x91\xe2\x86\x93] move  [s] sort  [f] filter  [q] quit");
+        if (_tui_filter_n > 0) {
+            pos = pos + _tui_status_append(&sbuf, pos, max, "  filter: ");
+            pos = pos + _tui_status_append_bytes(&sbuf, pos, max, &_tui_filter_buf, _tui_filter_n);
+        }
+    }
+
+    if (pos > 0) { syscall(1, 1, &sbuf, pos); }
+    tty_clear_to_eol();
     return 0;
 }
 
@@ -442,12 +616,14 @@ fn tui_run(refresh_ms, sort_key, top_n) {
     }
 
     # Seed interactive state from CLI params. The render loop reads
-    # these globals each frame; keypresses (s, ↑, ↓) mutate them in
+    # these globals each frame; keypresses (s, ↑, ↓, f) mutate them in
     # place so changes apply immediately.
     _tui_sort_key     = sort_key;
     _tui_top_n        = top_n;
     _tui_selected_idx = 0;
     _tui_view_offset  = 0;
+    _tui_mode         = TUI_MODE_NORMAL;
+    _tui_filter_n     = 0;
 
     # Open two signalfds — one for exit signals (HUP/INT/TERM) so
     # external `kill <pid>` cleanly tears down, one for SIGWINCH so
@@ -529,16 +705,47 @@ fn tui_run(refresh_ms, sort_key, top_n) {
                 tui_render_frame();
             }
             else {
-                # stdin
+                # stdin — dispatch by mode
                 var k = _tui_read_key();
-                if (k == 113) { loop = 0; }                         # 'q'
-                elif (k == 3) { loop = 0; }                         # Ctrl-C
-                elif (k < 0)  { loop = 0; }                         # EOF / read error
-                elif (k == KEY_UP)   { _tui_select_up();   tui_render_frame(); }
-                elif (k == KEY_DOWN) { _tui_select_down(); tui_render_frame(); }
-                elif (k == 115)      { _tui_cycle_sort();  tui_render_frame(); }   # 's'
-                # Other keys ignored. Slice E.5 adds 'f' for filter,
-                # Slice F adds 'k' for kill-with-confirm.
+                if (_tui_mode == TUI_MODE_FILTER) {
+                    # Filter mode: typed printables append to buffer,
+                    # Backspace deletes, Enter exits to Normal (filter
+                    # persists), Esc clears + exits to Normal.
+                    if (k < 0) { loop = 0; }
+                    elif (k == 0x1b) {
+                        _tui_filter_clear();
+                        _tui_mode = TUI_MODE_NORMAL;
+                        tui_render_frame();
+                    }
+                    elif (k == 13) {
+                        _tui_mode = TUI_MODE_NORMAL;
+                        tui_render_frame();
+                    }
+                    elif (k == 0x7f) { _tui_filter_backspace(); tui_render_frame(); }
+                    elif (k == 8)    { _tui_filter_backspace(); tui_render_frame(); }
+                    else {
+                        if (k >= 32) {
+                            if (k <= 126) {
+                                _tui_filter_append_byte(k);
+                                tui_render_frame();
+                            }
+                        }
+                    }
+                }
+                else {
+                    # Normal mode
+                    if (k == 113) { loop = 0; }                          # 'q'
+                    elif (k == 3) { loop = 0; }                          # Ctrl-C
+                    elif (k < 0)  { loop = 0; }                          # EOF / read error
+                    elif (k == KEY_UP)   { _tui_select_up();   tui_render_frame(); }
+                    elif (k == KEY_DOWN) { _tui_select_down(); tui_render_frame(); }
+                    elif (k == 115)      { _tui_cycle_sort();  tui_render_frame(); }   # 's'
+                    elif (k == 102)      {                                              # 'f'
+                        _tui_mode = TUI_MODE_FILTER;
+                        tui_render_frame();
+                    }
+                    # Other keys ignored. Slice F adds 'k' for kill-with-confirm.
+                }
             }
         } else {
             # Degraded path — no signal multiplexing AND no refresh

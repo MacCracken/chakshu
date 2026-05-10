@@ -4,7 +4,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Added
+
+- **M2 Slice E.5 — filter mode + status line.** New bottom row
+  displays keybind hints in Normal mode (`[↑↓] move  [s] sort
+  [f] filter  [q] quit`, plus `filter: <buf>` if active) and a
+  prompt in Filter mode (`filter: <buf>_  (Enter: apply, Esc:
+  clear)`). `f` (in Normal) enters Filter mode; printable chars
+  append to the filter buffer, Backspace deletes the last byte,
+  Enter exits to Normal (filter persists), Esc clears the filter
+  and exits to Normal. Filter is a substring match against each
+  process's `comm` field (16-byte cstring already in proc_recs —
+  no extra /proc reads per frame). Filter against the full
+  cmdline is a future polish item.
+- New module globals: `_tui_mode`, `TUI_MODE_NORMAL`,
+  `TUI_MODE_FILTER`, `_tui_filter_buf[64]`, `_tui_filter_n`,
+  `_tui_filtered_idx[8192]` (1024 u64 indices),
+  `_tui_filtered_n`. Selection + viewport now operate in filtered
+  space — `_tui_select_down` and the render loop use
+  `_tui_filtered_n` instead of `_proc_n`.
+- New helpers: `_tui_proc_matches_filter`, `_tui_filter_clear`,
+  `_tui_filter_append_byte`, `_tui_filter_backspace`,
+  `_tui_render_status`, `_tui_status_append`,
+  `_tui_status_append_bytes`. Status text composed into a 256-byte
+  stack buffer with terminal-width clipping (no narrow-terminal
+  wrap that could trigger the alt-screen scroll bug from Slice E).
+- Mode-aware key dispatch in `tui_run` — Filter mode handles
+  Esc / Enter / Backspace (0x7f and 0x08) / printable bytes
+  (0x20-0x7e); Normal mode keeps q/Ctrl-C/↑/↓/s and adds `f`.
+
+### Changed
+
+- Bottom terminal row reserved for the status line. `max_rows`
+  for the process table is now `_tui_rows - 5` (was `_tui_rows - 4`).
+  `_tui_select_down` and `tui_render_frame` both updated.
+- Post-render clear-to-end now uses `<` instead of `<=` (the status
+  row is rewritten unconditionally — don't redundantly wipe it
+  first).
 
 ## [0.2.2] — 2026-05-09 — M2 Slices D+E + QA pass
 
