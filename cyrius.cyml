@@ -5,7 +5,7 @@ description = "The eye — AI-augmented system monitor for AGNOS / Cyrius"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/chakshu"
 language = "cyrius"
-cyrius = "5.9.32"
+cyrius = "5.10.20"
 
 [build]
 entry = "src/main.cyr"
@@ -44,3 +44,15 @@ stdlib = [
     "tagged",
     "assert",
 ]
+
+# darshana — Linux TTY/raw-mode primitives (termios, ANSI, cursor).
+# Picked up at M2 entry per the roadmap "Pre-M2 — TTY/termios lib
+# extraction" plan. Provides tty_raw / tty_cooked / tty_alt_enter /
+# tty_alt_leave / tty_clear / tty_cursor_* / tty_move + the TIO_*
+# flag constants. M2 Slice A wires the smallest possible TUI
+# (alt-screen + restore-on-exit) against this; later slices grow the
+# render loop, keybinds, SIGWINCH handler, etc.
+[deps.darshana]
+git = "https://github.com/MacCracken/darshana.git"
+tag = "0.2.0"
+modules = ["dist/darshana.cyr"]

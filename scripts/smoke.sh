@@ -44,9 +44,19 @@ h_short=$("$BIN" -h) || fail "-h exited non-zero"
 [ "$h_long" = "$h_short" ] || fail "-h disagrees with --help"
 pass "help short/long parity"
 
-# Bare invocation prints help (M2+ launches TUI here; today, help).
-"$BIN" >/dev/null 2>&1 || fail "bare invocation exited non-zero"
-pass "bare invocation → help, exit 0"
+# Bare invocation launches the TUI (M2 Slice A). In non-TTY contexts
+# (CI runners, scripts with stdin redirected) tui_run exits 1 with
+# "stdin is not a TTY (use -p for plain mode)". Force stdin to
+# /dev/null so this assertion is deterministic regardless of where
+# smoke.sh is invoked from. The actual TUI surface is exercised by
+# the PTY-based smoke gate that lands at M2 Slice G.
+set +e
+"$BIN" </dev/null >/dev/null 2>"$TMPDIR/err"
+rc=$?
+set -e
+[ "$rc" -eq 1 ]                                || fail "bare in non-TTY exit was $rc, want 1"
+grep -q "not a TTY" "$TMPDIR/err"              || fail "bare non-TTY missing 'not a TTY' message"
+pass "bare in non-TTY → exit 1 with not-a-TTY stderr"
 
 # Unknown flag → EXIT_USAGE (2), error to stderr.
 set +e

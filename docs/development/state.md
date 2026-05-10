@@ -14,14 +14,14 @@
 | Field | Value |
 |-------|-------|
 | Version | **0.2.0** |
-| Cyrius toolchain pin | `5.9.32` (cyrius.cyml `[package].cyrius`) |
+| Cyrius toolchain pin | `5.10.20` (cyrius.cyml `[package].cyrius`) — bumped from 5.9.32 alongside the darshana v0.1.0 scaffold |
 | Genesis cycle | v5.9.x — niyama-fold opener / catchup arc |
-| Active milestone | **M1 — Plain snapshot** ✓ closed |
-| Next milestone | **M2 — Full TUI** |
+| Active milestone | **M2 — Full TUI** (Slice A landed; B–G pending) |
+| Next milestone | **M3 — AI integration** |
 | Binary | `shu` (build/shu) — System Health Utility, per ADR 0001 |
-| Binary size (DCE) | 141 488 bytes (~138 KB) — was 85 KB at M0; +53 KB for proc/snapshot/processes + chrono/hashmap/vec |
-| Lines of Cyrius | src/{main,snapshot,proc,processes}.cyr (~800 LoC) |
-| Test count | 57 assertions across 13 groups |
+| Binary size (DCE) | 148 736 bytes (~145 KB) — was 138 KB at M1 close; +7 KB for tui.cyr + the darshana symbols actually called |
+| Lines of Cyrius | src/{main,snapshot,proc,processes,tui}.cyr (~875 LoC) — does **not** include lib/darshana.cyr (resolved via cyrius deps from the darshana 0.2.0 release) |
+| Test count | 57 assertions across 13 groups (Slice A's TUI surface needs PTY-based testing — lands at Slice G) |
 | `shu -p` wall time | ~110 ms (100 ms sample window + ~10 ms work). Roadmap gate `< 30 ms` work-budget met with 3× margin. |
 
 ## Dependency Envelope
@@ -53,6 +53,7 @@ args chrono hashmap process tagged assert
 |---|-------|--------|
 | M0 | Scaffold | **Gate cleared** — `cyrius deps`/`build`/`test` all green; `shu --version` / `--help` / `--watch` (placeholder) / unknown-flag paths exercised |
 | M1 | Plain snapshot | **Closed (v0.2.0)** — all four slices landed. `shu -p` produces a header + memory + cpu/disk/net rates + sortable top-N process table with cmdline. Perf gate met. |
+| M2 | Full TUI | **In progress** — Slice A (minimum viable TUI: alt-screen + raw mode + q/Ctrl-C exit) ✓; Slices B (signals), C (render loop + M1 snapshot reuse), D (SIGWINCH), E (keybinds), F (kill+confirm), G (--pid + color + PTY smoke + close) pending. Powered by darshana 0.2.0 — chakshu has no termios code of its own. |
 | M2 | Full TUI | Not started |
 | M3 | AI integration | Not started |
 | M4 | Polish + perf | Not started |

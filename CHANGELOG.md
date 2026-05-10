@@ -4,7 +4,40 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Added
+
+- **M2 Slice A — minimum viable TUI.** Bare `shu` invocation now
+  enters the alt-screen + raw mode via darshana, paints a placeholder,
+  and reads input one byte at a time. Exits cleanly on `q` or Ctrl-C
+  (the latter arrives as byte 0x03 because `tty_apply_raw_flags`
+  clears ISIG — same convention as vim). On non-TTY stdin (CI runners,
+  `shu < /dev/null`), `tty_raw` fails and we exit 1 with a stderr
+  message pointing the user at `-p` for plain mode.
+- New `src/tui.cyr` — `tui_run()` plus `_tui_print_cstr` /
+  `_tui_read_key` / `_tui_teardown` helpers. Slices B–G grow this:
+  signal-safe cleanup (B), real refresh loop reusing the M1 snapshot
+  (C), SIGWINCH (D), keybinds (E), kill-with-confirm (F), `--pid`
+  focus + color + PTY smoke (G).
+- **darshana 0.2.0 wired in.** `cyrius.cyml` now declares
+  `[deps.darshana]` git+tag+modules pointing at the published v0.2.0
+  release; `cyrius deps` resolves `dist/darshana.cyr` into
+  `lib/darshana.cyr` and `cyrius.lock` records the SHA256. The TTY
+  primitives (`tty_raw`, `tty_cooked`, `tty_alt_enter/leave`,
+  `tty_clear`, `tty_cursor_*`, `tty_move`) all come from darshana —
+  chakshu has no termios code of its own.
+
+### Changed
+
+- Bare `shu` no longer prints `--help`; it launches the TUI per the
+  design-spec. `--help` still works for the help text. Smoke updated:
+  the prior `bare → exit 0` assertion is now `bare in non-TTY →
+  exit 1 with 'not a TTY' stderr`.
+
+- **Cyrius toolchain pin bumped 5.9.32 → 5.10.20** (`cyrius.cyml [package].cyrius`). Coordinated with the [darshana](https://github.com/MacCracken/darshana) v0.1.0 scaffold (which chakshu picks up at M2/Phase 5 of the TUI extraction plan); both repos move together. Build/test/smoke verified green at the new pin: 57/57 tests pass, `shu -p` wall ~108 ms.
+
+### Fixed
+
+- CI Test step uses explicit `cyrius test tests/chakshu.tcyr` rather than bare `cyrius test`. The bare form's auto-discovery failed in darshana's CI on the 5.10.20 toolchain artifact (`No .tcyr files found in tests/tcyr/ or tests/` despite the file being checked in); chakshu would have hit the same regression on its next CI run. Documented form per `cyrius help test` is `cyrius test <test.cyr>` — using it explicitly removes the discovery surface from CI.
 
 ## [0.2.0] — 2026-05-07 — M1 close
 

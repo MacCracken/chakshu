@@ -7,9 +7,11 @@
 # architecture stub pre-supposes a proc/ subdir; we'll promote
 # proc.cyr → proc/{cpu,disk,net,pid}.cyr when M1 Slice B/C land
 # and the file gets unwieldy. Flat is fine while the parsers fit.
+include "lib/darshana.cyr"
 include "src/proc.cyr"
 include "src/processes.cyr"
 include "src/snapshot.cyr"
+include "src/tui.cyr"
 
 # Keep CHAKSHU_VERSION in sync with the VERSION file.
 # A future CI check will enforce equality; for now, manual.
@@ -29,8 +31,8 @@ fn print_help() {
     println("chakshu — AI-augmented system monitor for AGNOS");
     println("");
     println("Usage:");
-    println("  shu [OPTIONS]            Full TUI (M2+)");
-    println("  shu -p                   Plain snapshot (host/uptime/load/mem; cpu+procs in M1 B/C)");
+    println("  shu [OPTIONS]            Full TUI (alt-screen + raw mode; M2 Slice A placeholder, real layout in C+)");
+    println("  shu -p                   Plain snapshot (host/uptime/load/mem/cpu/disk/net + top-N process table)");
     println("  shu --pid <PID>          Focus a single process (M2+)");
     println("  shu --explain <PID>      AI explanation (M3+)");
     println("  shu --watch              Anomaly stream (M3+)");
@@ -91,8 +93,12 @@ fn main() {
     var n = argc();
 
     if (n < 2) {
-        # No args — would launch TUI at M2+. Until then, print help.
-        return print_help();
+        # M2 entry — bare `shu` launches the TUI. Slice A is a
+        # placeholder paint + q-to-quit; real refresh loop lives
+        # in Slice C. tui_run() handles the not-a-TTY case
+        # (stdin redirected) by exiting EXIT_ERR with a stderr
+        # message pointing the user at `-p`.
+        return tui_run();
     }
 
     # Accumulate flags first, then dispatch at the bottom. Mode flags
