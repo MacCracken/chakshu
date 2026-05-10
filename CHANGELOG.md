@@ -4,6 +4,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.2.4] — 2026-05-10 — kill action
+
+A patch release shipping Slice F: the selection finally does
+something. `k` on a selected process opens a `Kill PID <N>? [y/N]`
+confirm; `y` sends SIGTERM; anything else cancels. q is
+intentionally cancel-only inside confirm so an accidental q
+during the prompt doesn't quit the whole app.
+
 ### Added
 
 - **M2 Slice F — kill key + confirm dialog.** `k` (Normal mode)
