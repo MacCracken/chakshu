@@ -53,7 +53,7 @@ args chrono hashmap process tagged assert
 |---|-------|--------|
 | M0 | Scaffold | **Gate cleared** — `cyrius deps`/`build`/`test` all green; `shu --version` / `--help` / `--watch` (placeholder) / unknown-flag paths exercised |
 | M1 | Plain snapshot | **Closed (v0.2.0)** — all four slices landed. `shu -p` produces a header + memory + cpu/disk/net rates + sortable top-N process table with cmdline. Perf gate met. |
-| M2 | Full TUI | **In progress** — Slices A+B+C+D+E+E.5+F + G.1 (PTY smoke) + G.2 (16-color theme + `--color`) ✓; G.3 (--pid focus, cuts as 0.4.0), G.4 (M2 close review + audit, cuts as 0.5.0) pending. Powered by **darshana 0.3.0** — chakshu has zero termios/ANSI code of its own. |
+| M2 | Full TUI | **In progress** — released through **v0.3.0** (Slices A through G.2). Slice G.3 (`--pid` focus mode) **code landed, manual QA pending** before v0.4.0 cut — see roadmap §M2 for the QA checklist. G.4 (M2 close review + audit, cuts as 0.5.0) is the only remaining piece after G.3 ships. Powered by **darshana 0.3.0** — chakshu has zero termios/ANSI code of its own. |
 | M2 | Full TUI | Not started |
 | M3 | AI integration | Not started |
 | M4 | Polish + perf | Not started |

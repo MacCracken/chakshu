@@ -4,7 +4,39 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Added
+
+- **M2 Slice G.3 — `--pid N` focus mode.** New CLI flag launches
+  the TUI focused on a single process. Layout (4 rows + status):
+  - Row 1: `host: ...  up: ...  load: ...` (same as table mode)
+  - Row 2: `── PID <N> (<comm>) <state> ──` (state colored)
+  - Row 3: `ppid: X  uid: X  threads: X  rss: X KiB  mem: X%`
+  - Row 4: `cmdline: <full cmdline, clipped to terminal width>`
+  - Status row: `[k] kill  [q] quit  (focus mode — single process)`
+
+  Refresh tick still applies (1Hz default). If the focused process
+  exits during refresh, rows 2-4 collapse to `PID N has exited.`
+  in red and the status row updates to `[q] quit (focused process
+  exited)` — user can see the death and quit cleanly.
+
+  `--pid` validates the PID exists at startup by attempting to open
+  `/proc/<N>/stat`; failure exits 1 with `chakshu: --pid N: no such
+  process`. `--pid 0` and missing-value get EXIT_USAGE.
+
+- **Render dispatcher.** `tui_render_frame` is now a 5-line
+  dispatcher that picks `tui_render_table_frame` (existing, renamed)
+  or `tui_render_focus_frame` (new) based on `_tui_focus_pid`. All
+  call sites unchanged — refresh tick / SIGWINCH / key events still
+  call `tui_render_frame`.
+
+- **Focus-mode key handling.** Sort/filter/arrow keys are no-ops
+  in focus mode (no selection, no sortable list). `k` kills the
+  focused pid (rather than the selected row); confirm flow shared
+  with table mode. q/Ctrl-C exit; signalfd cleanup unaffected.
+
+- **PTY smoke test #7** — exercises `shu --pid 1 → q`, asserts
+  `PID 1` header + `cmdline:` label + `focus mode` status hint
+  are present in output.
 
 ## [0.3.0] — 2026-05-10 — color theme
 

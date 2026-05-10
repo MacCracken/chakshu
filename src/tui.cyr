@@ -54,8 +54,15 @@
 # CLI flag from main.cyr seeds the color-enabled global; auto
 # currently behaves as always in TUI mode (plain mode is always
 # uncolored).
-# Slices G.3-G.4:
-#   G.3 — --pid focus mode
+# M2 Slice G.3: --pid N focus mode. Single-process detail view —
+# header / pid+name+state / ppid+uid+threads+rss+mem% / full
+# cmdline / status. tui_render_frame is now a dispatcher that
+# picks tui_render_table_frame (default) vs tui_render_focus_frame
+# based on _tui_focus_pid. Sort/filter/arrow keys are no-ops in
+# focus mode; q/Ctrl-C exits, k kills the focused pid (confirm
+# flow shared with table mode). Threads list / fd enumeration /
+# focused-pid CPU% deferred to a polish slice.
+# Slice G.4:
 #   G.4 — M2 close review + audit
 #
 # All TTY primitives come from darshana — `tty_raw` / `tty_cooked` /
@@ -177,6 +184,11 @@ var _tui_sort_key     = 0;
 var _tui_top_n        = 10;
 var _tui_selected_idx = 0;
 var _tui_view_offset  = 0;
+
+# 0 = table mode (default); else = the pid this TUI is focused on.
+# Set once at tui_run startup from --pid; never mutated. Render
+# dispatcher picks the appropriate frame fn based on this.
+var _tui_focus_pid    = 0;
 
 # Synthesized key codes for multi-byte CSI escape sequences. Returned
 # by _tui_read_key alongside raw byte values 0..255 — chosen above
@@ -405,6 +417,183 @@ fn _tui_select_down() {
     return 0;
 }
 
+# Top-level frame dispatcher. Every render path (initial paint,
+# refresh tick, key event, SIGWINCH) calls this; it routes to
+# table mode (default) or focus mode (--pid N from CLI).
+fn tui_render_frame() {
+    if (_tui_focus_pid != 0) {
+        tui_render_focus_frame();
+    } else {
+        tui_render_table_frame();
+    }
+    return 0;
+}
+
+# Render the single-process focus view (--pid N). Layout:
+#   row 1            host: <name>  up: <Nd HH:MM>  load: ...
+#   row 2            ── PID <N> (<comm>) <state> ──
+#   row 3            ppid: X  uid: X  threads: X  rss: X KiB  mem: X%
+#   row 4            cmdline: <full cmdline, clipped to terminal width>
+#   row _tui_rows    status: keybind hints
+#
+# If the focused pid no longer exists (process exited during refresh),
+# rows 2-4 collapse to "PID <N> has exited." and the status row tells
+# the user to press q.
+fn tui_render_focus_frame() {
+    var pid = _tui_focus_pid;
+    var pid_str[24];
+    _proc_int_to_cstr(pid, &pid_str);
+
+    # ----- row 1: host/up/load (same as table mode) -----
+    var hbuf[8192];
+    tty_cursor_home();
+    _tui_color_bold(); syscall(1, 1, "host: ", 6); _tui_color_reset();
+    var hn_n = proc_read("/proc/sys/kernel/hostname", &hbuf, 8192);
+    if (hn_n > 0) {
+        hn_n = proc_trim_trailing_nl(&hbuf, hn_n);
+        syscall(1, 1, &hbuf, hn_n);
+    }
+    _tui_color_bold(); syscall(1, 1, "  up: ", 6); _tui_color_reset();
+    var up_n = proc_read("/proc/uptime", &hbuf, 8192);
+    if (up_n > 0) { snapshot_print_uptime(proc_uptime_secs(&hbuf)); }
+    _tui_color_bold(); syscall(1, 1, "  load: ", 8); _tui_color_reset();
+    var la_n = proc_read("/proc/loadavg", &hbuf, 8192);
+    if (la_n > 0) {
+        var prefix = proc_loadavg_prefix_len(&hbuf, la_n);
+        syscall(1, 1, &hbuf, prefix);
+    }
+    tty_clear_to_eol();
+
+    # ----- read /proc/<pid>/stat — also tells us if the pid is still alive -----
+    var stat_path[64];
+    proc_pid_path(&pid_str, "/stat", &stat_path);
+    var stat_buf[1024];
+    var sn = file_read_all(&stat_path, &stat_buf, 1023);
+
+    if (sn <= 0) {
+        # Process gone — show terse exit message + clear the rest.
+        tty_move(2, 1);
+        _tui_color_bold(); _tui_color_red();
+        syscall(1, 1, "PID ", 4);
+        syscall(1, 1, &pid_str, strlen(&pid_str));
+        syscall(1, 1, " has exited.", 12);
+        _tui_color_reset();
+        tty_clear_to_eol();
+        if (3 < _tui_rows) {
+            tty_move(3, 1);
+            tty_clear_to_end();
+        }
+        tty_move(_tui_rows, 1);
+        syscall(1, 1, "[q] quit  (focused process exited)", 34);
+        tty_clear_to_eol();
+        return 0;
+    }
+    store8(&stat_buf + sn, 0);
+
+    var srec[48];
+    proc_pid_stat_parse(&stat_buf, sn, &srec);
+    var state = load64(&srec + 0);
+    var rss   = load64(&srec + 16);
+
+    # ----- row 2: PID + comm + state header -----
+    tty_move(2, 1);
+    _tui_color_bold();
+    syscall(1, 1, "── PID ", 11);   # box-drawing chars are 3 bytes each in UTF-8
+    print_num(pid);
+    syscall(1, 1, " (", 2);
+    syscall(1, 1, &srec + 24, strlen(&srec + 24));
+    syscall(1, 1, ") ", 2);
+    _tui_color_reset();
+    _tui_color_state(state);
+    var sc[2];
+    store8(&sc, state);
+    store8(&sc + 1, 0);
+    syscall(1, 1, &sc, 1);
+    _tui_color_reset();
+    _tui_color_bold(); syscall(1, 1, " ──", 4); _tui_color_reset();
+    tty_clear_to_eol();
+
+    # ----- read /proc/<pid>/status for ppid/uid/threads -----
+    var status_path[64];
+    proc_pid_path(&pid_str, "/status", &status_path);
+    var status_buf[8192];
+    var stn = file_read_all(&status_path, &status_buf, 8191);
+    if (stn > 0) { store8(&status_buf + stn, 0); }
+    var ppid_val    = proc_meminfo_field(&status_buf, "PPid:");
+    var uid_val     = proc_meminfo_field(&status_buf, "Uid:");
+    var threads_val = proc_meminfo_field(&status_buf, "Threads:");
+
+    # ----- read /proc/meminfo for mem% calc -----
+    var mi_buf[8192];
+    var min = proc_read("/proc/meminfo", &mi_buf, 8192);
+    var mem_total_kb = 0;
+    if (min > 0) {
+        mem_total_kb = proc_meminfo_field(&mi_buf, "MemTotal:");
+    }
+    var mem_pct = 0;
+    if (mem_total_kb > 0) {
+        mem_pct = rss * 400 / mem_total_kb;
+    }
+
+    # ----- row 3: ppid / uid / threads / rss / mem% -----
+    tty_move(3, 1);
+    _tui_color_bold(); syscall(1, 1, "ppid: ", 6); _tui_color_reset();
+    print_num(ppid_val);
+    _tui_color_bold(); syscall(1, 1, "  uid: ", 7); _tui_color_reset();
+    print_num(uid_val);
+    _tui_color_bold(); syscall(1, 1, "  threads: ", 11); _tui_color_reset();
+    print_num(threads_val);
+    _tui_color_bold(); syscall(1, 1, "  rss: ", 7); _tui_color_reset();
+    print_num(rss * 4);   # rss in pages * 4KB/page = KiB on x86_64/aarch64
+    syscall(1, 1, " KiB", 4);
+    _tui_color_bold(); syscall(1, 1, "  mem: ", 7); _tui_color_reset();
+    _tui_color_pct_band(mem_pct, 50, 80);
+    print_num(mem_pct);
+    _tui_color_reset();
+    syscall(1, 1, "%", 1);
+    tty_clear_to_eol();
+
+    # ----- row 4: full cmdline -----
+    tty_move(4, 1);
+    _tui_color_bold(); syscall(1, 1, "cmdline: ", 9); _tui_color_reset();
+    var cmd_buf[4096];
+    var cmd_n = _proc_read_cmdline(&pid_str, &cmd_buf, 4096);
+    var avail = _tui_cols - 9;
+    if (avail < 0) { avail = 0; }
+    if (cmd_n > 0) {
+        var to_print = cmd_n;
+        if (to_print > avail) { to_print = avail; }
+        if (to_print > 0) { syscall(1, 1, &cmd_buf, to_print); }
+    } else {
+        # Kernel thread — show bracketed comm
+        syscall(1, 1, "[", 1);
+        syscall(1, 1, &srec + 24, strlen(&srec + 24));
+        syscall(1, 1, "] (kernel thread)", 17);
+    }
+    tty_clear_to_eol();
+
+    # ----- wipe rows between cmdline and status -----
+    if (5 < _tui_rows) {
+        tty_move(5, 1);
+        tty_clear_to_end();
+    }
+
+    # ----- status line: focus-mode keybinds -----
+    tty_move(_tui_rows, 1);
+    if (_tui_mode == TUI_MODE_CONFIRM_KILL) {
+        var kpid_str[24];
+        var kpid_len = _proc_int_to_cstr(_tui_kill_pid, &kpid_str);
+        syscall(1, 1, "Kill PID ", 9);
+        syscall(1, 1, &kpid_str, kpid_len);
+        syscall(1, 1, "? [y/N]", 7);
+    } else {
+        syscall(1, 1, "[k] kill  [q] quit  (focus mode — single process)", 50);
+    }
+    tty_clear_to_eol();
+
+    return 0;
+}
+
 # Render one full frame to the alt-screen. Mirrors snapshot_print()'s
 # data gather but writes line-by-line via tty_move + clear-to-eol so
 # successive frames overwrite cleanly. Same /proc reads + same 100ms
@@ -424,7 +613,7 @@ fn _tui_select_down() {
 # the full --top range, just N rows at a time. The 4 reserved rows
 # above the table: host/up/load (1) + mem (2) + cpu/disk/net (3) +
 # table-header (4). _tui_rows is set by _tui_update_winsize.
-fn tui_render_frame() {
+fn tui_render_table_frame() {
     var sort_key = _tui_sort_key;
     var top_n    = _tui_top_n;
     # Slice E.5: reserve bottom row for the status line, so visible
@@ -792,24 +981,37 @@ fn _tui_dispatch_key(k) {
         else { _tui_mode = TUI_MODE_NORMAL; tui_render_frame(); }
         return 0;
     }
-    # Normal mode
+    # Normal mode. In focus mode (--pid set) most table keybinds are
+    # no-ops (no selection, no sort, no filter); only q/Ctrl-C/k apply.
     if (k == 113)        { return 1; }                                                      # 'q'
     elif (k == 3)        { return 1; }                                                      # Ctrl-C
     elif (k < 0)         { return 1; }                                                      # EOF / read error
+    elif (k == 107)      {                                                                  # 'k'
+        if (_tui_focus_pid != 0) {
+            # Focus mode — kill target is the focused pid.
+            _tui_kill_pid = _tui_focus_pid;
+            _tui_mode = TUI_MODE_CONFIRM_KILL;
+            tui_render_frame();
+        } else {
+            # Table mode — kill target is the selected row.
+            if (_tui_filtered_n > 0) {
+                var sel_filt = _tui_selected_idx;
+                if (sel_filt >= _tui_filtered_n) { sel_filt = _tui_filtered_n - 1; }
+                var abs_idx = load64(&_tui_filtered_idx + sel_filt * 8);
+                _tui_kill_pid = load64(_proc_recs + abs_idx * PROC_REC_SIZE + 0);
+                _tui_mode = TUI_MODE_CONFIRM_KILL;
+                tui_render_frame();
+            }
+        }
+    }
+    elif (_tui_focus_pid != 0) {
+        # Focus mode swallows the rest — no selection / sort / filter.
+        return 0;
+    }
     elif (k == KEY_UP)   { _tui_select_up();   tui_render_frame(); }
     elif (k == KEY_DOWN) { _tui_select_down(); tui_render_frame(); }
     elif (k == 115)      { _tui_cycle_sort();  tui_render_frame(); }                        # 's'
     elif (k == 102)      { _tui_mode = TUI_MODE_FILTER; tui_render_frame(); }               # 'f'
-    elif (k == 107)      {                                                                  # 'k'
-        if (_tui_filtered_n > 0) {
-            var sel_filt = _tui_selected_idx;
-            if (sel_filt >= _tui_filtered_n) { sel_filt = _tui_filtered_n - 1; }
-            var abs_idx = load64(&_tui_filtered_idx + sel_filt * 8);
-            _tui_kill_pid = load64(_proc_recs + abs_idx * PROC_REC_SIZE + 0);
-            _tui_mode = TUI_MODE_CONFIRM_KILL;
-            tui_render_frame();
-        }
-    }
     return 0;
 }
 
@@ -823,7 +1025,10 @@ fn _tui_dispatch_key(k) {
 # color_mode = 0 never, 1 auto, 2 always (Slice G.2). auto and
 #              always currently both enable color in TUI; $TERM
 #              detection for true auto behavior is M3 polish.
-fn tui_run(refresh_ms, sort_key, top_n, color_mode) {
+# focus_pid  = 0 → table mode (default); else → render the focus
+#              view for that pid. Caller (main.cyr) validates the
+#              pid exists before invoking. (Slice G.3)
+fn tui_run(refresh_ms, sort_key, top_n, color_mode, focus_pid) {
     # tty_raw fails if the ioctl can't get termios — typically
     # because the fd isn't a TTY. Surface a clear error and steer
     # the user toward the always-pipeable `-p` mode.
@@ -847,6 +1052,12 @@ fn tui_run(refresh_ms, sort_key, top_n, color_mode) {
     _tui_color_enabled = 1;
     if (color_mode == 0) { _tui_color_enabled = 0; }
     _tui_color_suppress = 0;
+
+    # --pid focus pid (0 = table mode). Validation happens in main.cyr;
+    # by the time we get here, focus_pid (if non-zero) refers to a
+    # pid that existed at startup. The render handles the
+    # later-disappeared case gracefully.
+    _tui_focus_pid = focus_pid;
 
     # Open two signalfds — one for exit signals (HUP/INT/TERM) so
     # external `kill <pid>` cleanly tears down, one for SIGWINCH so

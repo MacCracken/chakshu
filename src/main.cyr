@@ -33,7 +33,7 @@ fn print_help() {
     println("Usage:");
     println("  shu [OPTIONS]            Full TUI: ↑↓ select, s sort, f filter, k kill, q quit");
     println("  shu -p                   Plain snapshot (host/uptime/load/mem/cpu/disk/net + top-N process table)");
-    println("  shu --pid <PID>          Focus a single process (M2+)");
+    println("  shu --pid <PID>          Focus a single process (status / cmdline / k to kill)");
     println("  shu --explain <PID>      AI explanation (M3+)");
     println("  shu --watch              Anomaly stream (M3+)");
     println("");
@@ -43,7 +43,7 @@ fn print_help() {
     println("  --top N                   Process-table row count (default 10)");
     println("  --rate <HZ>               TUI refresh rate (integer 1-10, default 1; fractional Hz later)");
     println("  --color <when>            auto | always | never (default auto; TUI only)");
-    println("  --pid <PID>               Focus a single process [M2+]");
+    println("  --pid <PID>               Focus a single process (validates PID exists at startup)");
     println("  --explain <PID>           Print AI explanation and exit [M3+]");
     println("  --watch                   Anomaly stream mode [M3+]");
     println("  --with-logs               Allow AI prompts to include sakshi log context [M3+]");
@@ -111,6 +111,9 @@ fn main() {
     # (TUI: on; plain: on — but plain mode currently ignores color
     # entirely per design-spec §2.2 deterministic-bytes rule).
     var color_mode  = 1;
+    # --pid N → 0 means default (table mode); else focus that pid.
+    # Validation happens at flag-parse time below (must exist in /proc).
+    var focus_pid   = 0;
 
     var i = 1;
     while (i < n) {
@@ -204,9 +207,40 @@ fn main() {
             continue;
         }
 
+        # --pid N — focus mode. Validates that /proc/N/stat is openable
+        # at parse time so the user gets immediate feedback if the pid
+        # doesn't exist; if the pid exits later (during refresh),
+        # tui_render_focus_frame shows a "PID N has exited" message.
+        if (streq(a, "--pid") == 1) {
+            if (i + 1 >= n) {
+                eprintln("chakshu: --pid requires N (positive integer)");
+                return EXIT_USAGE;
+            }
+            var pv = atoi(argv(i + 1));
+            if (pv < 1) {
+                eprintln("chakshu: --pid: N must be >= 1");
+                return EXIT_USAGE;
+            }
+            # Validate by attempting to open /proc/<pid>/stat.
+            var pid_str_v[24];
+            _proc_int_to_cstr(pv, &pid_str_v);
+            var stat_path_v[64];
+            proc_pid_path(&pid_str_v, "/stat", &stat_path_v);
+            var fd_v = file_open(&stat_path_v, 0, 0);
+            if (fd_v < 0) {
+                eprint_cstr("chakshu: --pid ");
+                eprint_cstr(&pid_str_v);
+                eprintln(": no such process");
+                return EXIT_ERR;
+            }
+            file_close(fd_v);
+            focus_pid = pv;
+            i = i + 2;
+            continue;
+        }
+
         # Recognized flags that are not yet implemented — emit a
         # clear placeholder rather than a generic "unknown flag".
-        if (streq(a, "--pid") == 1)       { return print_unimplemented("--pid"); }
         if (streq(a, "--explain") == 1)   { return print_unimplemented("--explain"); }
         if (streq(a, "--watch") == 1)     { return print_unimplemented("--watch"); }
         if (streq(a, "--with-logs") == 1) { return print_unimplemented("--with-logs"); }
@@ -222,7 +256,7 @@ fn main() {
     # Default mode — launch the TUI. tui_run handles the not-a-TTY
     # case (stdin redirected) by exiting EXIT_ERR with a stderr
     # message pointing at `-p`.
-    return tui_run(_hz_to_ms(tui_rate_hz), sort_key, top_n, color_mode);
+    return tui_run(_hz_to_ms(tui_rate_hz), sort_key, top_n, color_mode, focus_pid);
 }
 
 # Convert --rate Hz to epoll_wait timeout in milliseconds. Used by

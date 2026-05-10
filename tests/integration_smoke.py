@@ -205,14 +205,26 @@ def main():
     out, rc = drive([b"\x1b[B", b"q"], shu_path=shu)
     expect_rc("↓ + q exits 0", rc, 0, failures)
 
+    # ---------------- 7: --pid focus mode ----------------
+    # Spawn `shu --pid 1` (init always exists). Verifies the focus
+    # render path produces the expected "PID 1" header + cmdline
+    # label, and that q still exits cleanly from focus mode.
+    print("[7] --pid focus mode (init)")
+    out, rc = drive([b"q"], args=["--pid", "1"], shu_path=shu)
+    expect_rc("--pid 1 + q exits 0", rc, 0, failures)
+    expect_in("'PID 1' header in focus view", b"PID 1", out, failures)
+    expect_in("'cmdline:' label in focus view", b"cmdline:", out, failures)
+    expect_in("focus-mode status hint", b"focus mode", out, failures)
+
     # ---------------- summary ----------------
     print()
+    total = 7
     if failures:
-        print(f"PTY smoke: FAIL ({len(failures)} of 6 tests)")
+        print(f"PTY smoke: FAIL ({len(failures)} of {total} tests)")
         for f in failures:
             print(f"  - {f}")
         sys.exit(1)
-    print("PTY smoke: PASS (6/6)")
+    print(f"PTY smoke: PASS ({total}/{total})")
 
 
 if __name__ == "__main__":
