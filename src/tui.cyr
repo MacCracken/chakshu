@@ -36,12 +36,17 @@
 # typed printables append to the filter buffer, Backspace deletes,
 # Enter exits to Normal (filter persists), Esc clears the filter +
 # exits to Normal. Substring match against the per-process `comm`
-# field (16-byte cstring, already in proc_recs — no extra /proc
-# reads per frame). Filtered indices materialized in
-# `_tui_filtered_idx[]` so selection/viewport operate in filtered
-# space. Filter against full cmdline is a future polish item.
-# Slices F-G grow this:
-#   F — kill key with confirm dialog
+# field (in-memory, fast path) with fall-through to `/proc/<pid>/cmdline`
+# read so arg/path searches also work. Filtered indices materialized
+# in `_tui_filtered_idx[]` so selection/viewport operate in filtered
+# space.
+# M2 Slice F: kill key + confirm. `k` (Normal mode) captures the
+# selected row's pid and switches to TUI_MODE_CONFIRM_KILL. The
+# status line shows `Kill PID <N>? [y/N]`; `y`/`Y` calls
+# sys_kill(pid, SIGTERM=15) and returns to Normal; any other key
+# cancels. Killed processes disappear on the next refresh tick;
+# selection auto-clamps via the render's defensive recompute.
+# Slice G:
 #   G — --pid focus mode + color + PTY smoke gate
 #
 # All TTY primitives come from darshana — `tty_raw` / `tty_cooked` /
@@ -147,8 +152,16 @@ fn _tui_invert_on()  { syscall(1, 1, "\x1b[7m", 4); return 0; }
 fn _tui_invert_off() { syscall(1, 1, "\x1b[0m", 4); return 0; }
 
 # Mode constants for the input state machine.
-var TUI_MODE_NORMAL = 0;
-var TUI_MODE_FILTER = 1;
+var TUI_MODE_NORMAL       = 0;
+var TUI_MODE_FILTER       = 1;
+var TUI_MODE_CONFIRM_KILL = 2;
+
+# `k` captures the selected pid; `y` in confirm mode sends the
+# signal. SIGTERM (15) is the polite-shutdown convention; SIGKILL
+# (9) is too rude for a default keybind. Future slice could add a
+# Shift-K for SIGKILL or a confirm-with-options overlay.
+var TUI_KILL_SIGNUM = 15;
+var _tui_kill_pid   = 0;
 
 # Filter buffer: caps at 64 bytes (comm is TASK_COMM_LEN=16, so 64 is
 # overkill but cheap insurance in case future filtering targets the
@@ -606,11 +619,21 @@ fn _tui_render_status() {
         pos = pos + _tui_status_append(&sbuf, pos, max, "filter: ");
         pos = pos + _tui_status_append_bytes(&sbuf, pos, max, &_tui_filter_buf, _tui_filter_n);
         pos = pos + _tui_status_append(&sbuf, pos, max, "_  (Enter: apply, Esc: clear)");
-    } else {
+    }
+    elif (_tui_mode == TUI_MODE_CONFIRM_KILL) {
+        # "Kill PID <N>? [y/N]" — explicit-uppercase N signals that
+        # No is the default (any non-y key cancels).
+        pos = pos + _tui_status_append(&sbuf, pos, max, "Kill PID ");
+        var pid_str[24];
+        var pid_len = _proc_int_to_cstr(_tui_kill_pid, &pid_str);
+        pos = pos + _tui_status_append_bytes(&sbuf, pos, max, &pid_str, pid_len);
+        pos = pos + _tui_status_append(&sbuf, pos, max, "? [y/N]");
+    }
+    else {
         # ↑↓ are 3-byte UTF-8 each (E2 86 91 / E2 86 93). The literal
         # below uses the byte escapes directly so the source isn't
         # sensitive to editor encoding.
-        pos = pos + _tui_status_append(&sbuf, pos, max, "[\xe2\x86\x91\xe2\x86\x93] move  [s] sort  [f] filter  [q] quit");
+        pos = pos + _tui_status_append(&sbuf, pos, max, "[\xe2\x86\x91\xe2\x86\x93] move  [s] sort  [f] filter  [k] kill  [q] quit");
         if (_tui_filter_n > 0) {
             pos = pos + _tui_status_append(&sbuf, pos, max, "  filter: ");
             pos = pos + _tui_status_append_bytes(&sbuf, pos, max, &_tui_filter_buf, _tui_filter_n);
@@ -755,6 +778,18 @@ fn tui_run(refresh_ms, sort_key, top_n) {
                         }
                     }
                 }
+                elif (_tui_mode == TUI_MODE_CONFIRM_KILL) {
+                    # 'y' or 'Y' confirms — send SIGTERM, return to Normal.
+                    # Anything else (including 'n', Esc, q) cancels back
+                    # to Normal without sending the signal. q intentionally
+                    # cancels-only here so an accidental q during confirm
+                    # doesn't quit the whole app — user has to press q
+                    # again from Normal to actually exit.
+                    if (k == 121) { sys_kill(_tui_kill_pid, TUI_KILL_SIGNUM); _tui_mode = TUI_MODE_NORMAL; tui_render_frame(); }       # 'y'
+                    elif (k == 89) { sys_kill(_tui_kill_pid, TUI_KILL_SIGNUM); _tui_mode = TUI_MODE_NORMAL; tui_render_frame(); }      # 'Y'
+                    elif (k < 0)   { loop = 0; }                                                                                       # EOF
+                    else { _tui_mode = TUI_MODE_NORMAL; tui_render_frame(); }
+                }
                 else {
                     # Normal mode
                     if (k == 113) { loop = 0; }                          # 'q'
@@ -767,7 +802,21 @@ fn tui_run(refresh_ms, sort_key, top_n) {
                         _tui_mode = TUI_MODE_FILTER;
                         tui_render_frame();
                     }
-                    # Other keys ignored. Slice F adds 'k' for kill-with-confirm.
+                    elif (k == 107)      {                                              # 'k'
+                        # Capture the selected pid + switch to confirm mode.
+                        # Resolve the filtered position to an absolute proc_recs
+                        # index, then read the pid (offset 0 in the record).
+                        # Guard against an empty list (filter matches nothing).
+                        if (_tui_filtered_n > 0) {
+                            var sel_filt = _tui_selected_idx;
+                            if (sel_filt >= _tui_filtered_n) { sel_filt = _tui_filtered_n - 1; }
+                            var abs_idx = load64(&_tui_filtered_idx + sel_filt * 8);
+                            _tui_kill_pid = load64(_proc_recs + abs_idx * PROC_REC_SIZE + 0);
+                            _tui_mode = TUI_MODE_CONFIRM_KILL;
+                            tui_render_frame();
+                        }
+                    }
+                    # Other keys ignored.
                 }
             }
         } else {

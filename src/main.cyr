@@ -31,7 +31,7 @@ fn print_help() {
     println("chakshu — AI-augmented system monitor for AGNOS");
     println("");
     println("Usage:");
-    println("  shu [OPTIONS]            Full TUI (alt-screen, 1Hz refresh; --rate to change, q/Ctrl-C to quit)");
+    println("  shu [OPTIONS]            Full TUI: ↑↓ select, s sort, f filter, k kill, q quit");
     println("  shu -p                   Plain snapshot (host/uptime/load/mem/cpu/disk/net + top-N process table)");
     println("  shu --pid <PID>          Focus a single process (M2+)");
     println("  shu --explain <PID>      AI explanation (M3+)");

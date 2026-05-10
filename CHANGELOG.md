@@ -4,7 +4,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Added
+
+- **M2 Slice F — kill key + confirm dialog.** `k` (Normal mode)
+  captures the selected row's pid and switches to a new mode
+  `TUI_MODE_CONFIRM_KILL`; the status line shows
+  `Kill PID <N>? [y/N]`. `y`/`Y` calls `sys_kill(pid, SIGTERM=15)`
+  and returns to Normal; any other key cancels back to Normal
+  without sending the signal. q intentionally cancels-only inside
+  confirm — no accidental quit-while-confirming. Killed processes
+  drop off the table on the next refresh tick; selection
+  auto-clamps via the render's defensive recompute.
+- New globals: `TUI_MODE_CONFIRM_KILL`, `_tui_kill_pid`,
+  `TUI_KILL_SIGNUM` (= 15, SIGTERM). `sys_kill(pid, sig)` already
+  in stdlib syscalls — no new dep needed.
+- Status-line keybind hints now include `[k] kill`.
+- Help text shortened to one-line keybind summary.
 
 ## [0.2.3] — 2026-05-10 — filter mode
 
