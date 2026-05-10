@@ -4,6 +4,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.2.2] — 2026-05-09 — M2 Slices D+E + QA pass
+
+A patch release shipping two more M2 slices plus three real bugs
+caught by interactive QA on small terminals — none of which would
+have shown up in a unit-test-only workflow. The TUI is now fully
+adaptive to terminal size: SIGWINCH triggers re-layout, the process
+table viewport scrolls under a pinned highlight when there are
+more processes than fit, and content never overflows the visible
+area.
+
+The big shape change since v0.2.1: chakshu now consumes
+[darshana](https://github.com/MacCracken/darshana) **v0.3.0**
+(was 0.2.0). darshana grew the chakshu-driven primitives —
+`tty_winsize`, `tty_open_signalfd(mask)`, `TTY_SIGMASK_EXIT/WINCH`,
+`tty_clear_to_eol/end` — completing Phase 3 of the original TUI
+extraction plan. chakshu has zero termios/ANSI code of its own.
+
 ### Added
 
 - **M2 Slice E — keybinds (↑/↓ + `s`).** Three new interactions:
