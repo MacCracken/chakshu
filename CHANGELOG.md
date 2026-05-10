@@ -26,9 +26,55 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   else. Bare Esc returns 0x1b — chakshu currently ignores; Slice E.5
   may repurpose for filter-cancel.
 - New module globals: `_tui_sort_key`, `_tui_top_n`,
-  `_tui_selected_idx`. Promoted from tui_run params so any input
-  handler can mutate them and trigger a re-render in place. Seeded
-  from CLI flags at tui_run startup.
+  `_tui_selected_idx`, `_tui_view_offset`. Promoted from tui_run
+  params so any input handler can mutate them and trigger a
+  re-render in place. Seeded from CLI flags at tui_run startup.
+- **Viewport scrolling.** Selection range is bound by `--top` (and
+  actual proc count); terminal height bounds the visible window
+  but NOT the navigable range. Pressing ↓ at the bottom-visible
+  row scrolls the viewport down so the selection stays in sight;
+  ↑ at the top scrolls up. On a 6-row terminal (only 2 process
+  rows visible), the user can still navigate through all of
+  `--top`'s processes by scrolling. Resize / sort / process exit
+  re-clamp `_tui_view_offset` defensively in `tui_render_frame`.
+
+### Fixed
+
+- **Off-by-one in the post-render `tty_move`** that caused the
+  alt-screen to scroll up by one line when the process table
+  exactly filled the visible area (e.g., `--top 4` on an 8-row
+  terminal, or any small terminal at default `--top 10`). The
+  trailing `tty_move(5 + n, 1) + tty_clear_to_end()` pair was
+  moving to row `_tui_rows + 1` — past the bottom — and some
+  terminals respond by scrolling the alt-screen, pushing the top
+  header off-screen and making the bottom highlight appear to
+  vanish. Now guarded with `if (5 + n <= _tui_rows)`. _Caught by
+  user interactive testing on a 6-row terminal._
+- **Viewport scroll wasn't actually scrolling** in small terminals
+  because `tui_render_frame` had a leftover `top_n = max_rows`
+  cap from before scrolling existed. That clamped the navigable
+  range back to terminal-height — `_tui_select_down` would set
+  `_tui_view_offset = 6`, render's defensive last-clamp would see
+  `view_offset + max_rows > max_navigable` and reset offset to 0.
+  Selection appeared pinned to the bottom-visible row but the
+  viewport never advanced past the initial 5 processes. Removed
+  the cap; `top_n` now cleanly represents the user's `--top` value
+  (navigable range), and `max_rows` separately bounds the visible
+  window. _Caught by user interactive testing — selection wouldn't
+  reach processes 6-10 on a 9-row terminal with --top 10._
+- **Cmdline auto-wrap scrolling the alt-screen.** Per-process row
+  content (pid + state + cpu% + mem% + cmdline) wasn't bounded by
+  terminal width. Long cmdlines (Xorg's argv is 100+ chars) would
+  exceed `_tui_cols`, the terminal would auto-wrap the text to
+  the next line, the cursor would advance past `_tui_rows`, and
+  the alt-screen would scroll — pushing the host/uptime/load line
+  off the top. Headers reappeared on the next 1Hz tick because
+  `tty_cursor_home + write` wrote to row 1 again, but each ↓
+  keypress that scrolled into a long-cmdline process re-triggered
+  the bug. Now clips cmdline to `(_tui_cols - 21)` (the prefix is
+  exactly 21 cols wide); bracketed `[comm]` fallback also clips
+  for kernel threads. _Caught by user testing on a terminal too
+  narrow to fit Xorg's full cmdline._
 - New helpers: `_tui_invert_on/off`, `_tui_cycle_sort`,
   `_tui_select_up/down`. The invert pair will promote to darshana
   when a second consumer wants reverse-video.
