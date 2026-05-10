@@ -4,6 +4,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.2.3] — 2026-05-10 — filter mode
+
+A patch release shipping Slice E.5: a working filter (`f` keybind)
+backed by a bottom status line. Filter substring-matches against
+both `comm` (fast path, no syscall) and `/proc/<pid>/cmdline` (fall
+through), so process-name and arg/path searches both work.
+QA-confirmed before tag.
+
 ### Fixed
 
 - **Filter now matches cmdline too.** Initial Slice E.5 only checked
