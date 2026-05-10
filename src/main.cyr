@@ -15,7 +15,7 @@ include "src/tui.cyr"
 
 # Keep CHAKSHU_VERSION in sync with the VERSION file.
 # A future CI check will enforce equality; for now, manual.
-var CHAKSHU_VERSION = "chakshu 0.2.0";
+var CHAKSHU_VERSION = "chakshu 0.2.1";
 
 # Exit codes per design-spec §9
 var EXIT_OK    = 0;

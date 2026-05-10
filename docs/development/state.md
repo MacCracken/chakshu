@@ -1,6 +1,6 @@
 # chakshu — State
 
-> **Status**: Active | **Last Updated**: 2026-05-07 (M1 closed; v0.2.0 cut)
+> **Status**: Active | **Last Updated**: 2026-05-09 (v0.2.1 cut — M2 Slices A+B+C ship)
 >
 > Volatile state — version, toolchain pin, milestone progress, binary size.
 > Refreshed every release. Durable rules live in
@@ -13,7 +13,7 @@
 
 | Field | Value |
 |-------|-------|
-| Version | **0.2.0** |
+| Version | **0.2.1** — M2 in-progress checkpoint (Slices A+B+C); next minor (0.5.0) cuts at M2 close |
 | Cyrius toolchain pin | `5.10.20` (cyrius.cyml `[package].cyrius`) — bumped from 5.9.32 alongside the darshana v0.1.0 scaffold |
 | Genesis cycle | v5.9.x — niyama-fold opener / catchup arc |
 | Active milestone | **M2 — Full TUI** (Slice A landed; B–G pending) |

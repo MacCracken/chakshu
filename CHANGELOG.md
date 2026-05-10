@@ -4,6 +4,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.2.1] — 2026-05-09 — M2 in-progress checkpoint
+
+A patch release shipping the first three M2 slices — chakshu now has
+a working interactive TUI. v0.5.0 (per the roadmap) closes M2 with
+SIGWINCH, keybinds, kill-with-confirm, `--pid`, color, and the PTY
+smoke gate. v0.2.x patches mark intermediate ship-able checkpoints.
+
+The big shape change since v0.2.0: bare `shu` (no args) now launches
+a full-screen TUI on the alt-screen at 1 Hz refresh, powered by the
+new [darshana](https://github.com/MacCracken/darshana) library.
+chakshu has no termios code of its own — `darshana` owns that layer.
+`shu -p` (plain snapshot) is unchanged.
+
 ### Added
 
 - **M2 Slice C — render loop + real layout.** The TUI now refreshes
