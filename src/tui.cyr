@@ -24,8 +24,14 @@
 # helpers with darshana 0.3.0 equivalents (tty_open_signalfd,
 # tty_clear_to_eol, tty_clear_to_end) — Phase 3 of the original
 # TUI extraction plan complete.
-# Slices E-G grow this:
-#   E — sort/filter/select keybinds
+# M2 Slice E: keybinds — ↑/↓ row selection + `s` cycles sort key.
+# `_tui_read_key` now parses multi-byte CSI escape sequences (ESC [
+# A/B/C/D for arrows). Selection state lives in module globals so
+# any keypress can mutate it; render highlights the selected row
+# with reverse-video. Sort key + top_n promoted to globals so `s`
+# can cycle them without re-entering tui_run. Filter (`f`) is
+# Slice E.5 (separate state machine + status line).
+# Slices F-G grow this:
 #   F — kill key with confirm dialog
 #   G — --pid focus mode + color + PTY smoke gate
 #
@@ -34,14 +40,37 @@
 # `tty_winsize` / `tty_open_signalfd` / `tty_clear_to_eol/end`.
 # The dist bundle lands at `lib/darshana.cyr` via cyrius deps.
 
-# Read one byte from stdin. With VMIN=1 / VTIME=0 (set by darshana's
-# tty_apply_raw_flags), this blocks until exactly one byte arrives.
-# Returns the byte value, or -1 on EOF / error.
+# Read one key event from stdin. With VMIN=1/VTIME=0 (set by
+# darshana's tty_apply_raw_flags), the first byte blocks; subsequent
+# bytes already buffered by the terminal driver are returned in the
+# same read() call.
+#
+# Multi-byte CSI escape sequences (arrow keys: ESC [ A/B/C/D) arrive
+# as one packet from xterm-family terminals, so a single read with
+# len=4 captures them in one call. Returns the raw byte for normal
+# keys, or one of the KEY_* constants (>= 1000) for arrows.
+#
+# Bare Esc (no follow-up): returns 0x1b. Caller decides what to do
+# (chakshu currently ignores; could repurpose as "cancel filter
+# mode" in Slice E.5).
 fn _tui_read_key() {
-    var b[1];
-    var n = file_read(0, &b, 1);
-    if (n != 1) { return 0 - 1; }
-    return load8(&b);
+    var b[4];
+    var i = 0;
+    while (i < 4) { store8(&b + i, 0); i = i + 1; }
+    var n = file_read(0, &b, 4);
+    if (n <= 0) { return 0 - 1; }
+    if (n >= 3) {
+        if (load8(&b + 0) == 0x1b) {
+            if (load8(&b + 1) == 0x5b) {        # '['
+                var c = load8(&b + 2);
+                if (c == 0x41) { return KEY_UP; }
+                if (c == 0x42) { return KEY_DOWN; }
+                if (c == 0x43) { return KEY_RIGHT; }
+                if (c == 0x44) { return KEY_LEFT; }
+            }
+        }
+    }
+    return load8(&b + 0);
 }
 
 # Restore terminal state. Idempotent — safe to call from multiple
@@ -77,6 +106,64 @@ fn _tui_update_winsize() {
     return 0;
 }
 
+# Interactive state. Mutated by `s` (cycle sort) and ↑/↓ (move
+# selection). Initialized from tui_run's params at startup; the
+# render loop reads them every frame.
+var _tui_sort_key     = 0;
+var _tui_top_n        = 10;
+var _tui_selected_idx = 0;
+
+# Synthesized key codes for multi-byte CSI escape sequences. Returned
+# by _tui_read_key alongside raw byte values 0..255 — chosen above
+# the byte range so the dispatch can switch on a single integer.
+var KEY_UP    = 1000;
+var KEY_DOWN  = 1001;
+var KEY_LEFT  = 1002;
+var KEY_RIGHT = 1003;
+
+# Reverse-video on/off (CSI 7m / CSI 0m). Used to highlight the
+# selected row in the process table. Inline here for now; promotes
+# to darshana when a second consumer (cyim's syntax highlighting
+# uses richer attributes — different need) wants the same primitive.
+fn _tui_invert_on()  { syscall(1, 1, "\x1b[7m", 4); return 0; }
+fn _tui_invert_off() { syscall(1, 1, "\x1b[0m", 4); return 0; }
+
+# Cycle through SORT_CPU → MEM → PID → NAME → CPU. Called from `s`.
+fn _tui_cycle_sort() {
+    if (_tui_sort_key == SORT_CPU)       { _tui_sort_key = SORT_MEM; }
+    elif (_tui_sort_key == SORT_MEM)     { _tui_sort_key = SORT_PID; }
+    elif (_tui_sort_key == SORT_PID)     { _tui_sort_key = SORT_NAME; }
+    else                                  { _tui_sort_key = SORT_CPU; }
+    # Reset selection on sort change — the row at the prior index
+    # almost certainly maps to a different process now, so leaving
+    # the highlight where it was would be misleading.
+    _tui_selected_idx = 0;
+    return 0;
+}
+
+# Move selection up/down within the displayed process rows. Clamps
+# to [0, n_visible). n_visible accounts for both the user's --top
+# request and the terminal-height cap from _tui_rows.
+fn _tui_select_up() {
+    if (_tui_selected_idx > 0) {
+        _tui_selected_idx = _tui_selected_idx - 1;
+    }
+    return 0;
+}
+
+fn _tui_select_down() {
+    var max_rows = _tui_rows - 4;
+    if (max_rows < 0) { max_rows = 0; }
+    var cap = _tui_top_n;
+    if (cap > max_rows) { cap = max_rows; }
+    var n_visible = _proc_n;
+    if (n_visible > cap) { n_visible = cap; }
+    if (_tui_selected_idx + 1 < n_visible) {
+        _tui_selected_idx = _tui_selected_idx + 1;
+    }
+    return 0;
+}
+
 # Render one full frame to the alt-screen. Mirrors snapshot_print()'s
 # data gather but writes line-by-line via tty_move + clear-to-eol so
 # successive frames overwrite cleanly. Same /proc reads + same 100ms
@@ -85,14 +172,17 @@ fn _tui_update_winsize() {
 # it's 100% (do not run TUI at 10 Hz). Future slice optimizes by
 # interleaving sample windows across frames.
 #
-# top_n is the user-requested process-table row count; we cap at
-# (terminal rows - 4) so the table never overflows the visible area.
-# The 4 reserved rows are: host/up/load (1) + mem (2) + cpu/disk/net
-# (3) + table-header (4). _tui_rows is set by _tui_update_winsize.
-fn tui_render_frame(sort_key, top_n) {
-    # Cap top_n at available rows. If the terminal is tiny (≤ 5
-    # rows) we may end up showing zero process rows; the header is
-    # still visible.
+# Reads sort key + top_n + selected_idx from module globals so any
+# input handler (s, ↑, ↓, future filter) can mutate them and trigger
+# an immediate re-render without re-entering tui_run.
+#
+# Caps top_n at (terminal rows - 4) so the table never overflows
+# the visible area. The 4 reserved rows: host/up/load (1) + mem (2)
+# + cpu/disk/net (3) + table-header (4). _tui_rows is set by
+# _tui_update_winsize.
+fn tui_render_frame() {
+    var sort_key = _tui_sort_key;
+    var top_n    = _tui_top_n;
     var max_rows = _tui_rows - 4;
     if (max_rows < 0) { max_rows = 0; }
     if (top_n > max_rows) { top_n = max_rows; }
@@ -198,9 +288,24 @@ fn tui_render_frame(sort_key, top_n) {
 
     var n = _proc_n;
     if (n > top_n) { n = top_n; }
+
+    # Clamp the selection in case top_n shrank (terminal resized
+    # smaller, or sort changed and we want to reset). Render guards
+    # against drawing the highlight on a non-existent row.
+    if (_tui_selected_idx >= n) {
+        if (n > 0) { _tui_selected_idx = n - 1; } else { _tui_selected_idx = 0; }
+    }
+
     var i = 0;
     while (i < n) {
         tty_move(5 + i, 1);
+        # Reverse-video the selected row. The invert sequence stays
+        # active through the row content AND the trailing tty_clear_to_eol
+        # so the highlight extends edge-to-edge — matches htop's
+        # selection bar. Reset before moving to the next row.
+        var is_sel = 0;
+        if (i == _tui_selected_idx) { _tui_invert_on(); is_sel = 1; }
+
         var rec = _proc_recs + i * PROC_REC_SIZE;
         var pid = load64(rec + 0);
         var cpu = load64(rec + 8);
@@ -230,6 +335,7 @@ fn tui_render_frame(sort_key, top_n) {
             syscall(1, 1, "]", 1);
         }
         tty_clear_to_eol();
+        if (is_sel == 1) { _tui_invert_off(); }
         i = i + 1;
     }
 
@@ -256,6 +362,13 @@ fn tui_run(refresh_ms, sort_key, top_n) {
         eprintln("chakshu: stdin is not a TTY (use -p for plain mode)");
         return EXIT_ERR;
     }
+
+    # Seed interactive state from CLI params. The render loop reads
+    # these globals each frame; keypresses (s, ↑, ↓) mutate them in
+    # place so changes apply immediately.
+    _tui_sort_key     = sort_key;
+    _tui_top_n        = top_n;
+    _tui_selected_idx = 0;
 
     # Open two signalfds — one for exit signals (HUP/INT/TERM) so
     # external `kill <pid>` cleanly tears down, one for SIGWINCH so
@@ -298,7 +411,7 @@ fn tui_run(refresh_ms, sort_key, top_n) {
 
     # Initial render so the user sees content before the first
     # epoll_wait timeout fires.
-    tui_render_frame(sort_key, top_n);
+    tui_render_frame();
 
     # Input + refresh loop. epoll_wait(timeout=refresh_ms) returns:
     #   n == 0        → timeout, re-render
@@ -313,7 +426,7 @@ fn tui_run(refresh_ms, sort_key, top_n) {
             var events[16];
             var n = sys_epoll_wait(epfd, &events, 1, refresh_ms);
             if (n == 0) {
-                tui_render_frame(sort_key, top_n);
+                tui_render_frame();
                 continue;
             }
             if (n < 0) { continue; }
@@ -334,22 +447,27 @@ fn tui_run(refresh_ms, sort_key, top_n) {
                 file_read(sfd_winch, &siginfo_winch, 128);
                 _tui_update_winsize();
                 tty_clear();
-                tui_render_frame(sort_key, top_n);
+                tui_render_frame();
             }
             else {
                 # stdin
                 var k = _tui_read_key();
-                if (k == 113) { loop = 0; }   # 'q'
-                if (k == 3)   { loop = 0; }   # Ctrl-C
-                if (k < 0)    { loop = 0; }   # EOF / read error
+                if (k == 113) { loop = 0; }                         # 'q'
+                elif (k == 3) { loop = 0; }                         # Ctrl-C
+                elif (k < 0)  { loop = 0; }                         # EOF / read error
+                elif (k == KEY_UP)   { _tui_select_up();   tui_render_frame(); }
+                elif (k == KEY_DOWN) { _tui_select_down(); tui_render_frame(); }
+                elif (k == 115)      { _tui_cycle_sort();  tui_render_frame(); }   # 's'
+                # Other keys ignored. Slice E.5 adds 'f' for filter,
+                # Slice F adds 'k' for kill-with-confirm.
             }
         } else {
             # Degraded path — no signal multiplexing AND no refresh
             # (blocking stdin only). Keystroke needed to exit.
             var k = _tui_read_key();
             if (k == 113) { loop = 0; }
-            if (k == 3)   { loop = 0; }
-            if (k < 0)    { loop = 0; }
+            elif (k == 3) { loop = 0; }
+            elif (k < 0)  { loop = 0; }
         }
     }
 

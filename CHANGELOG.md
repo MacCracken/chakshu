@@ -6,6 +6,40 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **M2 Slice E — keybinds (↑/↓ + `s`).** Three new interactions:
+  - `↑` / `↓` move row selection within the displayed process table;
+    selection is highlighted with reverse-video (CSI 7m / 0m). Clamped
+    to `[0, n_visible)` where `n_visible = min(top_n, terminal_rows - 4,
+    actual_proc_count)`. Auto-clamps if the visible row count shrinks
+    (terminal resized smaller, sort changed, processes exited).
+  - `s` cycles the sort key in the order CPU → MEM → PID → NAME → CPU.
+    Resets selection to row 0 (the previous index almost certainly
+    points to a different process after re-sort).
+  - All three trigger an immediate re-render — no waiting for the
+    next 1Hz tick. UI feels instant.
+- New `_tui_read_key` parses multi-byte CSI escape sequences. Reads
+  up to 4 bytes in one syscall (xterm-family terminals send arrow
+  sequences as one packet, so the additional bytes are already in
+  the kernel buffer when the first byte unblocks). Returns synthetic
+  key codes (`KEY_UP`/`KEY_DOWN`/`KEY_LEFT`/`KEY_RIGHT` = 1000-1003,
+  above the 0..255 byte range) for arrows; raw byte for everything
+  else. Bare Esc returns 0x1b — chakshu currently ignores; Slice E.5
+  may repurpose for filter-cancel.
+- New module globals: `_tui_sort_key`, `_tui_top_n`,
+  `_tui_selected_idx`. Promoted from tui_run params so any input
+  handler can mutate them and trigger a re-render in place. Seeded
+  from CLI flags at tui_run startup.
+- New helpers: `_tui_invert_on/off`, `_tui_cycle_sort`,
+  `_tui_select_up/down`. The invert pair will promote to darshana
+  when a second consumer wants reverse-video.
+
+### Changed
+
+- `tui_render_frame` is now parameterless — reads `_tui_sort_key`,
+  `_tui_top_n`, `_tui_selected_idx` from globals. Selection clamp
+  happens inside the render so any caller (refresh tick, keypress,
+  WINCH) gets correct behavior.
+
 - **M2 Slice D — SIGWINCH + dynamic window size.** TUI layout now
   adapts to the actual terminal dimensions. A second signalfd
   (separate from the exit-signalfd for clearer dispatch — fd
