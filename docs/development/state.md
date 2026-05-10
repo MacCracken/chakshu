@@ -53,7 +53,7 @@ args chrono hashmap process tagged assert
 |---|-------|--------|
 | M0 | Scaffold | **Gate cleared** — `cyrius deps`/`build`/`test` all green; `shu --version` / `--help` / `--watch` (placeholder) / unknown-flag paths exercised |
 | M1 | Plain snapshot | **Closed (v0.2.0)** — all four slices landed. `shu -p` produces a header + memory + cpu/disk/net rates + sortable top-N process table with cmdline. Perf gate met. |
-| M2 | Full TUI | **In progress** — Slices A (alt-screen + raw mode + q/Ctrl-C) + B (signalfd cleanup) + C (1Hz render loop, real layout via tty_move, `--rate` flag) ✓; Slices D (SIGWINCH), E (keybinds), F (kill+confirm), G (--pid + color + PTY smoke + close) pending. Powered by darshana 0.2.0 — chakshu has no termios code of its own. |
+| M2 | Full TUI | **In progress** — Slices A (alt-screen + raw mode + q/Ctrl-C) + B (exit-signalfd cleanup) + C (1Hz render loop + `--rate`) + D (SIGWINCH + dynamic window size + `tty_winsize` cap) ✓; Slices E (keybinds), F (kill+confirm), G (--pid + color + PTY smoke + close) pending. Powered by **darshana 0.3.0** — chakshu's signal/clear inline helpers from Slices B+C are now in darshana; chakshu has zero termios/ANSI code of its own. |
 | M2 | Full TUI | Not started |
 | M3 | AI integration | Not started |
 | M4 | Polish + perf | Not started |

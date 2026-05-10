@@ -54,5 +54,5 @@ stdlib = [
 # render loop, keybinds, SIGWINCH handler, etc.
 [deps.darshana]
 git = "https://github.com/MacCracken/darshana.git"
-tag = "0.2.0"
+tag = "0.3.0"
 modules = ["dist/darshana.cyr"]

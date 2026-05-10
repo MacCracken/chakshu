@@ -16,31 +16,23 @@
 # wouldn't carriage-return in raw mode without OPOST). Future
 # refactor candidate: extract a shared "snapshot data" core so
 # plain mode and TUI render from one source.
-# Slices D-G grow this:
-#   D — SIGWINCH + dynamic window size
+# M2 Slice D: SIGWINCH + dynamic window size. Adds a second signalfd
+# for SIGWINCH (separate from the exit-signalfd for clearer dispatch),
+# wakes the render loop on resize, re-reads winsize via tty_winsize,
+# caps the process table at (rows - 4) so it never overflows the
+# terminal. Replaces the inline _tui_open_exit_signalfd / _tui_clear_*
+# helpers with darshana 0.3.0 equivalents (tty_open_signalfd,
+# tty_clear_to_eol, tty_clear_to_end) — Phase 3 of the original
+# TUI extraction plan complete.
+# Slices E-G grow this:
 #   E — sort/filter/select keybinds
 #   F — kill key with confirm dialog
 #   G — --pid focus mode + color + PTY smoke gate
 #
 # All TTY primitives come from darshana — `tty_raw` / `tty_cooked` /
-# `tty_alt_enter` / `tty_alt_leave` / `tty_clear` / `tty_cursor_*`.
+# `tty_alt_enter` / `tty_alt_leave` / `tty_clear` / `tty_cursor_*` /
+# `tty_winsize` / `tty_open_signalfd` / `tty_clear_to_eol/end`.
 # The dist bundle lands at `lib/darshana.cyr` via cyrius deps.
-#
-# Signal handling lives in chakshu (this file) for slice-B velocity,
-# but `_tui_open_exit_signalfd` is structured as a self-contained
-# function so extraction to darshana is mechanical when cyim or
-# another consumer also needs the same primitive (Phase 3 of the
-# original TUI extraction plan, deferred to second-consumer-asks
-# per darshana CLAUDE.md domain rules).
-
-# Write a null-terminated cstring to stdout. Companion to main.cyr's
-# `eprint_cstr`. Used in raw mode where we need explicit \r\n line
-# endings (OPOST is cleared in tty_apply_raw_flags so '\n' alone
-# won't carriage-return).
-fn _tui_print_cstr(s) {
-    syscall(1, 1, s, strlen(s));
-    return 0;
-}
 
 # Read one byte from stdin. With VMIN=1 / VTIME=0 (set by darshana's
 # tty_apply_raw_flags), this blocks until exactly one byte arrives.
@@ -53,7 +45,7 @@ fn _tui_read_key() {
 }
 
 # Restore terminal state. Idempotent — safe to call from multiple
-# cleanup sites (q-quit, Ctrl-C in raw mode, future signal handler).
+# cleanup sites (q-quit, Ctrl-C in raw mode, signalfd handler).
 # Order matters: cursor-show before cooked-mode so the visible
 # cursor reappears in the user's shell, alt-leave last so the
 # user's previous shell content comes back undistorted.
@@ -64,48 +56,24 @@ fn _tui_teardown() {
     return 0;
 }
 
-# Bitmask of signals chakshu treats as "exit cleanly" — SIGHUP (1) /
-# SIGINT (2) / SIGTERM (15). Linux sigset_t layout: one u64 where bit
-# (signum - 1) is set per signal. So bit 0 (HUP) | bit 1 (INT) | bit
-# 14 (TERM) = 0x4003.
-var TUI_EXIT_SIGMASK = 0x4003;
+# Cached terminal dimensions. Updated at startup and on every
+# SIGWINCH; the render loop reads from these (no per-frame ioctl
+# overhead). Defaults of 24x80 are the historical VT100 size — used
+# only if tty_winsize ever fails (it shouldn't, since tty_raw
+# already proved fd 0 is a TTY by the time we get here).
+var _tui_rows = 24;
+var _tui_cols = 80;
 
-# Block the exit signals on this thread and create a signalfd that
-# delivers them. Returns the signalfd, or -1 on failure (in which
-# case the TUI continues without external-signal cleanup — better to
-# launch with degraded signal handling than refuse to launch).
-#
-# Belongs in darshana proper (it's the "guaranteed cleanup at exit"
-# primitive any TUI consumer would want); kept here for slice-B
-# velocity. When cyim or another consumer needs the same primitive,
-# this function moves to darshana with no API change — chakshu just
-# replaces this body with `return tty_open_exit_signalfd();` and
-# bumps darshana's pin.
-fn _tui_open_exit_signalfd() {
-    var mask[8];
-    var i = 0;
-    while (i < 8) { store8(&mask + i, 0); i = i + 1; }
-    store64(&mask, TUI_EXIT_SIGMASK);
-    # SIG_BLOCK = 0 (the `how` arg to sigprocmask)
-    var rc = sys_sigprocmask(0, &mask, 0);
-    if (rc < 0) { return 0 - 1; }
-    # signalfd(fd=-1, mask, flags=0) → new fd
-    return sys_signalfd(0 - 1, &mask, 0);
-}
-
-# Clear from cursor to end of line. CSI K. 3 bytes. Inline here to
-# avoid a darshana version bump just for one helper; promotes to
-# darshana when partial-clear gets a second consumer.
-fn _tui_clear_eol() {
-    syscall(1, 1, "\x1b[K", 3);
-    return 0;
-}
-
-# Clear from cursor to end of screen. CSI J. 3 bytes. Used at the
-# bottom of each frame to wipe any leftover process rows from a
-# previous frame that had more entries.
-fn _tui_clear_to_end() {
-    syscall(1, 1, "\x1b[J", 3);
+# Refresh the cached terminal size from TIOCGWINSZ. Called once in
+# tui_run setup and on every SIGWINCH event. Swallows ioctl failure
+# silently — caller already has the (possibly stale) cached values.
+fn _tui_update_winsize() {
+    var rows = 0;
+    var cols = 0;
+    if (tty_winsize(0, &rows, &cols) == 0) {
+        _tui_rows = rows;
+        _tui_cols = cols;
+    }
     return 0;
 }
 
@@ -116,7 +84,18 @@ fn _tui_clear_to_end() {
 # costs ~100ms wall time. At 1 Hz refresh that's 10% CPU; at 10 Hz
 # it's 100% (do not run TUI at 10 Hz). Future slice optimizes by
 # interleaving sample windows across frames.
+#
+# top_n is the user-requested process-table row count; we cap at
+# (terminal rows - 4) so the table never overflows the visible area.
+# The 4 reserved rows are: host/up/load (1) + mem (2) + cpu/disk/net
+# (3) + table-header (4). _tui_rows is set by _tui_update_winsize.
 fn tui_render_frame(sort_key, top_n) {
+    # Cap top_n at available rows. If the terminal is tiny (≤ 5
+    # rows) we may end up showing zero process rows; the header is
+    # still visible.
+    var max_rows = _tui_rows - 4;
+    if (max_rows < 0) { max_rows = 0; }
+    if (top_n > max_rows) { top_n = max_rows; }
     var buf[8192];
 
     # ----- row 1: host / uptime / load -----
@@ -136,7 +115,7 @@ fn tui_render_frame(sort_key, top_n) {
         var prefix = proc_loadavg_prefix_len(&buf, la_n);
         syscall(1, 1, &buf, prefix);
     }
-    _tui_clear_eol();
+    tty_clear_to_eol();
 
     # ----- row 2: memory -----
     tty_move(2, 1);
@@ -157,7 +136,7 @@ fn tui_render_frame(sort_key, top_n) {
     syscall(1, 1, " MiB used / ", 12);
     print_num(mem_total_mib);
     syscall(1, 1, " MiB total", 10);
-    _tui_clear_eol();
+    tty_clear_to_eol();
 
     # ----- row 3: cpu / disk / net (delta-based, 100ms window) -----
     var sb1[8192];
@@ -209,13 +188,13 @@ fn tui_render_frame(sort_key, top_n) {
     _snap_print_rate_bps(net_rx_bps);
     syscall(1, 1, " tx ", 4);
     _snap_print_rate_bps(net_tx_bps);
-    _tui_clear_eol();
+    tty_clear_to_eol();
 
     # ----- row 4+: process table (header + top-N rows) -----
     processes_sample2(total_delta, ncores, sort_key);
     tty_move(4, 1);
     syscall(1, 1, "   PID S  CPU%  MEM% CMD", 24);
-    _tui_clear_eol();
+    tty_clear_to_eol();
 
     var n = _proc_n;
     if (n > top_n) { n = top_n; }
@@ -250,14 +229,14 @@ fn tui_render_frame(sort_key, top_n) {
             syscall(1, 1, rec + 32, strlen(rec + 32));
             syscall(1, 1, "]", 1);
         }
-        _tui_clear_eol();
+        tty_clear_to_eol();
         i = i + 1;
     }
 
     # Wipe any leftover rows below the last process (e.g., a process
     # exited between frames so this frame has fewer rows than last).
     tty_move(5 + n, 1);
-    _tui_clear_to_end();
+    tty_clear_to_end();
 
     return 0;
 }
@@ -278,25 +257,40 @@ fn tui_run(refresh_ms, sort_key, top_n) {
         return EXIT_ERR;
     }
 
-    # Block exit signals + open signalfd; create epoll to multiplex
-    # stdin and signalfd. If any of this fails, fall back gracefully
-    # to the Slice A direct-stdin loop (q/Ctrl-C still work; only
-    # external SIGTERM is lost). Strict failure isn't worth refusing
-    # to launch — the degraded mode still exits cleanly on user input.
-    var sfd = _tui_open_exit_signalfd();
+    # Open two signalfds — one for exit signals (HUP/INT/TERM) so
+    # external `kill <pid>` cleanly tears down, one for SIGWINCH so
+    # the render loop wakes on terminal resize. Two separate fds
+    # rather than one combined mask gives clearer dispatch (fd
+    # identity == intent; no need to inspect ssi_signo). Then add
+    # all three (stdin, exit_sig, winch_sig) to one epoll set.
+    #
+    # Each step degrades gracefully on failure: if signalfd setup
+    # fails, drop to direct stdin (Slice A behavior). Better to
+    # launch with reduced signal handling than refuse to launch.
+    var sfd_exit  = tty_open_signalfd(TTY_SIGMASK_EXIT);
+    var sfd_winch = tty_open_signalfd(TTY_SIGMASK_WINCH);
     var epfd = 0 - 1;
-    if (sfd >= 0) {
+    if (sfd_exit >= 0) {
         epfd = sys_epoll_create();
         if (epfd >= 0) {
             # data field distinguishes which fd fired:
             #   data == 0 → stdin keystroke
-            #   data == 1 → signalfd (exit signal arrived)
-            var ev_in  = epoll_event_new(EPOLLIN, 0);
-            var ev_sig = epoll_event_new(EPOLLIN, 1);
-            sys_epoll_ctl(epfd, EPOLL_CTL_ADD, 0,   ev_in);
-            sys_epoll_ctl(epfd, EPOLL_CTL_ADD, sfd, ev_sig);
+            #   data == 1 → exit signalfd (HUP/INT/TERM)
+            #   data == 2 → winch signalfd (terminal resize)
+            var ev_in   = epoll_event_new(EPOLLIN, 0);
+            var ev_exit = epoll_event_new(EPOLLIN, 1);
+            sys_epoll_ctl(epfd, EPOLL_CTL_ADD, 0,        ev_in);
+            sys_epoll_ctl(epfd, EPOLL_CTL_ADD, sfd_exit, ev_exit);
+            if (sfd_winch >= 0) {
+                var ev_winch = epoll_event_new(EPOLLIN, 2);
+                sys_epoll_ctl(epfd, EPOLL_CTL_ADD, sfd_winch, ev_winch);
+            }
         }
     }
+
+    # Read initial terminal size into the cache before first render
+    # so the layout's max-rows cap is correct from frame 1.
+    _tui_update_winsize();
 
     tty_alt_enter();
     tty_cursor_hide();
@@ -307,11 +301,12 @@ fn tui_run(refresh_ms, sort_key, top_n) {
     tui_render_frame(sort_key, top_n);
 
     # Input + refresh loop. epoll_wait(timeout=refresh_ms) returns:
-    #   n == 0       → timeout, re-render
-    #   n > 0, data=1 → signal fd, drain + exit
+    #   n == 0        → timeout, re-render
+    #   n > 0, data=1 → exit signalfd, drain + exit
+    #   n > 0, data=2 → winch signalfd, drain + refresh winsize + render
     #   n > 0, data=0 → stdin, read key, dispatch q/Ctrl-C/EOF
-    # If epoll setup failed (sfd or epfd < 0), fall back to a
-    # blocking stdin read with no refresh — degraded but functional.
+    # If epoll setup failed, fall back to a blocking stdin read with
+    # no refresh and no signal handling — degraded but functional.
     var loop = 1;
     while (loop == 1) {
         if (epfd >= 0) {
@@ -324,12 +319,25 @@ fn tui_run(refresh_ms, sort_key, top_n) {
             if (n < 0) { continue; }
             var which = load64(&events + 4);
             if (which == 1) {
-                # Drain signalfd (struct signalfd_siginfo = 128 bytes)
-                # then exit.
-                var siginfo[128];
-                file_read(sfd, &siginfo, 128);
+                # Exit signalfd — drain (struct signalfd_siginfo = 128
+                # bytes) then exit cleanly.
+                var siginfo_exit[128];
+                file_read(sfd_exit, &siginfo_exit, 128);
                 loop = 0;
-            } else {
+            }
+            elif (which == 2) {
+                # Winch signalfd — drain, refresh winsize, full-clear
+                # (terminal geometry changed; old positions may be
+                # stale), then re-render. tty_clear avoids ghost text
+                # in the now-shifted alt-screen buffer.
+                var siginfo_winch[128];
+                file_read(sfd_winch, &siginfo_winch, 128);
+                _tui_update_winsize();
+                tty_clear();
+                tui_render_frame(sort_key, top_n);
+            }
+            else {
+                # stdin
                 var k = _tui_read_key();
                 if (k == 113) { loop = 0; }   # 'q'
                 if (k == 3)   { loop = 0; }   # Ctrl-C
@@ -346,7 +354,8 @@ fn tui_run(refresh_ms, sort_key, top_n) {
     }
 
     _tui_teardown();
-    if (sfd  >= 0) { file_close(sfd); }
-    if (epfd >= 0) { file_close(epfd); }
+    if (sfd_exit  >= 0) { file_close(sfd_exit); }
+    if (sfd_winch >= 0) { file_close(sfd_winch); }
+    if (epfd      >= 0) { file_close(epfd); }
     return EXIT_OK;
 }

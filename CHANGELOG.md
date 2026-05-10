@@ -4,7 +4,38 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Added
+
+- **M2 Slice D — SIGWINCH + dynamic window size.** TUI layout now
+  adapts to the actual terminal dimensions. A second signalfd
+  (separate from the exit-signalfd for clearer dispatch — fd
+  identity == intent) routes SIGWINCH to the epoll set; on resize,
+  the loop drains the fd, calls `tty_winsize` to refresh cached
+  rows/cols, full-clears the alt-screen, and re-renders. The process
+  table is capped at `(rows - 4)` so it never overflows the visible
+  area regardless of `--top`. New module globals `_tui_rows` /
+  `_tui_cols` (default 24×80) populated at startup and on every
+  WINCH event — render-time cost is one variable read instead of a
+  per-frame ioctl.
+- New `_tui_update_winsize()` helper.
+- Phase 3 of the original TUI extraction plan **complete**: the
+  signal/clear inline helpers from Slices B+C are gone, replaced
+  by their darshana 0.3.0 equivalents. chakshu now delegates all
+  TTY work — termios, ANSI, cursor positioning, signalfd, winsize,
+  partial-clear — entirely to darshana.
+
+### Changed
+
+- **darshana dep bumped 0.2.0 → 0.3.0** (`cyrius.cyml [deps.darshana]`).
+  Brings in `tty_winsize`, `tty_open_signalfd(mask)`,
+  `TTY_SIGMASK_EXIT/WINCH`, `tty_clear_to_eol`, `tty_clear_to_end`.
+- **Inline helpers removed in favor of darshana:**
+  - `_tui_open_exit_signalfd` → `tty_open_signalfd(TTY_SIGMASK_EXIT)`
+  - `_tui_clear_eol` → `tty_clear_to_eol` (5 call sites updated)
+  - `_tui_clear_to_end` → `tty_clear_to_end` (1 call site)
+  - `TUI_EXIT_SIGMASK` const removed (now `TTY_SIGMASK_EXIT` in darshana)
+  - `_tui_print_cstr` removed (unused since Slice C's render replaced
+    the placeholder paint)
 
 ## [0.2.1] — 2026-05-09 — M2 in-progress checkpoint
 
