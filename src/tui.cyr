@@ -2,8 +2,12 @@
 #
 # M2 Slice A: smallest viable TUI. Enter alt-screen, raw mode, hide
 # cursor, paint a placeholder, read input one byte at a time, exit
-# on 'q' or Ctrl-C. Slices B-G grow this:
-#   B — signal-safe cleanup (SIGINT/SIGTERM/panic restore termios)
+# on 'q' or Ctrl-C.
+# M2 Slice B: signal-safe cleanup. Block SIGHUP/SIGINT/SIGTERM and
+# route them to a signalfd; epoll multiplexes stdin + signalfd so
+# external `kill <pid>` triggers `_tui_teardown` instead of leaving
+# the terminal in raw+alt-screen+cursor-hidden state.
+# Slices C-G grow this:
 #   C — render loop at 1 Hz, real layout, snapshot data
 #   D — SIGWINCH + dynamic window size
 #   E — sort/filter/select keybinds
@@ -13,6 +17,13 @@
 # All TTY primitives come from darshana — `tty_raw` / `tty_cooked` /
 # `tty_alt_enter` / `tty_alt_leave` / `tty_clear` / `tty_cursor_*`.
 # The dist bundle lands at `lib/darshana.cyr` via cyrius deps.
+#
+# Signal handling lives in chakshu (this file) for slice-B velocity,
+# but `_tui_open_exit_signalfd` is structured as a self-contained
+# function so extraction to darshana is mechanical when cyim or
+# another consumer also needs the same primitive (Phase 3 of the
+# original TUI extraction plan, deferred to second-consumer-asks
+# per darshana CLAUDE.md domain rules).
 
 # Write a null-terminated cstring to stdout. Companion to main.cyr's
 # `eprint_cstr`. Used in raw mode where we need explicit \r\n line
@@ -45,6 +56,35 @@ fn _tui_teardown() {
     return 0;
 }
 
+# Bitmask of signals chakshu treats as "exit cleanly" — SIGHUP (1) /
+# SIGINT (2) / SIGTERM (15). Linux sigset_t layout: one u64 where bit
+# (signum - 1) is set per signal. So bit 0 (HUP) | bit 1 (INT) | bit
+# 14 (TERM) = 0x4003.
+var TUI_EXIT_SIGMASK = 0x4003;
+
+# Block the exit signals on this thread and create a signalfd that
+# delivers them. Returns the signalfd, or -1 on failure (in which
+# case the TUI continues without external-signal cleanup — better to
+# launch with degraded signal handling than refuse to launch).
+#
+# Belongs in darshana proper (it's the "guaranteed cleanup at exit"
+# primitive any TUI consumer would want); kept here for slice-B
+# velocity. When cyim or another consumer needs the same primitive,
+# this function moves to darshana with no API change — chakshu just
+# replaces this body with `return tty_open_exit_signalfd();` and
+# bumps darshana's pin.
+fn _tui_open_exit_signalfd() {
+    var mask[8];
+    var i = 0;
+    while (i < 8) { store8(&mask + i, 0); i = i + 1; }
+    store64(&mask, TUI_EXIT_SIGMASK);
+    # SIG_BLOCK = 0 (the `how` arg to sigprocmask)
+    var rc = sys_sigprocmask(0, &mask, 0);
+    if (rc < 0) { return 0 - 1; }
+    # signalfd(fd=-1, mask, flags=0) → new fd
+    return sys_signalfd(0 - 1, &mask, 0);
+}
+
 # Run the TUI. Returns EXIT_OK on clean quit, EXIT_ERR on setup
 # failure (most likely: stdin is not a TTY — e.g. `shu < /dev/null`
 # or invoked from a CI runner).
@@ -56,6 +96,27 @@ fn tui_run() {
         eprintln("chakshu: stdin is not a TTY (use -p for plain mode)");
         return EXIT_ERR;
     }
+
+    # Block exit signals + open signalfd; create epoll to multiplex
+    # stdin and signalfd. If any of this fails, fall back gracefully
+    # to the Slice A direct-stdin loop (q/Ctrl-C still work; only
+    # external SIGTERM is lost). Strict failure isn't worth refusing
+    # to launch — the degraded mode still exits cleanly on user input.
+    var sfd = _tui_open_exit_signalfd();
+    var epfd = 0 - 1;
+    if (sfd >= 0) {
+        epfd = sys_epoll_create();
+        if (epfd >= 0) {
+            # data field distinguishes which fd fired:
+            #   data == 0 → stdin keystroke
+            #   data == 1 → signalfd (exit signal arrived)
+            var ev_in  = epoll_event_new(EPOLLIN, 0);
+            var ev_sig = epoll_event_new(EPOLLIN, 1);
+            sys_epoll_ctl(epfd, EPOLL_CTL_ADD, 0,   ev_in);
+            sys_epoll_ctl(epfd, EPOLL_CTL_ADD, sfd, ev_sig);
+        }
+    }
+
     tty_alt_enter();
     tty_cursor_hide();
     tty_clear();
@@ -63,24 +124,50 @@ fn tui_run() {
 
     # Placeholder paint — Slice C replaces this with the real
     # render loop driven by the M1 snapshot data.
-    _tui_print_cstr("chakshu — M2 Slice A placeholder.\r\n");
+    _tui_print_cstr("chakshu — M2 Slice B placeholder.\r\n");
     _tui_print_cstr("Press q (or Ctrl-C) to quit.\r\n");
+    _tui_print_cstr("External SIGHUP/SIGINT/SIGTERM also clean up.\r\n");
     _tui_print_cstr("\r\n");
-    _tui_print_cstr("Real TUI lands in Slices C+. Refresh loop,\r\n");
-    _tui_print_cstr("layout, keybinds, SIGWINCH all come next.\r\n");
+    _tui_print_cstr("Real refresh loop + layout in Slice C.\r\n");
 
-    # Input loop. ISIG is cleared in raw mode so Ctrl-C arrives as
-    # byte 0x03 rather than raising SIGINT — handle it explicitly
-    # alongside 'q'. EOF (negative) also exits cleanly so a piped
-    # exit (rare in TUI mode but possible) doesn't hang.
+    # Input loop. With epoll wired, multiplex stdin + signalfd; on
+    # signal (data == 1), drain the signalfd and exit cleanly. On
+    # stdin (data == 0), read the byte and check for q/Ctrl-C/EOF.
+    # If epoll setup failed, fall back to direct stdin read (Slice A).
     var loop = 1;
     while (loop == 1) {
-        var k = _tui_read_key();
-        if (k == 113) { loop = 0; }   # 'q'
-        if (k == 3)   { loop = 0; }   # Ctrl-C
-        if (k < 0)    { loop = 0; }   # EOF / read error
+        if (epfd >= 0) {
+            # epoll_event is {u32 events; u64 data} packed = 12 bytes;
+            # 16-byte stack buffer leaves slack and matches stdlib's
+            # epoll_event_new alloc size.
+            var events[16];
+            var n = sys_epoll_wait(epfd, &events, 1, 0 - 1);
+            if (n <= 0) { continue; }
+            var which = load64(&events + 4);
+            if (which == 1) {
+                # Drain the signalfd (struct signalfd_siginfo = 128
+                # bytes) so it doesn't immediately re-fire if we ever
+                # loop back. Then exit.
+                var siginfo[128];
+                file_read(sfd, &siginfo, 128);
+                loop = 0;
+            } else {
+                var k = _tui_read_key();
+                if (k == 113) { loop = 0; }   # 'q'
+                if (k == 3)   { loop = 0; }   # Ctrl-C
+                if (k < 0)    { loop = 0; }   # EOF / read error
+            }
+        } else {
+            # Degraded path — no signal multiplexing.
+            var k = _tui_read_key();
+            if (k == 113) { loop = 0; }
+            if (k == 3)   { loop = 0; }
+            if (k < 0)    { loop = 0; }
+        }
     }
 
     _tui_teardown();
+    if (sfd  >= 0) { file_close(sfd); }
+    if (epfd >= 0) { file_close(epfd); }
     return EXIT_OK;
 }

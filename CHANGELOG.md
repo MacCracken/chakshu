@@ -6,6 +6,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **M2 Slice B — signal-safe cleanup.** The TUI now multiplexes stdin
+  and a signalfd via epoll, so external SIGHUP / SIGINT / SIGTERM
+  (`kill <pid>` from another terminal, parent shell HUP, etc.)
+  trigger `_tui_teardown` instead of leaving the terminal in
+  raw + alt-screen + cursor-hidden state. Setup degrades gracefully
+  if signalfd or epoll fails — falls back to the Slice A direct-stdin
+  loop so the binary still launches with reduced signal handling
+  rather than refusing.
+- New `_tui_open_exit_signalfd()` helper in tui.cyr: blocks the exit
+  signals via `sys_sigprocmask` (`TUI_EXIT_SIGMASK = 0x4003` for
+  HUP/INT/TERM) and creates a signalfd that delivers them. Belongs
+  in darshana proper as the "guaranteed cleanup at exit" primitive
+  any TUI consumer would want; lives in chakshu for slice-B velocity
+  and is structured to extract mechanically when cyim asks.
+- Avoided the `rt_sigaction` x86_64 sa_restorer trampoline trap by
+  using signalfd instead of synchronous signal handlers — pure
+  syscall, no inline assembly needed.
+
 - **M2 Slice A — minimum viable TUI.** Bare `shu` invocation now
   enters the alt-screen + raw mode via darshana, paints a placeholder,
   and reads input one byte at a time. Exits cleanly on `q` or Ctrl-C
