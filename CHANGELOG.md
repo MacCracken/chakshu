@@ -4,7 +4,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Added
+
+- **M2 Slice G.2 — color theme + `--color` flag.** TUI mode now
+  emits a 16-color theme by default. Plain mode (`-p`) is unaffected
+  (deterministic bytes per design-spec §2.2).
+  - **Header labels bolded:** `host:`, `up:`, `load:`, `mem:`,
+    `cpu:`, `disk:`, `net:`, `wr`, `tx`, `rx`.
+  - **CPU% column band:** green `< 25%`, yellow `< 70%`, red `>= 70%`.
+  - **MEM% column band:** green `< 50%`, yellow `< 80%`, red `>= 80%`.
+  - **State letter color:** R=green (running), D=blue (uninterruptible),
+    Z=red (zombie), T=yellow (stopped), others dim.
+  - **PID column dimmed** for visual hierarchy.
+  - **Selection bar interaction:** colors are suppressed inside the
+    reverse-video highlight so the bar stays visually clean (red-on-
+    reversed-row would be illegible noise).
+- **`--color {auto, always, never}` CLI flag.** Default `auto`; `auto`
+  and `always` both enable color in TUI mode (true `auto` with `$TERM`
+  detection is M3 polish — currently they're identical). `never`
+  disables all color escapes. Validation rejects unknown values
+  with EXIT_USAGE + helpful stderr message.
+- New tui.cyr globals: `_tui_color_enabled`, `_tui_color_suppress`.
+- New helpers: `_tui_color_emit/red/green/yellow/blue/dim/bold/reset`,
+  `_tui_color_pct_band(pct, low, mid)`, `_tui_color_state(byte)`.
+  Inline in tui.cyr; promotion to darshana deferred until cyim asks.
 
 ## [0.2.5] — 2026-05-10 — PTY smoke + input fixes
 

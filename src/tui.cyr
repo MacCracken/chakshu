@@ -46,8 +46,17 @@
 # sys_kill(pid, SIGTERM=15) and returns to Normal; any other key
 # cancels. Killed processes disappear on the next refresh tick;
 # selection auto-clamps via the render's defensive recompute.
-# Slice G:
-#   G — --pid focus mode + color + PTY smoke gate
+# M2 Slice G.2: 16-color theme + --color flag. Bold header labels,
+# percentage bands (green/yellow/red on CPU% and MEM%), state-letter
+# coloring (R=green, D=blue, Z=red, T=yellow, others dim). Inside
+# the reverse-video selection bar, colors are suppressed so the
+# highlight stays visually clean. --color {auto, always, never}
+# CLI flag from main.cyr seeds the color-enabled global; auto
+# currently behaves as always in TUI mode (plain mode is always
+# uncolored).
+# Slices G.3-G.4:
+#   G.3 — --pid focus mode
+#   G.4 — M2 close review + audit
 #
 # All TTY primitives come from darshana — `tty_raw` / `tty_cooked` /
 # `tty_alt_enter` / `tty_alt_leave` / `tty_clear` / `tty_cursor_*` /
@@ -183,6 +192,56 @@ var KEY_RIGHT = 1003;
 # uses richer attributes — different need) wants the same primitive.
 fn _tui_invert_on()  { syscall(1, 1, "\x1b[7m", 4); return 0; }
 fn _tui_invert_off() { syscall(1, 1, "\x1b[0m", 4); return 0; }
+
+# ---- color theme (Slice G.2) -------------------------------------
+# _tui_color_enabled: 1 → emit ANSI color escapes; 0 → no-op.
+# Set by tui_run from the --color CLI flag (auto/always = 1, never = 0).
+# _tui_color_suppress: 1 inside the selected-row render so colors
+# don't fight the reverse-video highlight visually.
+var _tui_color_enabled  = 1;
+var _tui_color_suppress = 0;
+
+# Emit a raw ANSI escape if color is on AND not suppressed. Single
+# choke point — keeps the apply sites readable (`_tui_color_red()`
+# rather than `if enabled && !suppress: write(...)` everywhere).
+fn _tui_color_emit(s) {
+    if (_tui_color_enabled == 0) { return 0; }
+    if (_tui_color_suppress == 1) { return 0; }
+    syscall(1, 1, s, strlen(s));
+    return 0;
+}
+
+# CSI SGR shortcuts. Reset uses CSI 0m (full attribute reset) — the
+# render is structured so reset never fires inside reverse-video
+# regions (suppress flag), so we don't need a "fg-only reset" variant.
+fn _tui_color_red()    { _tui_color_emit("\x1b[31m"); return 0; }
+fn _tui_color_green()  { _tui_color_emit("\x1b[32m"); return 0; }
+fn _tui_color_yellow() { _tui_color_emit("\x1b[33m"); return 0; }
+fn _tui_color_blue()   { _tui_color_emit("\x1b[34m"); return 0; }
+fn _tui_color_dim()    { _tui_color_emit("\x1b[2m");  return 0; }
+fn _tui_color_bold()   { _tui_color_emit("\x1b[1m");  return 0; }
+fn _tui_color_reset()  { _tui_color_emit("\x1b[0m");  return 0; }
+
+# Pick a color for a percent value: green below `low`, yellow below
+# `mid`, red at `mid` or above. Used for CPU% and MEM% column tints.
+fn _tui_color_pct_band(pct, low, mid) {
+    if (pct < low) { _tui_color_green();  return 0; }
+    if (pct < mid) { _tui_color_yellow(); return 0; }
+    _tui_color_red();
+    return 0;
+}
+
+# Pick a color for a Linux process state byte (R/S/D/Z/T/I/...).
+# Convention matches htop roughly: running things stand out, broken
+# things alarm, sleeping is quiet.
+fn _tui_color_state(s) {
+    if (s == 82) { _tui_color_green();  return 0; }   # R running
+    if (s == 68) { _tui_color_blue();   return 0; }   # D uninterruptible
+    if (s == 90) { _tui_color_red();    return 0; }   # Z zombie
+    if (s == 84) { _tui_color_yellow(); return 0; }   # T stopped
+    _tui_color_dim();                                  # S sleeping, I idle, etc.
+    return 0;
+}
 
 # Mode constants for the input state machine.
 var TUI_MODE_NORMAL       = 0;
@@ -374,16 +433,16 @@ fn tui_render_frame() {
 
     # ----- row 1: host / uptime / load -----
     tty_cursor_home();
-    syscall(1, 1, "host: ", 6);
+    _tui_color_bold(); syscall(1, 1, "host: ", 6); _tui_color_reset();
     var hn_n = proc_read("/proc/sys/kernel/hostname", &buf, 8192);
     if (hn_n > 0) {
         hn_n = proc_trim_trailing_nl(&buf, hn_n);
         syscall(1, 1, &buf, hn_n);
     }
-    syscall(1, 1, "  up: ", 6);
+    _tui_color_bold(); syscall(1, 1, "  up: ", 6); _tui_color_reset();
     var up_n = proc_read("/proc/uptime", &buf, 8192);
     if (up_n > 0) { snapshot_print_uptime(proc_uptime_secs(&buf)); }
-    syscall(1, 1, "  load: ", 8);
+    _tui_color_bold(); syscall(1, 1, "  load: ", 8); _tui_color_reset();
     var la_n = proc_read("/proc/loadavg", &buf, 8192);
     if (la_n > 0) {
         var prefix = proc_loadavg_prefix_len(&buf, la_n);
@@ -405,7 +464,7 @@ fn tui_render_frame() {
     }
     var mem_used_mib  = (mem_total_kb - mem_avail_kb) / 1024;
     var mem_total_mib = mem_total_kb / 1024;
-    syscall(1, 1, "mem:  ", 6);
+    _tui_color_bold(); syscall(1, 1, "mem:  ", 6); _tui_color_reset();
     print_num(mem_used_mib);
     syscall(1, 1, " MiB used / ", 12);
     print_num(mem_total_mib);
@@ -452,15 +511,17 @@ fn tui_render_frame() {
     var net_tx_bps  = (tx2 - tx1) * 1000 / SNAP_SAMPLE_MS;
 
     tty_move(3, 1);
-    syscall(1, 1, "cpu:  ", 6);
+    _tui_color_bold(); syscall(1, 1, "cpu:  ", 6); _tui_color_reset();
+    _tui_color_pct_band(cpu_pct, 25, 70);
     print_num(cpu_pct);
-    syscall(1, 1, "%   disk: rd ", 13);
+    _tui_color_reset();
+    _tui_color_bold(); syscall(1, 1, "%   disk: rd ", 13); _tui_color_reset();
     _snap_print_rate_bps(disk_rd_bps);
-    syscall(1, 1, " wr ", 4);
+    _tui_color_bold(); syscall(1, 1, " wr ", 4); _tui_color_reset();
     _snap_print_rate_bps(disk_wr_bps);
-    syscall(1, 1, "   net: rx ", 11);
+    _tui_color_bold(); syscall(1, 1, "   net: rx ", 11); _tui_color_reset();
     _snap_print_rate_bps(net_rx_bps);
-    syscall(1, 1, " tx ", 4);
+    _tui_color_bold(); syscall(1, 1, " tx ", 4); _tui_color_reset();
     _snap_print_rate_bps(net_tx_bps);
     tty_clear_to_eol();
 
@@ -531,8 +592,15 @@ fn tui_render_frame() {
         # active through the row content AND the trailing tty_clear_to_eol
         # so the highlight extends edge-to-edge — matches htop's
         # selection bar. Reset before moving to the next row.
+        # Suppress per-cell colors inside the highlight so the bar
+        # stays visually clean (red CPU% on a reverse-video row is
+        # noisy and hard to read).
         var is_sel = 0;
-        if (filtered_pos == _tui_selected_idx) { _tui_invert_on(); is_sel = 1; }
+        if (filtered_pos == _tui_selected_idx) {
+            _tui_invert_on();
+            _tui_color_suppress = 1;
+            is_sel = 1;
+        }
 
         var rec = _proc_recs + abs_idx * PROC_REC_SIZE;
         var pid = load64(rec + 0);
@@ -541,14 +609,14 @@ fn tui_render_frame() {
         var st  = load64(rec + 24);
         var mem = 0;
         if (mem_total_kb > 0) { mem = rss * 400 / mem_total_kb; }
-        _proc_print_int_pad(pid, 6);
+        _tui_color_dim(); _proc_print_int_pad(pid, 6); _tui_color_reset();
         syscall(1, 1, " ", 1);
         var sc[2];
         store8(&sc, st);
         store8(&sc + 1, 0);
-        syscall(1, 1, &sc, 1);
-        _proc_print_int_pad(cpu, 6);
-        _proc_print_int_pad(mem, 6);
+        _tui_color_state(st); syscall(1, 1, &sc, 1); _tui_color_reset();
+        _tui_color_pct_band(cpu, 25, 70); _proc_print_int_pad(cpu, 6); _tui_color_reset();
+        _tui_color_pct_band(mem, 50, 80); _proc_print_int_pad(mem, 6); _tui_color_reset();
         syscall(1, 1, " ", 1);
         # cmdline read (top-N only — same as plain mode). Clip to
         # terminal width: the per-row prefix (pid 6 + space + state
@@ -586,7 +654,10 @@ fn tui_render_frame() {
             }
         }
         tty_clear_to_eol();
-        if (is_sel == 1) { _tui_invert_off(); }
+        if (is_sel == 1) {
+            _tui_color_suppress = 0;
+            _tui_invert_off();
+        }
         i = i + 1;
     }
 
@@ -746,7 +817,10 @@ fn _tui_dispatch_key(k) {
 # refresh_ms = milliseconds between frame renders (1000 = 1 Hz).
 # sort_key   = SORT_CPU/MEM/PID/NAME passed to processes_sample2.
 # top_n      = process-table row count.
-fn tui_run(refresh_ms, sort_key, top_n) {
+# color_mode = 0 never, 1 auto, 2 always (Slice G.2). auto and
+#              always currently both enable color in TUI; $TERM
+#              detection for true auto behavior is M3 polish.
+fn tui_run(refresh_ms, sort_key, top_n, color_mode) {
     # tty_raw fails if the ioctl can't get termios — typically
     # because the fd isn't a TTY. Surface a clear error and steer
     # the user toward the always-pipeable `-p` mode.
@@ -764,6 +838,12 @@ fn tui_run(refresh_ms, sort_key, top_n) {
     _tui_view_offset  = 0;
     _tui_mode         = TUI_MODE_NORMAL;
     _tui_filter_n     = 0;
+
+    # Color: --color {auto, always} → enabled; never → disabled.
+    # auto and always behave identically in TUI mode for now.
+    _tui_color_enabled = 1;
+    if (color_mode == 0) { _tui_color_enabled = 0; }
+    _tui_color_suppress = 0;
 
     # Open two signalfds — one for exit signals (HUP/INT/TERM) so
     # external `kill <pid>` cleanly tears down, one for SIGWINCH so

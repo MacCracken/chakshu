@@ -42,7 +42,7 @@ fn print_help() {
     println("  --sort cpu|mem|pid|name   Process-table sort key (default cpu)");
     println("  --top N                   Process-table row count (default 10)");
     println("  --rate <HZ>               TUI refresh rate (integer 1-10, default 1; fractional Hz later)");
-    println("  --color <when>            auto | always | never (default auto) [M2+]");
+    println("  --color <when>            auto | always | never (default auto; TUI only)");
     println("  --pid <PID>               Focus a single process [M2+]");
     println("  --explain <PID>           Print AI explanation and exit [M3+]");
     println("  --watch                   Anomaly stream mode [M3+]");
@@ -107,6 +107,10 @@ fn main() {
     var sort_key    = SORT_CPU;
     var top_n       = PROC_DEFAULT_TOPN;
     var tui_rate_hz = 1;                # default 1 Hz (1000 ms refresh)
+    # color_mode: 0 = never, 1 = auto (TUI: on; plain: off), 2 = always
+    # (TUI: on; plain: on — but plain mode currently ignores color
+    # entirely per design-spec §2.2 deterministic-bytes rule).
+    var color_mode  = 1;
 
     var i = 1;
     while (i < n) {
@@ -177,12 +181,34 @@ fn main() {
             continue;
         }
 
+        # --color auto|always|never (default auto). Plain mode ignores
+        # this entirely (deterministic bytes per design-spec §2.2);
+        # TUI mode uses it to gate ANSI color escapes. "auto" currently
+        # behaves as "always" in TUI mode — $TERM detection is M3 polish.
+        if (streq(a, "--color") == 1) {
+            if (i + 1 >= n) {
+                eprintln("chakshu: --color requires a value (auto|always|never)");
+                return EXIT_USAGE;
+            }
+            var cv = argv(i + 1);
+            if      (streq(cv, "auto")   == 1) { color_mode = 1; }
+            elif    (streq(cv, "always") == 1) { color_mode = 2; }
+            elif    (streq(cv, "never")  == 1) { color_mode = 0; }
+            else {
+                eprint_cstr("chakshu: --color: unknown value '");
+                eprint_cstr(cv);
+                eprintln("' (want auto|always|never)");
+                return EXIT_USAGE;
+            }
+            i = i + 2;
+            continue;
+        }
+
         # Recognized flags that are not yet implemented — emit a
         # clear placeholder rather than a generic "unknown flag".
         if (streq(a, "--pid") == 1)       { return print_unimplemented("--pid"); }
         if (streq(a, "--explain") == 1)   { return print_unimplemented("--explain"); }
         if (streq(a, "--watch") == 1)     { return print_unimplemented("--watch"); }
-        if (streq(a, "--color") == 1)     { return print_unimplemented("--color"); }
         if (streq(a, "--with-logs") == 1) { return print_unimplemented("--with-logs"); }
 
         return print_unknown_flag(a);
@@ -196,7 +222,7 @@ fn main() {
     # Default mode — launch the TUI. tui_run handles the not-a-TTY
     # case (stdin redirected) by exiting EXIT_ERR with a stderr
     # message pointing at `-p`.
-    return tui_run(_hz_to_ms(tui_rate_hz), sort_key, top_n);
+    return tui_run(_hz_to_ms(tui_rate_hz), sort_key, top_n, color_mode);
 }
 
 # Convert --rate Hz to epoll_wait timeout in milliseconds. Used by
