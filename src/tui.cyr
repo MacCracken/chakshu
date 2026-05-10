@@ -218,6 +218,7 @@ fn _tui_color_red()    { _tui_color_emit("\x1b[31m"); return 0; }
 fn _tui_color_green()  { _tui_color_emit("\x1b[32m"); return 0; }
 fn _tui_color_yellow() { _tui_color_emit("\x1b[33m"); return 0; }
 fn _tui_color_blue()   { _tui_color_emit("\x1b[34m"); return 0; }
+fn _tui_color_cyan()   { _tui_color_emit("\x1b[36m"); return 0; }
 fn _tui_color_dim()    { _tui_color_emit("\x1b[2m");  return 0; }
 fn _tui_color_bold()   { _tui_color_emit("\x1b[1m");  return 0; }
 fn _tui_color_reset()  { _tui_color_emit("\x1b[0m");  return 0; }
@@ -233,13 +234,15 @@ fn _tui_color_pct_band(pct, low, mid) {
 
 # Pick a color for a Linux process state byte (R/S/D/Z/T/I/...).
 # Convention matches htop roughly: running things stand out, broken
-# things alarm, sleeping is quiet.
+# things alarm, sleeping is quiet, kernel-internal idle is cyan
+# (distinct semantic — these are kworker/* type threads).
 fn _tui_color_state(s) {
     if (s == 82) { _tui_color_green();  return 0; }   # R running
     if (s == 68) { _tui_color_blue();   return 0; }   # D uninterruptible
     if (s == 90) { _tui_color_red();    return 0; }   # Z zombie
     if (s == 84) { _tui_color_yellow(); return 0; }   # T stopped
-    _tui_color_dim();                                  # S sleeping, I idle, etc.
+    if (s == 73) { _tui_color_cyan();   return 0; }   # I kernel idle
+    _tui_color_dim();                                  # S sleeping, others
     return 0;
 }
 

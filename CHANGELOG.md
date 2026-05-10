@@ -4,6 +4,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.3.0] — 2026-05-10 — color theme
+
+First minor bump of the M2 cycle — the TUI is now colored. Header
+labels are bold; CPU%/MEM% values band on green/yellow/red
+thresholds; process state letters color-code by category. Plain
+mode (`-p`) stays uncolored per the deterministic-bytes rule.
+QA-confirmed before tag.
+
 ### Added
 
 - **M2 Slice G.2 — color theme + `--color` flag.** TUI mode now
@@ -14,7 +24,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - **CPU% column band:** green `< 25%`, yellow `< 70%`, red `>= 70%`.
   - **MEM% column band:** green `< 50%`, yellow `< 80%`, red `>= 80%`.
   - **State letter color:** R=green (running), D=blue (uninterruptible),
-    Z=red (zombie), T=yellow (stopped), others dim.
+    Z=red (zombie), T=yellow (stopped), I=cyan (kernel idle —
+    distinct semantic from S since these are kworker/* threads),
+    others (S sleeping, etc.) dim.
   - **PID column dimmed** for visual hierarchy.
   - **Selection bar interaction:** colors are suppressed inside the
     reverse-video highlight so the bar stays visually clean (red-on-
@@ -25,7 +37,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   disables all color escapes. Validation rejects unknown values
   with EXIT_USAGE + helpful stderr message.
 - New tui.cyr globals: `_tui_color_enabled`, `_tui_color_suppress`.
-- New helpers: `_tui_color_emit/red/green/yellow/blue/dim/bold/reset`,
+- New helpers: `_tui_color_emit/red/green/yellow/blue/cyan/dim/bold/reset`,
   `_tui_color_pct_band(pct, low, mid)`, `_tui_color_state(byte)`.
   Inline in tui.cyr; promotion to darshana deferred until cyim asks.
 

@@ -1,6 +1,6 @@
 # chakshu — State
 
-> **Status**: Active | **Last Updated**: 2026-05-10 (v0.2.5 cut — PTY smoke + input/winsize fixes ship)
+> **Status**: Active | **Last Updated**: 2026-05-10 (v0.3.0 cut — color theme ships)
 >
 > Volatile state — version, toolchain pin, milestone progress, binary size.
 > Refreshed every release. Durable rules live in
@@ -13,7 +13,7 @@
 
 | Field | Value |
 |-------|-------|
-| Version | **0.2.5** — M2 in-progress checkpoint (Slices A+B+C+D+E+E.5+F + G.1 PTY smoke); next bumps: G.2 color → 0.3.0, G.3 --pid → 0.4.0, G.4 M2 close → 0.5.0 |
+| Version | **0.3.0** — M2 in-progress (Slices A+B+C+D+E+E.5+F + G.1 PTY smoke + G.2 color); next bumps: G.3 --pid → 0.4.0, G.4 M2 close → 0.5.0 |
 | Cyrius toolchain pin | `5.10.20` (cyrius.cyml `[package].cyrius`) — bumped from 5.9.32 alongside the darshana v0.1.0 scaffold |
 | Genesis cycle | v5.9.x — niyama-fold opener / catchup arc |
 | Active milestone | **M2 — Full TUI** (Slice A landed; B–G pending) |
