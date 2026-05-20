@@ -88,16 +88,16 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Cyrius toolchain
+        # Same pattern as ci.yml: exec the install.sh bundled in the
+        # release tarball rather than hand-rolling the layout. Cyrius
+        # 6.0.1+ requires the versioned ~/.cyrius/versions/<ver>/ tree
+        # that the upstream installer sets up correctly.
         run: |
           CYRIUS_VERSION=$(grep 'cyrius *= *"' cyrius.cyml | head -1 | sed 's/.*"\(.*\)"/\1/')
           echo "Installing Cyrius $CYRIUS_VERSION"
           curl -sLO "https://github.com/MacCracken/cyrius/releases/download/$CYRIUS_VERSION/cyrius-$CYRIUS_VERSION-${{ matrix.target }}.tar.gz"
           tar xzf "cyrius-$CYRIUS_VERSION-${{ matrix.target }}.tar.gz"
-          CYRIUS_DIR="cyrius-$CYRIUS_VERSION-${{ matrix.target }}"
-          mkdir -p "$HOME/.cyrius/bin" "$HOME/.cyrius/lib"
-          cp "$CYRIUS_DIR/bin/"* "$HOME/.cyrius/bin/" 2>/dev/null || true
-          cp -r "$CYRIUS_DIR/lib/"* "$HOME/.cyrius/lib/" 2>/dev/null || true
-          chmod +x "$HOME/.cyrius/bin/"* 2>/dev/null || true
+          CYRIUS_VERSION="$CYRIUS_VERSION" sh "cyrius-$CYRIUS_VERSION-${{ matrix.target }}/install.sh"
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
 
       - name: Resolve dependencies
