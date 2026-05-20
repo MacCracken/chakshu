@@ -4,6 +4,89 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-05-19 — M2 close
+
+**Milestone close.** The full interactive TUI is shipped: alt-screen
+mode, signal-safe cleanup, 1Hz refresh, SIGWINCH-driven re-layout,
+arrow/sort/filter/kill keybinds, color theme, `--pid` focus mode, and
+PTY-driven integration smoke. chakshu now functions as a usable
+`htop` / `btop` replacement; AGNOS Bazaar default switch follows in
+the M2.5 mihi-integration release.
+
+This is a summary cut — no new code lands in 0.5.0 beyond the
+M2 close audit. The substantive M2 work shipped across v0.2.1
+through v0.4.0; see those entries for details.
+
+### M2 arc summary (v0.2.1 → v0.4.0)
+
+| Cut | Slice | Headline |
+|-----|-------|----------|
+| v0.2.1 | A+B+C | Alt-screen + raw mode + signalfd cleanup + 1Hz refresh loop |
+| v0.2.2 | D+E   | SIGWINCH + dynamic window size + ↑↓ select + `s` sort cycle + viewport scrolling; 3 QA bugs fixed |
+| v0.2.3 | E.5   | Filter mode + status line; cmdline-fall-through fix |
+| v0.2.4 | F     | `k` kill + confirm dialog → SIGTERM |
+| v0.2.5 | G.1   | PTY integration smoke gate; 2 latent input/winsize bugs caught + fixed |
+| v0.3.0 | G.2   | 16-color theme + `--color` flag |
+| v0.4.0 | G.3   | `--pid N` focus mode + render dispatcher + PTY smoke #7 |
+
+### G.4 — close audit findings
+
+- **Privacy invariants intact.** Zero reads of `/home`, env vars, or
+  command-line args as prompt material. Surface to be exercised again
+  at M3 (AI integration) when redaction lands.
+- **No FFI / libc / dlopen** anywhere in `src/` — only comments
+  asserting their absence. Stdlib + darshana 0.3.0 envelope holds.
+- **Signal cleanup exhaustive.** Single `_tui_teardown` call site
+  at `tui.cyr:1166`; all loop-exit paths (q, Ctrl-C, external
+  HUP/INT/TERM via signalfd, degraded epoll-failed fallback) fall
+  through to it before fd close. Signalfd-based design avoids the
+  x86_64 `sa_restorer` trampoline trap entirely.
+- **Stack footprint safe.** Largest single-fn stack accumulation is
+  `tui_render_focus_frame` at **29 922 bytes** (~47% margin under
+  the 64 KiB threshold).
+- **Performance unchanged from v0.3.0 baseline.** `shu --version`
+  cold start ~1 ms (design-spec §8 target <5 ms ✓). `shu -p` wall
+  ~110-111 ms (≈100 ms inherent two-sample window + ~10 ms work —
+  the work portion meets the <30 ms target with 3× margin). Steady-
+  state CPU and memory-resident measurement deferred to M4 polish
+  (host has no GNU `time`; needs proper tooling pass).
+- **Binary size grew 183 KB → 293 KB across the M2 arc.** Investigation
+  pinned the bulk to toolchain codegen drift (Cyrius 5.10.20 → 6.0.1,
+  used de-facto despite the pin), not chakshu source. Of 165 KB bss:
+  ~8.3 KB is chakshu module-globals + darshana 60 bytes; the
+  remaining ~161 KB is Cyrius-runtime-emitted statics outside source
+  control. Carry-forward for M4 — the design-spec §8 `<256 KB` DCE
+  target is now ~37 KB over and may need either codegen pressure on
+  the Cyrius project or implementing the build hint's
+  `alloc()`-for-large-buffers restructure. Worth surfacing at
+  agnosticos genesis level if other first-party binaries see the
+  same 5.10 → 6.0 footprint jump.
+
+### Changed
+
+- Help text footer at `src/main.cyr:53` updated from
+  `Status: v0.1.0 scaffold. Most flags are placeholders pending
+  M1-M3.` to a current M2-complete / M3-ahead line.
+
+### Known deferrals carried into M2.5+ (for the record)
+
+These items showed up in the design-spec walk but were intentionally
+not addressed at M2 close; logged here so they don't get re-discovered:
+
+- **CPU/Mem bar graphs** (design-spec §4). Spec mocks
+  `[████░░░░] 23%`; chakshu emits text-only. Decision deferred to M4
+  polish — either update the spec or implement bars.
+- **§9 spec language about "panic paths" and "double-fault path
+  resets termios via direct syscall before re-raising"** is
+  scaffold-era aspirational language that doesn't match Cyrius
+  reality. Shipped behavior (signalfd-driven clean teardown) covers
+  the realistic failure modes. Spec patch is a paragraph; deferred
+  to a documentation sweep.
+- **USER column, swap reporting, username resolution, threads/FDs in
+  focus mode** — already enumerated as M2-deferred in `roadmap.md`.
+- **Design-spec header still reads `Status: Scaffold (2026-05-07)`** —
+  stale at M2 close; touched in this cut to read `M2 complete`.
+
 ## [0.4.0] — 2026-05-19 — `--pid` focus mode
 
 Slice G.3 lands: `shu --pid N` launches the TUI focused on a single

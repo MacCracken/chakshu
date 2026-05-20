@@ -3,7 +3,7 @@
 **The eye — AI-augmented system monitor for AGNOS / Cyrius**
 
 Version: 0.1
-Status: Scaffold (2026-05-07)
+Status: M2 complete (2026-05-19) — interactive TUI shipped; M3 (AI) next
 Audience: Implementation agent / contributors
 Name: Sanskrit **चक्षु** (*chakṣu*) — *the eye, the faculty of sight*. Same observational family as planned `drishti-*` video codecs (दृष्टि — *vision*).
 Binary name: `shu` — **S**ystem **H**ealth **U**tility, a contraction of *chak**shu***. See [ADR 0001](adr/0001-binary-name-shu.md).
