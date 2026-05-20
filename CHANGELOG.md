@@ -4,6 +4,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-19 — `--pid` focus mode
+
+Slice G.3 lands: `shu --pid N` launches the TUI focused on a single
+process. The last code-bearing slice before the M2-close audit (G.4
+cuts as v0.5.0). QA-confirmed before tag.
+
 ### Added
 
 - **M2 Slice G.3 — `--pid N` focus mode.** New CLI flag launches

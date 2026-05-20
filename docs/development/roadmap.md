@@ -1,6 +1,6 @@
 # chakshu — Roadmap
 
-> **Status**: M2 in progress (G.3 code landed, manual QA pending) | **Last Updated**: 2026-05-10
+> **Status**: M2 in progress (G.3 shipped as v0.4.0; only G.4 close audit remains) | **Last Updated**: 2026-05-19
 >
 > The path from v0.1.0 (scaffold) to v1.0 (ships as the AGNOS default system monitor, replacing the third-party `htop`/`btop` Bazaar packages).
 
@@ -25,24 +25,7 @@ Interactive full-screen monitor. Parity with `htop`. The point at which chakshu 
 - **v0.2.4** — Slice F (kill key + confirm dialog → SIGTERM).
 - **v0.2.5** — Slice G.1 (PTY integration smoke gate); 2 latent input/winsize bugs caught by it and fixed.
 - **v0.3.0** — Slice G.2 (16-color theme + `--color` flag).
-
-### In progress (code landed, not yet released)
-
-- **Slice G.3 — `--pid N` focus mode (will cut as v0.4.0).**
-  - [x] CLI parse + PID validation (open `/proc/N/stat`)
-  - [x] `tui_render_focus_frame` (host/uptime/load + PID/comm/state header + ppid/uid/threads/rss/mem% + full cmdline + status row)
-  - [x] Render dispatcher routes table vs focus by `_tui_focus_pid`
-  - [x] Mode-aware key handling (sort/filter/arrows no-op in focus; `k` kills focused pid)
-  - [x] "PID N has exited" path when focused process dies during refresh
-  - [x] PTY smoke #7 (`shu --pid 1 → q`) green
-  - [ ] **MANUAL QA before v0.4.0 cut:**
-    - [ ] `./build/shu --pid <real PID>` renders the 4-row layout correctly
-    - [ ] Refresh tick visibly updates RSS / mem% values every second
-    - [ ] `k` → `n` cancels (no signal); `k` → `y` actually kills target
-    - [ ] After kill (or external `kill <PID>`), focus view flips to red `PID N has exited.` + status hint to quit
-    - [ ] Sort/filter/arrow keys are silently ignored in focus mode (no glitches)
-    - [ ] `--pid 0` → exit 2; `--pid 9999999` → exit 1; `--pid` (no value) → exit 2 (CLI errors are clear)
-  - [ ] After QA passes: cut **v0.4.0**
+- **v0.4.0** — Slice G.3 (`--pid N` focus mode + render dispatcher + PTY smoke #7). QA passed 2026-05-19.
 
 ### Remaining
 
@@ -68,9 +51,34 @@ Interactive full-screen monitor. Parity with `htop`. The point at which chakshu 
 
 - **TTY/termios lib extraction.** Originally pre-M2 work; executed across **darshana 0.2.0** (donor port from `cyim/src/tty.cyr`) → **darshana 0.3.0** (chakshu-driven extensions: `tty_winsize`, `tty_open_signalfd`, `tty_clear_to_eol/end`, `TTY_SIGMASK_*`). Phase 3 of the original extraction plan complete. cyim's own migration to depend on darshana (Phase 4) is open in the darshana roadmap, not chakshu's.
 
-### Gate to M3
+### Gate to M2.5
 
 chakshu is a usable `htop` replacement. Bazaar default switches from `htop` to `chakshu` (Bazaar recipe still ships `htop` for users who prefer it).
+
+---
+
+## M2.5 — mihi integration (v0.6.0)
+
+[mihi](https://github.com/MacCracken/maccracken/mihi) v0.8.0 is sitting at its M6 gate — chakshu integration is the only thing between it and v1.0. Coordinated release: chakshu cuts v0.6.0, mihi cuts v1.0.0.
+
+- [ ] Bump cyrius pin `5.10.20` → `6.0.1` (host already runs 6.0.1; pin is the only stale piece)
+- [ ] Add `[deps.mihi]` block in `cyrius.cyml` pointed at mihi v0.8.0 release; `cyrius deps` resolves `dist/mihi.cyr` → `lib/mihi.cyr`
+- [ ] Replace hand-rolled probes in `src/proc.cyr` / `src/snapshot.cyr` with mihi equivalents:
+  - hostname read → `mihi_hostname`
+  - uptime read → `mihi_uptime_secs`
+  - meminfo total/free → `mihi_mem_total` / `mihi_mem_free`
+  - ncores counting → `mihi_cpu_count`
+- [ ] Surface new identity data in `-p` header: cpu model (`mihi_cpu_model`), distro (`mihi_distro`), kernel (`mihi_kernel_name`/`mihi_kernel_version`)
+- [ ] **New GPU panel** in TUI + `-p` — chakshu's first GPU surface, via `mihi_gpu_*` probes (count, name, memory, family, type)
+- [ ] Update `docs/design-spec.md` §2 (data sources) and §3 (TUI layout) to reflect new GPU row + identity surface
+- [ ] Per-frame deltas (cpu%, disk rate, net rate, per-pid stats) stay chakshu-local — mihi only owns identity/static surface
+- [ ] PTY + scripts/smoke.sh gates remain green; new gates for GPU panel render
+- [ ] Binary size delta noted in state.md; investigate any further codegen drift carried over from toolchain bump
+- [ ] Cut **v0.6.0**; mihi's M6 flips closed → mihi v1.0 ships
+
+### Gate to M3
+
+mihi v1.0 ships. chakshu has clean separation between identity (mihi) and per-frame deltas (chakshu).
 
 ---
 

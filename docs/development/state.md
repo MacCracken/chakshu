@@ -1,6 +1,6 @@
 # chakshu — State
 
-> **Status**: Active | **Last Updated**: 2026-05-10 (v0.3.0 cut — color theme ships)
+> **Status**: Active | **Last Updated**: 2026-05-19 (v0.4.0 cut — `--pid` focus mode ships; only M2 close audit remains)
 >
 > Volatile state — version, toolchain pin, milestone progress, binary size.
 > Refreshed every release. Durable rules live in
@@ -13,14 +13,14 @@
 
 | Field | Value |
 |-------|-------|
-| Version | **0.3.0** — M2 in-progress (Slices A+B+C+D+E+E.5+F + G.1 PTY smoke + G.2 color); next bumps: G.3 --pid → 0.4.0, G.4 M2 close → 0.5.0 |
-| Cyrius toolchain pin | `5.10.20` (cyrius.cyml `[package].cyrius`) — bumped from 5.9.32 alongside the darshana v0.1.0 scaffold |
-| Genesis cycle | v5.9.x — niyama-fold opener / catchup arc |
-| Active milestone | **M2 — Full TUI** (Slice A landed; B–G pending) |
-| Next milestone | **M3 — AI integration** |
+| Version | **0.4.0** — M2 in-progress (Slices A+B+C+D+E+E.5+F + G.1 PTY smoke + G.2 color + **G.3 `--pid` focus mode**); next bump: G.4 M2 close → 0.5.0 |
+| Cyrius toolchain pin | `5.10.20` (cyrius.cyml `[package].cyrius`) — **drift**: host `cycc` is `6.0.1`; builds clean with warning. Pin bump deferred to M2.5 mihi-integration slice so the toolchain move is coordinated with the dep wire-in. |
+| Genesis cycle | v6.0.x — toolchain rev landed in agnosticos; chakshu still pinned to 5.10.20 |
+| Active milestone | **M2 — Full TUI** (Slices A–G.3 shipped; G.4 close audit pending) |
+| Next milestone | **M2.5 — mihi integration** (new — opened after G.4 closes M2; replaces M3 in the immediate next-up slot. See roadmap.) |
 | Binary | `shu` (build/shu) — System Health Utility, per ADR 0001 |
-| Binary size (DCE) | 187 168 bytes (~183 KB) — was 148 KB at Slice A; +39 KB for the tui_render_frame data-gather/render path |
-| Lines of Cyrius | src/{main,snapshot,proc,processes,tui}.cyr (~1050 LoC) — does **not** include lib/darshana.cyr (resolved via cyrius deps from darshana 0.2.0). tui.cyr ~325 LoC includes ~150 LoC of M1-snapshot duplication marked as future-refactor candidate. |
+| Binary size (DCE) | 299 752 bytes (~293 KB) — was 183 KB at v0.3.0; +110 KB across G.3 focus-mode + the 5.10.20→6.0.1 toolchain rev that the builds now use de-facto. G.4 audit will investigate; suspected codegen drift from the toolchain rev rather than G.3 LoC alone (G.3 added ~150 LoC). |
+| Lines of Cyrius | src/{main,snapshot,proc,processes,tui}.cyr (~1200 LoC) — tui.cyr ~475 LoC after G.3 added `tui_render_focus_frame` + dispatcher. Does **not** include lib/darshana.cyr (resolved via cyrius deps from darshana 0.3.0). |
 | Test count | 57 assertions across 13 groups (TUI render path needs PTY-based testing — lands at Slice G) |
 | `shu -p` wall time | ~110 ms (100 ms sample window + ~10 ms work). Roadmap gate `< 30 ms` work-budget met with 3× margin. |
 
@@ -35,6 +35,7 @@ args chrono hashmap process tagged assert
 
 **Not yet pulled**:
 
+- **mihi** (M2.5, first-party) — system-info probe library (hostname, uptime, meminfo, cpu count/arch/model, kernel, distro, gpu). At v0.8.0 with chakshu integration as its only remaining v1.0 gate. Wire-in coordinates with the 5.10.20 → 6.0.1 toolchain bump.
 - **TTY / raw mode** (M2) — termios is **not** stdlib and won't be added
   to the cyrius toolchain. Plan: on entering M2, extract `cyim/src/tty.cyr`
   (TCGETS/TCSETS, alt-screen, cursor, ANSI helpers; `cyrius-doom/src/input.cyr`
@@ -53,8 +54,8 @@ args chrono hashmap process tagged assert
 |---|-------|--------|
 | M0 | Scaffold | **Gate cleared** — `cyrius deps`/`build`/`test` all green; `shu --version` / `--help` / `--watch` (placeholder) / unknown-flag paths exercised |
 | M1 | Plain snapshot | **Closed (v0.2.0)** — all four slices landed. `shu -p` produces a header + memory + cpu/disk/net rates + sortable top-N process table with cmdline. Perf gate met. |
-| M2 | Full TUI | **In progress** — released through **v0.3.0** (Slices A through G.2). Slice G.3 (`--pid` focus mode) **code landed, manual QA pending** before v0.4.0 cut — see roadmap §M2 for the QA checklist. G.4 (M2 close review + audit, cuts as 0.5.0) is the only remaining piece after G.3 ships. Powered by **darshana 0.3.0** — chakshu has zero termios/ANSI code of its own. |
-| M2 | Full TUI | Not started |
+| M2 | Full TUI | **In progress** — released through **v0.4.0** (Slices A through G.3). G.4 (M2 close review + audit, cuts as 0.5.0) is the only remaining piece. Powered by **darshana 0.3.0** — chakshu has zero termios/ANSI code of its own. |
+| M2.5 | mihi integration | **New — not started.** Bumps cyrius pin 5.10.20 → 6.0.1, wires `[deps.mihi]`, swaps hand-rolled hostname/uptime/meminfo/cpu_count reads to mihi probes, adds GPU panel (chakshu's first GPU surface). Cuts as v0.6.0 and unblocks mihi v1.0 (mihi's M6 gate). See roadmap. |
 | M3 | AI integration | Not started |
 | M4 | Polish + perf | Not started |
 | M5 | v1.0 ship | Not started |
