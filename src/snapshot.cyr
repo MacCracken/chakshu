@@ -79,24 +79,19 @@ fn snapshot_print_uptime(secs) {
 fn snapshot_print(sort_key, top_n) {
     var buf[8192];
 
+    # M2.5: hostname / kernel / uptime / meminfo / distro / cpu_model
+    # all route through mihi probes. Per-frame deltas (cpu%, disk, net,
+    # per-pid stats) stay chakshu-local — mihi only owns identity/static.
+    var uts[400];
+    mihi_uname(&uts);
+
     # Line 1: host + uptime + loadavg ----------------------------------
     syscall(1, 1, "host: ", 6);
-
-    var hn_n = proc_read("/proc/sys/kernel/hostname", &buf, 8192);
-    if (hn_n < 0) {
-        eprint("chakshu: cannot read /proc/sys/kernel/hostname\n", 47);
-        return EXIT_ERR;
-    }
-    hn_n = proc_trim_trailing_nl(&buf, hn_n);
-    syscall(1, 1, &buf, hn_n);
+    var hn = mihi_hostname(&uts);
+    syscall(1, 1, hn, strlen(hn));
 
     syscall(1, 1, "  up: ", 6);
-    var up_n = proc_read("/proc/uptime", &buf, 8192);
-    if (up_n < 0) {
-        eprint("chakshu: cannot read /proc/uptime\n", 34);
-        return EXIT_ERR;
-    }
-    snapshot_print_uptime(proc_uptime_secs(&buf));
+    snapshot_print_uptime(mihi_uptime_secs(&buf, 8192));
 
     syscall(1, 1, "  load: ", 8);
     var la_n = proc_read("/proc/loadavg", &buf, 8192);
@@ -108,23 +103,76 @@ fn snapshot_print(sort_key, top_n) {
     syscall(1, 1, &buf, la_prefix);
     syscall(1, 1, "\n", 1);
 
-    # Line 2: memory ---------------------------------------------------
-    var mi_n = proc_read("/proc/meminfo", &buf, 8192);
-    if (mi_n < 0) {
-        eprint("chakshu: cannot read /proc/meminfo\n", 35);
-        return EXIT_ERR;
+    # Line 2: kernel + distro ------------------------------------------
+    # mihi probes return cstring pointers into the supplied scratch
+    # buffer (or into the uts buffer for kernel/hostname). Capture the
+    # return value rather than reading from &buf raw.
+    syscall(1, 1, "kern: ", 6);
+    var kn = mihi_kernel_name(&uts);
+    syscall(1, 1, kn, strlen(kn));
+    syscall(1, 1, " ", 1);
+    var kv = mihi_kernel_version(&uts);
+    syscall(1, 1, kv, strlen(kv));
+    syscall(1, 1, "  distro: ", 10);
+    var distro = mihi_distro(&buf, 8192);
+    if (distro != 0) {
+        syscall(1, 1, distro, strlen(distro));
     }
-    var mem_total_kb = proc_meminfo_field(&buf, "MemTotal:");
-    var mem_avail_kb = proc_meminfo_field(&buf, "MemAvailable:");
-    # On kernels old enough to predate MemAvailable (pre-3.14), the
-    # field is absent → 0. Fall back to MemFree, which is a less honest
-    # number but better than reporting 100% used. AGNOS tracks current
-    # kernels so this is belt-and-braces.
-    if (mem_avail_kb == 0) {
-        mem_avail_kb = proc_meminfo_field(&buf, "MemFree:");
+    syscall(1, 1, "\n", 1);
+
+    # Line 3: processor identity (model + core count) -----------------
+    # Named `proc:` (not `cpu:`) because the per-frame delta line below
+    # also leads with `cpu:` for usage %. Plain-mode output is sacred
+    # (design-spec §2.2) — downstream parsers grep on these labels.
+    # mihi_cpu_model recommends 4096+ buf for /proc/cpuinfo reads;
+    # reuse the 8 KiB scratch buf already on stack.
+    syscall(1, 1, "proc: ", 6);
+    var cpu_model = mihi_cpu_model(&buf, 8192);
+    if (cpu_model != 0) {
+        syscall(1, 1, cpu_model, strlen(cpu_model));
     }
-    var mem_used_mib  = (mem_total_kb - mem_avail_kb) / 1024;
-    var mem_total_mib = mem_total_kb / 1024;
+    syscall(1, 1, " (", 2);
+    print_num(mihi_cpu_count());
+    syscall(1, 1, " cores)\n", 8);
+
+    # Line 3.5: GPU / accelerators (only if present) ------------------
+    # chakshu's first GPU surface. mihi probes ai-hwaccel under the
+    # no-exec mask — no ROCm/CUDA processes spawned, just sysfs reads
+    # and vendor-fixed-identity tables. Count == 0 → omit the line
+    # entirely (most CI runners + cloud VMs); count >= 1 → one name +
+    # memory per accelerator, comma-separated.
+    var gpu_n = mihi_gpu_count();
+    if (gpu_n > 0) {
+        syscall(1, 1, "gpu:  ", 6);
+        var gi = 0;
+        while (gi < gpu_n) {
+            if (gi > 0) { syscall(1, 1, ", ", 2); }
+            var gname = mihi_gpu_name(gi);
+            if (gname != 0) {
+                syscall(1, 1, gname, strlen(gname));
+            }
+            var gmem_b = mihi_gpu_memory_bytes(gi);
+            if (gmem_b > 0) {
+                syscall(1, 1, " (", 2);
+                print_num(gmem_b / 1048576);
+                syscall(1, 1, " MiB)", 5);
+            }
+            gi = gi + 1;
+        }
+        syscall(1, 1, "\n", 1);
+    }
+
+    # Line 4: memory ---------------------------------------------------
+    # mihi_mem_total / mihi_mem_free both return bytes. mihi_mem_free
+    # actually reads MemAvailable under the hood (preferred over true
+    # MemFree for "how much can I actually use" semantics) — matches
+    # chakshu's pre-M2.5 logic. processes_render still wants kB for
+    # MEM% computation; keep that derivation.
+    var mem_total_b = mihi_mem_total(&buf, 8192);
+    var mem_avail_b = mihi_mem_free(&buf, 8192);
+    var mem_total_kb  = mem_total_b / 1024;
+    var mem_used_mib  = (mem_total_b - mem_avail_b) / 1048576;
+    var mem_total_mib = mem_total_b / 1048576;
 
     syscall(1, 1, "mem:  ", 6);
     print_num(mem_used_mib);

@@ -8,6 +8,8 @@
 # proc.cyr → proc/{cpu,disk,net,pid}.cyr when M1 Slice B/C land
 # and the file gets unwieldy. Flat is fine while the parsers fit.
 include "lib/darshana.cyr"
+include "lib/ai-hwaccel.cyr"
+include "lib/mihi.cyr"
 include "src/proc.cyr"
 include "src/processes.cyr"
 include "src/snapshot.cyr"
@@ -15,7 +17,7 @@ include "src/tui.cyr"
 
 # Keep CHAKSHU_VERSION in sync with the VERSION file.
 # A future CI check will enforce equality; for now, manual.
-var CHAKSHU_VERSION = "chakshu 0.5.0";
+var CHAKSHU_VERSION = "chakshu 0.6.0";
 
 # Exit codes per design-spec §9
 var EXIT_OK    = 0;

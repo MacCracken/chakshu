@@ -1,6 +1,6 @@
 # chakshu — State
 
-> **Status**: Active | **Last Updated**: 2026-05-19 (v0.5.0 cut — **M2 closed**; mihi integration is the next milestone)
+> **Status**: Active | **Last Updated**: 2026-05-20 (v0.6.0 cut — **M2.5 closed** (mihi integration); chakshu now shares the identity-probe layer with iam — and mihi v1.0 is unblocked)
 >
 > Volatile state — version, toolchain pin, milestone progress, binary size.
 > Refreshed every release. Durable rules live in
@@ -13,14 +13,14 @@
 
 | Field | Value |
 |-------|-------|
-| Version | **0.5.0** — **M2 closed.** Full interactive TUI shipped (Slices A–G.3) with close audit (G.4) green. Next bump: M2.5 mihi integration → 0.6.0 |
-| Cyrius toolchain pin | `5.10.20` (cyrius.cyml `[package].cyrius`) — **drift**: host `cycc` is `6.0.1`; builds clean with warning. Pin bump scheduled for M2.5 (coordinates with the mihi dep wire-in). |
-| Genesis cycle | v6.0.x — toolchain rev landed in agnosticos; chakshu still pinned to 5.10.20 |
-| Active milestone | **M2.5 — mihi integration** (open; cuts as 0.6.0; unblocks mihi v1.0) |
-| Next milestone | **M3 — AI integration** (daimon/hoosh) |
+| Version | **0.6.0** — **M2.5 closed.** mihi integration shipped; identity probes (hostname/kernel/distro/cpu_model/cpu_count/mem_total/mem_free/uptime/gpu_*) now flow through `lib/mihi.cyr`. Per-frame deltas stay chakshu-local. Unblocks mihi v1.0. |
+| Cyrius toolchain pin | `6.0.1` (cyrius.cyml `[package].cyrius`) — bumped from 5.10.20 alongside the mihi dep wire-in. Matches host toolchain; no drift warning. |
+| Genesis cycle | v6.0.x — toolchain rev fully adopted in chakshu |
+| Active milestone | **M3 — AI integration** (daimon/hoosh; not started) |
+| Next milestone | **M4 — Polish + perf** (binary size pressure is the priority — see Carry-Forward) |
 | Binary | `shu` (build/shu) — System Health Utility, per ADR 0001 |
-| Binary size (DCE) | 299 276 bytes (~292 KB) — text 129 844 + bss 169 432. G.4 audit pinned the 183 → 293 KB jump across M2 to **Cyrius 5.10.20 → 6.0.1 codegen drift** (de-facto toolchain), not chakshu source: of 165 KB bss only ~8.3 KB is chakshu module-globals + darshana 60 bytes. M4 polish/perf needs to either renegotiate the design-spec §8 `<256 KB` target or restructure large static buffers via `alloc()` per the build hint. |
-| Lines of Cyrius | src/{main,snapshot,proc,processes,tui}.cyr (~1200 LoC) — tui.cyr ~475 LoC after G.3 added `tui_render_focus_frame` + dispatcher. Does **not** include lib/darshana.cyr (resolved via cyrius deps from darshana 0.3.0). |
+| Binary size (DCE) | 789 519 bytes (~772 KB) — text 588 255 + bss 201 264 + data 0. **+478 KB across M2.5** for the mihi + ai-hwaccel dep tree (ai-hwaccel ships the full GPU/NPU/TPU/AI-ASIC backend stack; chakshu uses only `registry_detect_no_exec()` but DCE NOPs without stripping). Design-spec §8 `<256 KB` target is now ~3× over — M4 carry-forward (either pressure Cyrius codegen for `--strip-dead` or pursue the `alloc()`-restructure that the build hint flags). |
+| Lines of Cyrius | src/{main,snapshot,proc,processes,tui}.cyr (~1230 LoC) — minor uptick from M2.5 swap (~150 LoC of hand-rolled `/proc` reads replaced by 1-line mihi calls; +GPU panels in `-p` and TUI table mode). Does **not** include lib/{darshana,mihi,ai-hwaccel}.cyr (resolved via cyrius deps). |
 | Test count | 57 assertions across 13 groups (TUI render path needs PTY-based testing — lands at Slice G) |
 | `shu -p` wall time | ~110 ms (100 ms sample window + ~10 ms work). Roadmap gate `< 30 ms` work-budget met with 3× margin. |
 
@@ -35,7 +35,8 @@ args chrono hashmap process tagged assert
 
 **Not yet pulled**:
 
-- **mihi** (M2.5, first-party) — system-info probe library (hostname, uptime, meminfo, cpu count/arch/model, kernel, distro, gpu). At v0.8.0 with chakshu integration as its only remaining v1.0 gate. Wire-in coordinates with the 5.10.20 → 6.0.1 toolchain bump.
+- **mihi** (consumed at v0.8.0) — system-info probe library. M2.5 integration complete; identity reads in chakshu's `-p` and TUI paths now go through `lib/mihi.cyr`. mihi v1.0 release is gated on this cut shipping; see CHANGELOG `[0.6.0]`.
+- **ai-hwaccel** (consumed at v2.2.6, transitive via mihi) — accelerator detection backends called via mihi's no-exec API for the GPU panel.
 - **TTY / raw mode** (M2) — termios is **not** stdlib and won't be added
   to the cyrius toolchain. Plan: on entering M2, extract `cyim/src/tty.cyr`
   (TCGETS/TCSETS, alt-screen, cursor, ANSI helpers; `cyrius-doom/src/input.cyr`
@@ -55,7 +56,7 @@ args chrono hashmap process tagged assert
 | M0 | Scaffold | **Gate cleared** — `cyrius deps`/`build`/`test` all green; `shu --version` / `--help` / `--watch` (placeholder) / unknown-flag paths exercised |
 | M1 | Plain snapshot | **Closed (v0.2.0)** — all four slices landed. `shu -p` produces a header + memory + cpu/disk/net rates + sortable top-N process table with cmdline. Perf gate met. |
 | M2 | Full TUI | **Closed (v0.5.0)** — Slices A–G.3 shipped across v0.2.1–v0.4.0; G.4 close audit (privacy/FFI/signals/buffers/perf) green. Powered by **darshana 0.3.0** — chakshu has zero termios/ANSI code of its own. See CHANGELOG `[0.5.0]` for the M2 arc summary + audit findings. |
-| M2.5 | mihi integration | **Open.** Bumps cyrius pin 5.10.20 → 6.0.1, wires `[deps.mihi]`, swaps hand-rolled hostname/uptime/meminfo/cpu_count reads to mihi probes, adds GPU panel (chakshu's first GPU surface). Cuts as v0.6.0 and unblocks mihi v1.0 (mihi's M6 gate). See roadmap. |
+| M2.5 | mihi integration | **Closed (v0.6.0)** — identity probes routed through mihi 0.8.0; toolchain bumped 5.10.20 → 6.0.1; GPU panel in `-p` and TUI table mode. Unblocks mihi v1.0. See CHANGELOG `[0.6.0]`. |
 | M3 | AI integration | Not started |
 | M4 | Polish + perf | Not started |
 | M5 | v1.0 ship | Not started |

@@ -3,7 +3,7 @@
 **The eye — AI-augmented system monitor for AGNOS / Cyrius**
 
 Version: 0.1
-Status: M2 complete (2026-05-19) — interactive TUI shipped; M3 (AI) next
+Status: M2.5 complete (2026-05-20) — mihi-backed identity layer landed; M3 (AI) next
 Audience: Implementation agent / contributors
 Name: Sanskrit **चक्षु** (*chakṣu*) — *the eye, the faculty of sight*. Same observational family as planned `drishti-*` video codecs (दृष्टि — *vision*).
 Binary name: `shu` — **S**ystem **H**ealth **U**tility, a contraction of *chak**shu***. See [ADR 0001](adr/0001-binary-name-shu.md).
@@ -49,19 +49,26 @@ Binary name: `shu` — **S**ystem **H**ealth **U**tility, a contraction of *chak
 
 ## 3. Data Sources
 
-All data comes from the Linux `/proc` and `/sys` interfaces, read via `lib/fs` + `lib/syscalls`.
+Data lives in two layers:
+
+- **Identity / static facts** are surfaced through the [mihi](https://github.com/MacCracken/mihi) probe library. mihi consolidates `uname(2)`, `/proc/cpuinfo`, `/proc/meminfo`, `/etc/os-release`, and ai-hwaccel's accelerator registry behind a stable Cyrius API. Read via `lib/mihi.cyr` after `cyrius deps` resolves the dep.
+- **Per-frame deltas** (CPU%, disk rate, network rate, per-pid stats) come from `/proc` directly via `lib/fs` + `lib/syscalls`. mihi explicitly does not own delta-sourced data — that's chakshu's job.
 
 | Datum | Source | Refresh |
 |-------|--------|---------|
+| Hostname | `mihi_hostname` (uname) | once at start |
+| Kernel name + version | `mihi_kernel_name` / `mihi_kernel_version` (uname) | once at start |
+| Distro | `mihi_distro` (`/etc/os-release`) | once at start |
+| CPU model + core count | `mihi_cpu_model` / `mihi_cpu_count` (`/proc/cpuinfo`, `/sys/devices/system/cpu/online`) | once at start |
+| GPU / accelerators (count, name, memory, family, type) | `mihi_gpu_*` (ai-hwaccel, no-exec sysfs/PCI/registry) | once at start |
+| Memory total / available | `mihi_mem_total` / `mihi_mem_free` (`/proc/meminfo` — actually returns `MemAvailable`) | 1 Hz |
+| Uptime | `mihi_uptime_secs` (`/proc/uptime`) | 1 Hz |
 | Process list | `/proc/[pid]/stat` + `/proc/[pid]/status` + `/proc/[pid]/cmdline` | 1 Hz default |
-| CPU per-core | `/proc/stat` deltas | 1 Hz |
-| Memory | `/proc/meminfo` | 1 Hz |
+| CPU usage (aggregate) | `/proc/stat` deltas | 1 Hz |
 | Swap | `/proc/swaps` | 1 Hz |
 | Disk I/O | `/proc/diskstats` deltas | 1 Hz |
 | Network I/O | `/proc/net/dev` deltas | 1 Hz |
 | Load avg | `/proc/loadavg` | 1 Hz |
-| Uptime | `/proc/uptime` | 1 Hz |
-| Hostname | `/proc/sys/kernel/hostname` | once at start |
 
 Refresh rate configurable via `--rate <hz>` (range 0.2–10).
 
@@ -70,21 +77,22 @@ Refresh rate configurable via `--rate <hz>` (range 0.2–10).
 ## 4. TUI Layout
 
 ```
-┌─ chakshu ─ host: cyriusbox ─ up: 14d 03:21 ─ load: 0.42 0.38 0.35 ────────┐
-│ CPU  [████░░░░░░░░░░░░░░░░] 23%   Mem  [██████░░░░░░] 5.2/16G            │
-│ DISK rd  124K/s  wr  3.1M/s       NET  ↓ 2.4M/s  ↑ 412K/s                │
-├──────────────────────────────────────────────────────────────────────────┤
-│  PID  USER     CPU%  MEM%  CMD                                           │
-│  1234 macro    18.4   3.1  firefox.bin                                   │
-│   892 macro     6.0   1.8  Web Content                                   │
-│   341 macro     2.1   0.4  cyrius build src/main.cyr                     │
-│   ...                                                                    │
-├──────────────────────────────────────────────────────────────────────────┤
-│ [↑↓] move  [k] kill  [?] explain  [f] filter  [s] sort  [q] quit         │
-└──────────────────────────────────────────────────────────────────────────┘
+host: cyriusbox  up: 14d 03:21  load: 0.42 0.38 0.35
+mem:  5300 MiB used / 16384 MiB total
+gpu:  AMD Radeon RX 6800 (16384 MiB)               (omitted if no GPU detected)
+cpu:  23%   disk: rd 124 KiB/s wr 3 MiB/s   net: rx 2 MiB/s tx 412 KiB/s
+   PID S  CPU%  MEM% CMD
+  1234 S   18.4   3.1 firefox.bin
+   892 S    6.0   1.8 Web Content
+   341 R    2.1   0.4 cyrius build src/main.cyr
+   ...
+ [↑↓] move  [s] sort  [f] filter  [k] kill  [q] quit
 ```
 
-Header, panels, and status bar use box-drawing chars (U+2500..U+257F). Color via `lib/io` ANSI helpers. Single-buffer redraw; full-screen alt-buffer entered/exited via standard CSI sequences (`\e[?1049h` / `\e[?1049l`).
+Layout is text-anchored rather than box-drawn — bars and graphs are M4-polish work (see roadmap). Color via ANSI helpers (16-color theme by default, `--color` flag controls; see CHANGELOG `[0.3.0]`). Single-buffer redraw; full-screen alt-buffer entered/exited via standard CSI sequences (`\e[?1049h` / `\e[?1049l`).
+
+`-p` (plain-snapshot) mode also surfaces `kern:` and `proc:` identity lines between `host:` and `mem:`; the TUI omits those to keep the process table tall. Identity panel placement in the TUI is a polish item for M4.
+
 
 ---
 

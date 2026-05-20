@@ -5,26 +5,33 @@ description = "The eye — AI-augmented system monitor for AGNOS / Cyrius"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/chakshu"
 language = "cyrius"
-cyrius = "5.10.20"
+cyrius = "6.0.1"
 
 [build]
 entry = "src/main.cyr"
 output = "shu"
 
-# Stdlib footprint for the M0–M2 arc (process + resource view, no AI yet):
+# Stdlib footprint at M2.5 (mihi integration):
 #   syscalls/alloc/fmt/io — baseline
 #   fs                    — /proc/* and /sys/* reads
-#   str/string/vec        — line parsing, process lists
+#   str/string/slice/vec  — line parsing, process lists, slicing
 #   args                  — CLI flag parsing
 #   chrono                — refresh-tick scheduling (clock_now_ms, sleep_ms)
 #   hashmap               — pid → process-row caching across refresh ticks
 #   process               — sending signals (-k / kill key)
+#   tagged                — Result/Option for mihi-consumer error paths
 #   assert                — tests/chakshu.tcyr
-# Pulled in later cycles (kept off the M0 critical path):
-#   termios — raw mode for the TUI (M2). Not yet provided by the cyrius
-#            toolchain — will be vendored or contributed upstream when
-#            M2 work begins. Tracked in docs/development/state.md.
-#   net     — /proc/net parsing for the network panel (M2)
+# Added at M2.5 because they're referenced by dist/mihi.cyr +
+# dist/ai-hwaccel.cyr concatenations. The parser needs the full chain
+# present; DCE drops the unused code from the linked binary. Pattern
+# matches iam's cyrius.cyml (chakshu's sibling mihi consumer).
+#   agnosys               — shared uname(2)/sysinfo(2) Result wrapper
+#   fnptr/thread/freelist — referenced by ai-hwaccel's async detect path
+#   ct                    — compile-time helpers used by ai-hwaccel registry
+#   json                  — used by ai-hwaccel's detected-device serialization
+#   bench                 — referenced by mihi's bench harness
+# Pulled in later cycles (kept off the critical path until needed):
+#   net     — /proc/net parsing once chakshu wants per-interface detail
 #   sandhi  — daimon/hoosh JSON-RPC for AI explanations (M3)
 #   niyama  — log-tail filtering for the "why is X spiking" context (M3)
 [deps]
@@ -36,6 +43,7 @@ stdlib = [
     "fs",
     "str",
     "string",
+    "slice",
     "vec",
     "args",
     "chrono",
@@ -43,6 +51,13 @@ stdlib = [
     "process",
     "tagged",
     "assert",
+    "agnosys",
+    "fnptr",
+    "thread",
+    "freelist",
+    "ct",
+    "json",
+    "bench",
 ]
 
 # darshana — Linux TTY/raw-mode primitives (termios, ANSI, cursor).
@@ -56,3 +71,28 @@ stdlib = [
 git = "https://github.com/MacCracken/darshana.git"
 tag = "0.3.0"
 modules = ["dist/darshana.cyr"]
+
+# mihi — system-info probe library. M2.5 integration: chakshu shifts
+# hostname / uptime / meminfo / cpu_count off hand-rolled /proc reads
+# onto mihi probes, and picks up cpu_model / kernel / distro / gpu_*
+# probes for the new identity surface + GPU panel. Per-frame deltas
+# (cpu%, disk, net, per-pid stats) stay chakshu-local — mihi only
+# owns identity/static data.
+#
+# Coordinates with mihi v1.0: mihi's only remaining gate was this
+# consumer integration (mihi's M6); chakshu v0.6.0 satisfies it.
+# Pinned at 0.8.0 — mihi's most recent tag and the bundle whose
+# bytes ship in this release.
+[deps.mihi]
+git = "https://github.com/MacCracken/mihi.git"
+tag = "0.8.0"
+modules = ["dist/mihi.cyr"]
+
+# ai-hwaccel — transitive from mihi/gpu.cyr (references
+# registry_detect_no_exec / profile_* / FAMILY_CPU). Pin matches
+# mihi 0.8.0's own [deps.ai-hwaccel] tag (2.2.6). mihi only calls
+# the no-exec API; chakshu inherits the same surface.
+[deps.ai-hwaccel]
+git = "https://github.com/MacCracken/ai-hwaccel.git"
+tag = "2.2.6"
+modules = ["dist/ai-hwaccel.cyr"]

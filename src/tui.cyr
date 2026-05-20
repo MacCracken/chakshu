@@ -445,17 +445,17 @@ fn tui_render_focus_frame() {
     _proc_int_to_cstr(pid, &pid_str);
 
     # ----- row 1: host/up/load (same as table mode) -----
+    # M2.5: hostname / uptime via mihi. loadavg stays chakshu-local
+    # (per-frame data, mihi doesn't own it).
     var hbuf[8192];
+    var uts[400];
+    mihi_uname(&uts);
     tty_cursor_home();
     _tui_color_bold(); syscall(1, 1, "host: ", 6); _tui_color_reset();
-    var hn_n = proc_read("/proc/sys/kernel/hostname", &hbuf, 8192);
-    if (hn_n > 0) {
-        hn_n = proc_trim_trailing_nl(&hbuf, hn_n);
-        syscall(1, 1, &hbuf, hn_n);
-    }
+    var hn = mihi_hostname(&uts);
+    syscall(1, 1, hn, strlen(hn));
     _tui_color_bold(); syscall(1, 1, "  up: ", 6); _tui_color_reset();
-    var up_n = proc_read("/proc/uptime", &hbuf, 8192);
-    if (up_n > 0) { snapshot_print_uptime(proc_uptime_secs(&hbuf)); }
+    snapshot_print_uptime(mihi_uptime_secs(&hbuf, 8192));
     _tui_color_bold(); syscall(1, 1, "  load: ", 8); _tui_color_reset();
     var la_n = proc_read("/proc/loadavg", &hbuf, 8192);
     if (la_n > 0) {
@@ -523,13 +523,10 @@ fn tui_render_focus_frame() {
     var uid_val     = proc_meminfo_field(&status_buf, "Uid:");
     var threads_val = proc_meminfo_field(&status_buf, "Threads:");
 
-    # ----- read /proc/meminfo for mem% calc -----
+    # ----- mem% for the focused pid -----
     var mi_buf[8192];
-    var min = proc_read("/proc/meminfo", &mi_buf, 8192);
-    var mem_total_kb = 0;
-    if (min > 0) {
-        mem_total_kb = proc_meminfo_field(&mi_buf, "MemTotal:");
-    }
+    var mem_total_b = mihi_mem_total(&mi_buf, 8192);
+    var mem_total_kb = mem_total_b / 1024;
     var mem_pct = 0;
     if (mem_total_kb > 0) {
         mem_pct = rss * 400 / mem_total_kb;
@@ -619,21 +616,28 @@ fn tui_render_table_frame() {
     # Slice E.5: reserve bottom row for the status line, so visible
     # process rows = _tui_rows - 5. The render still always paints
     # rows 1-4 (host/mem/cpu/table-header) and row _tui_rows (status).
-    var max_rows = _tui_rows - 5;
+    # M2.5: process-table view is now 1 row shorter to make room for
+    # the gpu line at row 3. _tui_rows - 6 visible process rows; the
+    # gpu line is only painted when mihi_gpu_count() > 0 — but the
+    # row slot is reserved either way so re-renders are layout-stable
+    # (gpu plugged at boot/removed at runtime would otherwise shift
+    # the whole table on a refresh tick — too jarring).
+    var max_rows = _tui_rows - 6;
     if (max_rows < 0) { max_rows = 0; }
     var buf[8192];
+
+    # M2.5: identity reads (hostname / uptime / meminfo) route through
+    # mihi. Per-frame deltas (cpu%, disk, net) stay chakshu-local.
+    var uts[400];
+    mihi_uname(&uts);
 
     # ----- row 1: host / uptime / load -----
     tty_cursor_home();
     _tui_color_bold(); syscall(1, 1, "host: ", 6); _tui_color_reset();
-    var hn_n = proc_read("/proc/sys/kernel/hostname", &buf, 8192);
-    if (hn_n > 0) {
-        hn_n = proc_trim_trailing_nl(&buf, hn_n);
-        syscall(1, 1, &buf, hn_n);
-    }
+    var hn = mihi_hostname(&uts);
+    syscall(1, 1, hn, strlen(hn));
     _tui_color_bold(); syscall(1, 1, "  up: ", 6); _tui_color_reset();
-    var up_n = proc_read("/proc/uptime", &buf, 8192);
-    if (up_n > 0) { snapshot_print_uptime(proc_uptime_secs(&buf)); }
+    snapshot_print_uptime(mihi_uptime_secs(&buf, 8192));
     _tui_color_bold(); syscall(1, 1, "  load: ", 8); _tui_color_reset();
     var la_n = proc_read("/proc/loadavg", &buf, 8192);
     if (la_n > 0) {
@@ -644,23 +648,41 @@ fn tui_render_table_frame() {
 
     # ----- row 2: memory -----
     tty_move(2, 1);
-    var mem_total_kb = 0;
-    var mem_avail_kb = 0;
-    var mi_n = proc_read("/proc/meminfo", &buf, 8192);
-    if (mi_n > 0) {
-        mem_total_kb = proc_meminfo_field(&buf, "MemTotal:");
-        mem_avail_kb = proc_meminfo_field(&buf, "MemAvailable:");
-        if (mem_avail_kb == 0) {
-            mem_avail_kb = proc_meminfo_field(&buf, "MemFree:");
-        }
-    }
-    var mem_used_mib  = (mem_total_kb - mem_avail_kb) / 1024;
-    var mem_total_mib = mem_total_kb / 1024;
+    var mem_total_b = mihi_mem_total(&buf, 8192);
+    var mem_avail_b = mihi_mem_free(&buf, 8192);
+    var mem_total_kb  = mem_total_b / 1024;
+    var mem_used_mib  = (mem_total_b - mem_avail_b) / 1048576;
+    var mem_total_mib = mem_total_b / 1048576;
     _tui_color_bold(); syscall(1, 1, "mem:  ", 6); _tui_color_reset();
     print_num(mem_used_mib);
     syscall(1, 1, " MiB used / ", 12);
     print_num(mem_total_mib);
     syscall(1, 1, " MiB total", 10);
+    tty_clear_to_eol();
+
+    # ----- row 3: GPU / accelerators (reserved slot) -----
+    # When count == 0 the row is intentionally blank (still
+    # tty_clear_to_eol so a previous frame's content goes away).
+    tty_move(3, 1);
+    var gpu_n = mihi_gpu_count();
+    if (gpu_n > 0) {
+        _tui_color_bold(); syscall(1, 1, "gpu:  ", 6); _tui_color_reset();
+        var gi = 0;
+        while (gi < gpu_n) {
+            if (gi > 0) { syscall(1, 1, ", ", 2); }
+            var gname = mihi_gpu_name(gi);
+            if (gname != 0) {
+                syscall(1, 1, gname, strlen(gname));
+            }
+            var gmem_b = mihi_gpu_memory_bytes(gi);
+            if (gmem_b > 0) {
+                syscall(1, 1, " (", 2);
+                print_num(gmem_b / 1048576);
+                syscall(1, 1, " MiB)", 5);
+            }
+            gi = gi + 1;
+        }
+    }
     tty_clear_to_eol();
 
     # ----- row 3: cpu / disk / net (delta-based, 100ms window) -----
@@ -702,7 +724,8 @@ fn tui_render_table_frame() {
     var net_rx_bps  = (rx2 - rx1) * 1000 / SNAP_SAMPLE_MS;
     var net_tx_bps  = (tx2 - tx1) * 1000 / SNAP_SAMPLE_MS;
 
-    tty_move(3, 1);
+    # ----- row 4: cpu / disk / net (delta line) -----
+    tty_move(4, 1);
     _tui_color_bold(); syscall(1, 1, "cpu:  ", 6); _tui_color_reset();
     _tui_color_pct_band(cpu_pct, 25, 70);
     print_num(cpu_pct);
@@ -717,9 +740,9 @@ fn tui_render_table_frame() {
     _snap_print_rate_bps(net_tx_bps);
     tty_clear_to_eol();
 
-    # ----- row 4+: process table (header + top-N rows) -----
+    # ----- row 5+: process table (header + top-N rows) -----
     processes_sample2(total_delta, ncores, sort_key);
-    tty_move(4, 1);
+    tty_move(5, 1);
     syscall(1, 1, "   PID S  CPU%  MEM% CMD", 24);
     tty_clear_to_eol();
 
@@ -774,7 +797,7 @@ fn tui_render_table_frame() {
 
     var i = 0;
     while (i < n) {
-        tty_move(5 + i, 1);
+        tty_move(6 + i, 1);
         # filtered_pos = position within the filtered/sorted list;
         # abs_idx = position within _proc_recs (resolved via filtered_idx).
         # Selection lives in filtered space — match against filtered_pos.
@@ -858,8 +881,8 @@ fn tui_render_table_frame() {
     # scrolls the alt-screen on some terminals — guard the move with
     # `< _tui_rows` (not `<=`) since the status row at `_tui_rows`
     # is rewritten unconditionally below.
-    if (5 + n < _tui_rows) {
-        tty_move(5 + n, 1);
+    if (6 + n < _tui_rows) {
+        tty_move(6 + n, 1);
         tty_clear_to_end();
     }
 

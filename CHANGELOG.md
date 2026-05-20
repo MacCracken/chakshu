@@ -4,6 +4,118 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-05-20 — M2.5 close (mihi integration)
+
+**Milestone close.** chakshu now consumes the
+[mihi](https://github.com/MacCracken/mihi) probe library for all
+identity / static-fact reads (hostname, kernel, distro, CPU model,
+core count, total/available memory, uptime, GPU/accelerators).
+Per-frame deltas (CPU%, disk rate, network rate, per-pid stats)
+stay chakshu-local. This cut unblocks **mihi v1.0** — mihi's M6 gate
+was chakshu integration, and it's now closed.
+
+**Layered architecture established**: chakshu owns the per-frame
+delta loop + TUI + process management; mihi owns the identity probes.
+Future identity additions (username resolution, swap reporting,
+threads/FDs in focus mode) will accrete on the mihi side rather than
+re-introducing hand-rolled `/proc` reads in chakshu.
+
+### Added
+
+- **`[deps.mihi]` (0.8.0) + `[deps.ai-hwaccel]` (2.2.6)** in
+  `cyrius.cyml`. mihi 0.8.0 is an "acknowledgment cut" — `dist/mihi.cyr`
+  is byte-identical to 0.7.0 (mihi's CHANGELOG: "M5 acknowledgment cut.
+  No source changes"). chakshu's surface against mihi is identical to
+  what iam (mihi-0.7.0) consumes; bumping to 0.8.0 keeps chakshu's
+  pin tracking mihi's latest tag.
+- **Cyrius toolchain pin bumped 5.10.20 → 6.0.1** to match mihi's
+  pin and the host's de-facto toolchain. Silences the M2-era
+  toolchain-drift warning.
+- **New stdlib modules** in the dep envelope: `slice`, `agnosys`,
+  `fnptr`, `thread`, `freelist`, `ct`, `json`, `bench`. All
+  transitively referenced by mihi and ai-hwaccel's distlib bundles;
+  DCE eliminates the unused code from the linked binary.
+
+- **`-p` plain-snapshot output now surfaces the full identity block:**
+  ```
+  host: <hostname>  up: <Nd HH:MM>  load: <L1 L5 L15>
+  kern: Linux <release>  distro: <PRETTY_NAME>
+  proc: <CPU model> (<N> cores)
+  gpu:  <accelerator name> (<MiB>)               (omitted if none)
+  mem:  <used> MiB used / <total> MiB total
+  cpu:  <pct>%  disk: rd ... wr ...  net: rx ... tx ...
+     PID S  CPU%  MEM% CMD
+     ...
+  ```
+  - `proc:` (not `cpu:`) is the new label for the CPU-model line so it
+    doesn't collide with the existing `cpu:` delta line — plain-mode
+    output is sacred per design-spec §2.2.
+  - `gpu:` line is **omitted entirely** when `mihi_gpu_count() == 0`
+    (most CI runners + cloud VMs).
+  - On hosts with multiple accelerators, the `gpu:` line lists them
+    comma-separated.
+
+- **GPU panel in TUI table mode** — chakshu's first GPU surface
+  inside the interactive view. Sits at row 3, between `mem:` and the
+  CPU/disk/net delta line. The row slot is reserved unconditionally
+  so plug/unplug at runtime doesn't shift the process table — re-renders
+  stay layout-stable.
+
+- **Identity reads in TUI focus mode (`--pid N`)** also route
+  through mihi (hostname, uptime, mem_total for the focused-pid mem%
+  calc). No layout change; same row positions as v0.4.0.
+
+### Changed
+
+- **TUI table-mode layout shifted down by 1 row** to accommodate the
+  GPU panel slot. Process-table viewport is now `_tui_rows - 6`
+  (was `_tui_rows - 5`). Re-renders, SIGWINCH, sort/filter/kill,
+  arrow-nav — all updated and PTY-smoke green.
+- **`mihi_mem_free` actually reads `MemAvailable`** (per the mihi
+  probe's own docstring) — preserves chakshu's pre-M2.5 "used =
+  total - available" semantic, not the misleading "used = total -
+  truly-free" semantic. No user-visible regression. The pre-3.14
+  MemAvailable-absent → MemFree fallback that lived in
+  `snapshot.cyr` is dropped; AGNOS targets current kernels and mihi
+  is the layer that would re-add the fallback if needed.
+
+- **`scripts/smoke.sh` updated for the new header shape.** Header
+  assertions switched from absolute-line-number to line-anchored
+  `grep` patterns (gpu line is host-variable, so line numbers no
+  longer stable). Process-row counts now derived as "rows after the
+  PID header" rather than total line counts. New co-field
+  assertions: `distro:`, `(N cores)`.
+
+- **`docs/design-spec.md` §3 (Data Sources)** restructured into
+  identity-via-mihi and deltas-via-`/proc` layers. §4 (TUI Layout)
+  mock now matches shipped text-anchored layout (the v0.1-scaffold
+  box-drawn mock with CPU/Mem bar graphs is gone — bars are an M4
+  polish target).
+
+### Performance / size
+
+- `shu -p` wall time unchanged from v0.5.0 (~110-111 ms, dominated
+  by the 100 ms inherent two-sample window).
+- **Binary size grew 292 KB → ~772 KB DCE'd** (text 588 KB + bss
+  201 KB + data 0). The +458 KB text growth is mihi + ai-hwaccel —
+  ai-hwaccel ships the full GPU/NPU/TPU/AI-ASIC detection-backend
+  stack (ROCm, Intel NPU, AMD XDNA, Qualcomm, Groq, Samsung NPU,
+  MediaTek APU), all linked in even though chakshu uses only the
+  `registry_detect_no_exec()` entry. Cyrius DCE NOPs unreachable
+  fns (~379 KB NOPed this cut) but doesn't strip them from the binary;
+  M4 polish/perf needs to either pressure upstream codegen or pursue
+  the `alloc()`-restructure path that the build hint flags. The
+  design-spec §8 `<256 KB` target is now ~3× over — renegotiate or
+  pursue stripping; flagged as M4 carry-forward.
+
+### Known issues / carry-forward
+
+- Identity panel placement in the TUI (kern / proc / distro lines) is
+  M4 polish — the table view omits these to keep the process table
+  tall; only `gpu:` made it into the table view at M2.5.
+- USER column, swap reporting, username resolution still M2-deferred
+  per `roadmap.md`.
+
 ## [0.5.0] — 2026-05-19 — M2 close
 
 **Milestone close.** The full interactive TUI is shipped: alt-screen

@@ -85,24 +85,32 @@ echo "[M1] -p plain snapshot"
 "$BIN" -p > "$TMPDIR/snap" 2> "$TMPDIR/snap.err" || fail "-p exited non-zero"
 [ ! -s "$TMPDIR/snap.err" ]                     || fail "-p wrote to stderr (should be stdout-only on success)"
 
-# Header lines 1–4: each must contain its expected marker. Order matters.
+# M2.5 reshape: header now has 5 fixed lines (host, kern, proc, mem,
+# cpu-delta) + optional gpu line + PID table header. Order matters but
+# line numbers are no longer stable across hosts (gpu may or may not be
+# present). Assert by line-anchored grep rather than absolute position.
 sed -n '1p' "$TMPDIR/snap" | grep -q '^host: '                 || fail "line 1 missing 'host: '"
-sed -n '2p' "$TMPDIR/snap" | grep -q '^mem:'                   || fail "line 2 missing 'mem:'"
-sed -n '3p' "$TMPDIR/snap" | grep -q '^cpu:'                   || fail "line 3 missing 'cpu:'"
-sed -n '4p' "$TMPDIR/snap" | grep -q 'PID'                     || fail "line 4 missing 'PID' table header"
-pass "lines 1–4 shape (host/mem/cpu/PID-header)"
+grep -q '^kern: ' "$TMPDIR/snap"                               || fail "missing 'kern:' line"
+grep -q '^proc: ' "$TMPDIR/snap"                               || fail "missing 'proc:' line"
+grep -q '^mem:'   "$TMPDIR/snap"                               || fail "missing 'mem:' line"
+grep -q '^cpu:'   "$TMPDIR/snap"                               || fail "missing 'cpu:' delta line"
+grep -q '^   PID S' "$TMPDIR/snap"                             || fail "missing PID table header"
+pass "header shape (host/kern/proc/[gpu?]/mem/cpu/PID-header)"
 
 # Each header line should also carry its co-fields.
 sed -n '1p' "$TMPDIR/snap" | grep -q 'up: '                    || fail "line 1 missing 'up: '"
 sed -n '1p' "$TMPDIR/snap" | grep -q 'load: '                  || fail "line 1 missing 'load: '"
-sed -n '3p' "$TMPDIR/snap" | grep -q 'disk:'                   || fail "line 3 missing 'disk:'"
-sed -n '3p' "$TMPDIR/snap" | grep -q 'net:'                    || fail "line 3 missing 'net:'"
+grep -q 'distro:' "$TMPDIR/snap"                               || fail "kern line missing 'distro:' co-field"
+grep -q 'cores)' "$TMPDIR/snap"                                || fail "proc line missing core-count"
+grep '^cpu:' "$TMPDIR/snap" | grep -q 'disk:'                  || fail "cpu line missing 'disk:'"
+grep '^cpu:' "$TMPDIR/snap" | grep -q 'net:'                   || fail "cpu line missing 'net:'"
 pass "header co-fields present"
 
-# Default top-N is 10 → 4 header lines + 10 process rows = 14.
+# Default top-N is 10 → 6 header lines (host/kern/proc/mem/cpu/PID) +
+# 10 process rows = 16, +1 if gpu present. Allow >= 16.
 total=$(wc -l < "$TMPDIR/snap")
-[ "$total" -ge 14 ]                            || fail "default -p produced $total lines, want >=14"
-pass "default -p ≥14 lines"
+[ "$total" -ge 16 ]                            || fail "default -p produced $total lines, want >=16"
+pass "default -p ≥16 lines"
 
 # ============================================================
 # M1 — --top N
@@ -110,13 +118,17 @@ pass "default -p ≥14 lines"
 echo "[M1] --top N"
 
 "$BIN" -p --top 5 > "$TMPDIR/top5" 2>/dev/null || fail "--top 5 exited non-zero"
-[ "$(wc -l < "$TMPDIR/top5")" -ge 9 ]          || fail "--top 5 produced too few lines"
-[ "$(wc -l < "$TMPDIR/top5")" -le 9 ]          || fail "--top 5 produced too many lines (>9)"
-pass "--top 5 → 9 lines"
+# M2.5 reshape: count rows AFTER the PID header rather than total lines
+# — header size now varies (5 or 6 fixed lines + optional gpu) across
+# hosts; the rows-after-PID count is the actual invariant.
+top5_rows=$(awk '/^   PID S/ {start=1; next} start' "$TMPDIR/top5" | wc -l)
+[ "$top5_rows" -eq 5 ]                         || fail "--top 5 produced $top5_rows process rows, want 5"
+pass "--top 5 → 5 process rows"
 
 "$BIN" -p --top 1 > "$TMPDIR/top1" 2>/dev/null || fail "--top 1 exited non-zero"
-[ "$(wc -l < "$TMPDIR/top1")" -eq 5 ]          || fail "--top 1 should be 5 lines (4 header + 1 row)"
-pass "--top 1 → 5 lines"
+top1_rows=$(awk '/^   PID S/ {start=1; next} start' "$TMPDIR/top1" | wc -l)
+[ "$top1_rows" -eq 1 ]                         || fail "--top 1 produced $top1_rows process rows, want 1"
+pass "--top 1 → 1 process row"
 
 # Invalid --top values → EXIT_USAGE.
 set +e
@@ -139,14 +151,17 @@ echo "[M1] --sort"
 for key in cpu mem pid name; do
     "$BIN" -p --sort "$key" --top 5 > "$TMPDIR/sort.$key" 2>/dev/null \
         || fail "--sort $key exited non-zero"
-    [ "$(wc -l < "$TMPDIR/sort.$key")" -eq 9 ] \
-        || fail "--sort $key produced wrong line count"
+    sort_rows=$(awk '/^   PID S/ {start=1; next} start' "$TMPDIR/sort.$key" | wc -l)
+    [ "$sort_rows" -eq 5 ] \
+        || fail "--sort $key produced $sort_rows process rows, want 5"
 done
 pass "--sort {cpu,mem,pid,name} all exit 0"
 
-# --sort pid asc → first row PID < last row PID.
-first_pid=$(awk 'NR==5 { print $1 }' "$TMPDIR/sort.pid")
-last_pid=$(awk 'NR==9 { print $1 }' "$TMPDIR/sort.pid")
+# --sort pid asc → first row PID < last row PID. PID header line is no
+# longer at NR==4; awk-extract via row index 1/5 in the rows-after-PID
+# stream so the assertion stays stable across header reshapes.
+first_pid=$(awk '/^   PID S/ {start=1; next} start' "$TMPDIR/sort.pid" | awk 'NR==1 { print $1 }')
+last_pid=$(awk '/^   PID S/ {start=1; next} start' "$TMPDIR/sort.pid" | awk 'NR==5 { print $1 }')
 [ "$first_pid" -lt "$last_pid" ] \
     || fail "--sort pid asc broken: first=$first_pid last=$last_pid"
 pass "--sort pid is ascending"
