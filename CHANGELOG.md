@@ -4,6 +4,64 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-05-20 — darshana 0.4.1 dep refresh
+
+**Patch — forward-compat dep bump closing darshana's M4 milestone.**
+chakshu's M2 (Full TUI) shipped at 0.5.0 on darshana 0.3.0, which
+already satisfied the literal M4 gate ("chakshu M2 closes ... using
+darshana"). This cut advances chakshu's darshana pin from 0.3.0 →
+0.4.1 so darshana's M4 close ceremony aligns chakshu with the
+ecosystem-current dep. **No behavior change** at the chakshu surface
+— the v0.3.5/0.4.x darshana additions (SGR helpers, `tty_sgr` bounds
+check, ADR 0002 state-restore posture) aren't called from chakshu;
+its colour rendering stays in `src/tui.cyr`'s own 16-colour theme
+path, and its exit/teardown wiring already conforms to ADR 0002.
+
+The darshana surface chakshu *does* use is unchanged from 0.3.0:
+`tty_raw` / `tty_cooked`, `tty_alt_enter` / `tty_alt_leave`,
+`tty_clear` / `tty_clear_to_eol` / `tty_clear_to_end`,
+`tty_cursor_hide` / `tty_cursor_show` / `tty_cursor_home`,
+`tty_move`, `tty_winsize`, `tty_open_signalfd` + the
+`TTY_SIGMASK_EXIT` / `TTY_SIGMASK_WINCH` constants. All names + ABIs
+preserved.
+
+### Changed
+
+- **`cyrius.cyml [deps.darshana].tag`** — `0.3.0` → `0.4.1`. Comment
+  block expanded to record the bumped surface (SGR helpers, bounds
+  check, ADR 0002) and the rationale (forward-compat refresh, no
+  chakshu callsites yet).
+- **`cyrius.lock`** — auto-refreshed by `cyrius deps`.
+- **`CHAKSHU_VERSION`** — `"chakshu 0.6.0"` → `"chakshu 0.6.1"` in
+  `src/main.cyr` line 20.
+- **`VERSION`** — `0.6.0` → `0.6.1`.
+
+### Fixed
+
+- **`cyrius.cyml [build].test`** — added `test = "tests/chakshu.tcyr"`.
+  The manifest previously omitted the `test` key, so bare
+  `cyrius test` had no entry point. Surfaced while verifying this
+  bump (`cyrius test src/test.cyr` ran against a nonexistent path
+  and exited non-zero without printing assertions); the actual unit
+  suite lives at `tests/chakshu.tcyr` and stays at 57/57 green.
+
+### Unchanged (deliberately)
+
+- All chakshu source files — no functional edits beyond the version
+  literal in `src/main.cyr`.
+- mihi pin (`0.8.0`) and ai-hwaccel pin (`2.2.6`) stay put — M2.5's
+  dep tree is current as of yesterday's 0.6.0 cut.
+- Cyrius toolchain pin (`6.0.1`) — chakshu is already on the
+  ecosystem-current cycc.
+
+### Verification
+
+- `cyrius build src/main.cyr build/shu` — OK on the bumped manifest.
+- `cyrius test` (resolves to `tests/chakshu.tcyr` via the
+  newly-added manifest key) — 57/57 passed.
+- `bash scripts/smoke.sh` — all M0–M2.5 smoke gates green against
+  the darshana 0.4.1 dist bundle.
+
 ## [0.6.0] — 2026-05-20 — M2.5 close (mihi integration)
 
 **Milestone close.** chakshu now consumes the

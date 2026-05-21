@@ -9,6 +9,7 @@ cyrius = "6.0.1"
 
 [build]
 entry = "src/main.cyr"
+test = "tests/chakshu.tcyr"
 output = "shu"
 
 # Stdlib footprint at M2.5 (mihi integration):
@@ -64,12 +65,20 @@ stdlib = [
 # Picked up at M2 entry per the roadmap "Pre-M2 — TTY/termios lib
 # extraction" plan. Provides tty_raw / tty_cooked / tty_alt_enter /
 # tty_alt_leave / tty_clear / tty_cursor_* / tty_move + the TIO_*
-# flag constants. M2 Slice A wires the smallest possible TUI
-# (alt-screen + restore-on-exit) against this; later slices grow the
-# render loop, keybinds, SIGWINCH handler, etc.
+# flag constants; chakshu's M2 also exercises tty_winsize +
+# tty_open_signalfd + TTY_SIGMASK_EXIT/WINCH + tty_clear_to_eol/end
+# (all v0.3.0 surface).
+#
+# Bumped 0.3.0 → 0.4.1 at chakshu v0.6.1 (2026-05-20) to align with
+# darshana's M4 close. v0.3.5 added SGR helpers + 16 TTY_FG_*
+# constants; v0.4.0 added the tty_sgr bounds check + ADR 0002
+# (state-restore posture); v0.4.1 is a docstring-only patch.
+# chakshu doesn't yet call the SGR surface — color rendering stays
+# in chakshu/src/tui.cyr's own theme path — so this bump is a
+# forward-compat refresh, no behavior change.
 [deps.darshana]
 git = "https://github.com/MacCracken/darshana.git"
-tag = "0.3.0"
+tag = "0.4.1"
 modules = ["dist/darshana.cyr"]
 
 # mihi — system-info probe library. M2.5 integration: chakshu shifts
