@@ -5,7 +5,7 @@ description = "The eye — AI-augmented system monitor for AGNOS / Cyrius"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/chakshu"
 language = "cyrius"
-cyrius = "6.0.1"
+cyrius = "6.1.27"
 
 [build]
 entry = "src/main.cyr"
@@ -89,18 +89,25 @@ modules = ["dist/darshana.cyr"]
 # owns identity/static data.
 #
 # Coordinates with mihi v1.0: mihi's only remaining gate was this
-# consumer integration (mihi's M6); chakshu v0.6.0 satisfies it.
-# Pinned at 0.8.0 — mihi's most recent tag and the bundle whose
-# bytes ship in this release.
+# consumer integration (mihi's M6); chakshu v0.6.0 satisfied it.
+# Bumped 0.8.0 → 1.0.0 at chakshu v0.7.1 (2026-06-10) — mihi's v1.0
+# ship, now that chakshu (its gating consumer) is integrated. The
+# bundled API surface chakshu reads (hostname / kernel / distro /
+# cpu_model / cpu_count / mem_total / mem_free / uptime / gpu_*) is
+# unchanged from 0.8.0; this is the stable-tag refresh of the same
+# bytes. Per-frame deltas stay chakshu-local.
 [deps.mihi]
 git = "https://github.com/MacCracken/mihi.git"
-tag = "0.8.0"
+tag = "1.0.0"
 modules = ["dist/mihi.cyr"]
 
 # ai-hwaccel — transitive from mihi/gpu.cyr (references
-# registry_detect_no_exec / profile_* / FAMILY_CPU). Pin matches
-# mihi 0.8.0's own [deps.ai-hwaccel] tag (2.2.6). mihi only calls
-# the no-exec API; chakshu inherits the same surface.
+# registry_detect_no_exec / profile_* / FAMILY_CPU). Pin tracks
+# mihi's own [deps.ai-hwaccel] tag, NOT ai-hwaccel's latest release:
+# mihi 1.0.0 still pins 2.2.6, so chakshu inherits 2.2.6 to keep the
+# concatenated dist/mihi.cyr + dist/ai-hwaccel.cyr bundle ABI-consistent.
+# (ai-hwaccel has 2.3.x tags; do not adopt them ahead of mihi.) mihi
+# only calls the no-exec API; chakshu inherits the same surface.
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel.git"
 tag = "2.2.6"

@@ -4,6 +4,38 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-06-10 — toolchain + mihi v1.0 dep refresh
+
+**Patch — toolchain bump and ecosystem-current dep refresh.** No
+behavior change at the chakshu surface; the mihi API chakshu reads
+and the darshana TTY surface it calls are both unchanged.
+
+### Changed
+
+- **`cyrius.cyml [package].cyrius`** — `6.0.1` → `6.1.27`. Aligns the
+  manifest pin with the host wrapper (which had drifted ahead to
+  6.1.27). No source changes required by the toolchain rev.
+- **`cyrius.cyml [deps.mihi].tag`** — `0.8.0` → `1.0.0`. mihi's v1.0
+  ship, unblocked once chakshu (mihi's gating consumer, M6) integrated
+  at v0.6.0. The bundled identity surface chakshu reads
+  (hostname / kernel / distro / cpu_model / cpu_count / mem_total /
+  mem_free / uptime / gpu_*) is unchanged from 0.8.0 — same bytes,
+  stable tag.
+- **`cyrius.cyml [deps.ai-hwaccel].tag`** — held at `2.2.6`. The
+  transitive pin tracks mihi's own `[deps.ai-hwaccel]` tag (mihi 1.0.0
+  still pins 2.2.6), not ai-hwaccel's latest (2.3.x), to keep the
+  concatenated `dist/mihi.cyr` + `dist/ai-hwaccel.cyr` bundle
+  ABI-consistent. Comment block expanded to record the invariant.
+- **`cyrius.lock`** — auto-refreshed by `cyrius deps`.
+- **`CHAKSHU_VERSION`** — `"chakshu 0.7.0"` → `"chakshu 0.7.1"` in
+  `src/main.cyr` line 20.
+- **`VERSION`** — `0.7.0` → `0.7.1`.
+
+### Note
+
+- **darshana** stays at `0.7.0` — already the ecosystem-current tag at
+  this cut; no bump needed.
+
 ## [0.7.0] — 2026-06-06 (cycle-open: AGNOS as a build target)
 
 ### Added
