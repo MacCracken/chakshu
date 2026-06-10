@@ -4,6 +4,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-06-06 (cycle-open: AGNOS as a build target)
+
+### Added
+
+- **AGNOS platform support — cycle opened** (VERSION → 0.7.0). An AGNOS-target build so the `shu` monitor runs on AGNOS: system stats via mihi's `uname`#34 / `sysinfo`#35 reads, and a kernel-log view via the new `klog`#36 syscall (reads the unified klug ring). Filtering stays the **agnsh `grep` builtin** — chakshu does NOT bundle its own grep. Inline; no platform-abstraction layer yet.
+
 ## [0.6.1] — 2026-05-20 — darshana 0.4.1 dep refresh
 
 **Patch — forward-compat dep bump closing darshana's M4 milestone.**

@@ -78,7 +78,7 @@ stdlib = [
 # forward-compat refresh, no behavior change.
 [deps.darshana]
 git = "https://github.com/MacCracken/darshana.git"
-tag = "0.4.1"
+tag = "0.7.0"
 modules = ["dist/darshana.cyr"]
 
 # mihi — system-info probe library. M2.5 integration: chakshu shifts

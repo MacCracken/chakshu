@@ -22,7 +22,7 @@
 # caps the process table at (rows - 4) so it never overflows the
 # terminal. Replaces the inline _tui_open_exit_signalfd / _tui_clear_*
 # helpers with darshana 0.3.0 equivalents (tty_open_signalfd,
-# tty_clear_to_eol, tty_clear_to_end) — Phase 3 of the original
+# tty_clear_to_eol, tty_clear_to_eos) — Phase 3 of the original
 # TUI extraction plan complete.
 # M2 Slice E: keybinds — ↑/↓ row selection + `s` cycles sort key.
 # `_tui_read_key` now parses multi-byte CSI escape sequences (ESC [
@@ -67,7 +67,7 @@
 #
 # All TTY primitives come from darshana — `tty_raw` / `tty_cooked` /
 # `tty_alt_enter` / `tty_alt_leave` / `tty_clear` / `tty_cursor_*` /
-# `tty_winsize` / `tty_open_signalfd` / `tty_clear_to_eol/end`.
+# `tty_winsize` / `tty_open_signalfd` / `tty_clear_to_eol/eos`.
 # The dist bundle lands at `lib/darshana.cyr` via cyrius deps.
 
 # Input buffer for _tui_read_key. Why we need this:
@@ -132,7 +132,7 @@ fn _tui_input_pending() {
 # user's previous shell content comes back undistorted.
 fn _tui_teardown() {
     tty_cursor_show();
-    tty_cooked(0);
+    tty_cooked();
     tty_alt_leave();
     return 0;
 }
@@ -481,7 +481,7 @@ fn tui_render_focus_frame() {
         tty_clear_to_eol();
         if (3 < _tui_rows) {
             tty_move(3, 1);
-            tty_clear_to_end();
+            tty_clear_to_eos();
         }
         tty_move(_tui_rows, 1);
         syscall(1, 1, "[q] quit  (focused process exited)", 34);
@@ -572,7 +572,7 @@ fn tui_render_focus_frame() {
     # ----- wipe rows between cmdline and status -----
     if (5 < _tui_rows) {
         tty_move(5, 1);
-        tty_clear_to_end();
+        tty_clear_to_eos();
     }
 
     # ----- status line: focus-mode keybinds -----
@@ -883,7 +883,7 @@ fn tui_render_table_frame() {
     # is rewritten unconditionally below.
     if (6 + n < _tui_rows) {
         tty_move(6 + n, 1);
-        tty_clear_to_end();
+        tty_clear_to_eos();
     }
 
     # ----- row _tui_rows: status line -----
