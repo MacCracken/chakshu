@@ -29,7 +29,13 @@ output = "shu"
 #   agnosys               — shared uname(2)/sysinfo(2) Result wrapper
 #   fnptr/thread/freelist — referenced by ai-hwaccel's async detect path
 #   ct                    — compile-time helpers used by ai-hwaccel registry
-#   json                  — used by ai-hwaccel's detected-device serialization
+#   bayan                 — used by ai-hwaccel's detected-device serialization.
+#                           Renamed from `json` in the 6.1.x toolchain line
+#                           (6.0.x shipped lib/json.cyr; 6.1.27 ships
+#                           lib/bayan.cyr, which provides the bayan_json_* /
+#                           bayan_csv_* / bayan_cyml_* families). The bundle
+#                           calls bayan_json_get; requesting the old `json`
+#                           name fails to resolve under 6.1.27.
 #   bench                 — referenced by mihi's bench harness
 # Pulled in later cycles (kept off the critical path until needed):
 #   net     — /proc/net parsing once chakshu wants per-interface detail
@@ -57,7 +63,7 @@ stdlib = [
     "thread",
     "freelist",
     "ct",
-    "json",
+    "bayan",
     "bench",
 ]
 
