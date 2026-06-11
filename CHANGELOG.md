@@ -14,6 +14,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   context preview. JSON escape + content extraction unit-tested. The live
   POST needs a running hoosh to verify; design-spec §6.3's "Unix socket /
   daimon.sock" framing was stale — the real path is hoosh's HTTP API.
+- **TUI `?` explain overlay** (`ai_tui_explain`): in `shu-ai`, `?` takes
+  over the screen, shows an "asking hoosh" line, makes the call, and renders
+  the answer (or the redacted-context fallback) until a key is pressed; in
+  lean `shu` it shows a "run shu-ai" notice. The prompt-building is shared
+  with `--explain` via `_ai_prompt_for_pid`. Request→render for now;
+  incremental SSE streaming (`sandhi_http_stream` + Esc-cancel) is a
+  follow-up refinement. Needs a live hoosh + real TTY to verify visually.
 
 ### Changed — **lean / AI binary split**
 

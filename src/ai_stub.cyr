@@ -14,3 +14,20 @@ fn ai_explain(pid) {
     eprintln("chakshu: run the `shu-ai` build for --explain (hoosh-backed AI).");
     return EXIT_ERR;
 }
+
+# In-TUI `?` handler stub. tui.cyr calls this in raw/alt-screen mode, so
+# write a brief overlay (not stderr) and wait for a keypress; the caller
+# repaints the frame on return. The real streamed overlay is in src/ai.cyr.
+fn ai_tui_explain(pid) {
+    tty_clear();
+    tty_move(1, 1);
+    var m1 = "AI explain is not in this build.\r\n";
+    var m2 = "Run the shu-ai build for the AI panel.\r\n\r\n";
+    var m3 = "  [any key to close]";
+    syscall(1, 1, m1, strlen(m1));
+    syscall(1, 1, m2, strlen(m2));
+    syscall(1, 1, m3, strlen(m3));
+    var kb[4];
+    syscall(0, 0, &kb, 1);
+    return 0;
+}

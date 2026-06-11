@@ -337,7 +337,10 @@ fn ai_hoosh_explain(prompt, plen, out, cap) {
 # streamed answer land in v0.7.3; this cut makes the (redacted) context
 # auditable — which is exactly the privacy posture design-spec §2.2 / §6
 # asks for ("AI is opt-in and visible").
-fn ai_explain(pid) {
+# Build the redacted explain prompt for `pid` into `out`. Returns the
+# prompt length, or -1 (no such process) / -2 (unparseable stat). Shared
+# by ai_explain (one-shot) and ai_tui_explain (overlay). Does no printing.
+fn _ai_prompt_for_pid(pid, out, cap) {
     var pid_str[24];
     _proc_int_to_cstr(pid, &pid_str);
 
@@ -346,17 +349,9 @@ fn ai_explain(pid) {
     proc_pid_path(&pid_str, "/stat", &stat_path);
     var stat_buf[8192];
     var sn = file_read_all(&stat_path, &stat_buf, 8191);
-    if (sn <= 0) {
-        eprint_cstr("chakshu: --explain ");
-        eprint_cstr(&pid_str);
-        eprintln(": no such process");
-        return EXIT_ERR;
-    }
+    if (sn <= 0) { return 0 - 1; }
     var rec[48];
-    if (proc_pid_stat_parse(&stat_buf, sn, &rec) != 0) {
-        eprintln("chakshu: --explain: cannot parse process stat");
-        return EXIT_ERR;
-    }
+    if (proc_pid_stat_parse(&stat_buf, sn, &rec) != 0) { return 0 - 2; }
     var state_ch  = load64(&rec + 0);
     var rss_pages = load64(&rec + 16);
     var comm      = &rec + 24;
@@ -401,12 +396,28 @@ fn ai_explain(pid) {
     var sysinfo[256];
     _ai_system_summary(&sysinfo, 256);
 
+    return ai_build_prompt(out, cap, pid, comm, state_ch, ppid_val, uid_val, rss_kb, &cmd_red, &sysinfo);
+}
+
+fn ai_explain(pid) {
     var prompt[2048];
-    var plen = ai_build_prompt(&prompt, 2048, pid, comm, state_ch, ppid_val, uid_val, rss_kb, &cmd_red, &sysinfo);
+    var plen = _ai_prompt_for_pid(pid, &prompt, 2048);
+    if (plen == 0 - 1) {
+        var ps[24];
+        _proc_int_to_cstr(pid, &ps);
+        eprint_cstr("chakshu: --explain ");
+        eprint_cstr(&ps);
+        eprintln(": no such process");
+        return EXIT_ERR;
+    }
+    if (plen == 0 - 2) {
+        eprintln("chakshu: --explain: cannot parse process stat");
+        return EXIT_ERR;
+    }
 
     # Send to hoosh; print its answer. On ANY failure, fall back to the
-    # redacted-context preview (the 0.7.2 behavior) so --explain always
-    # yields something useful and auditable, even with no gateway running.
+    # redacted-context preview so --explain always yields something useful
+    # and auditable, even with no gateway running.
     var answer[16384];
     var rc = ai_hoosh_explain(&prompt, plen, &answer, 16384);
     if (rc >= 0) {
@@ -426,4 +437,82 @@ fn ai_explain(pid) {
     eprintln("");
     syscall(1, 1, &prompt, plen);
     return EXIT_OK;
+}
+
+# --- in-TUI explain overlay (the `?` key in shu-ai) -------------------
+
+# Write a null-terminated string to stdout via strlen — avoids the
+# multi-byte UTF-8 byte-count trap (— and … are 3 bytes each).
+fn _ai_puts(s) {
+    syscall(1, 1, s, strlen(s));
+    return 0;
+}
+
+# Print `n` bytes of `buf` for the overlay, translating bare \n → \r\n so
+# each line starts at column 0 in raw mode. Long lines wrap in the term.
+fn _ai_overlay_print(buf, n) {
+    var i = 0;
+    var start = 0;
+    while (i < n) {
+        if (load8(buf + i) == 10) {
+            if (i > start) { syscall(1, 1, buf + start, i - start); }
+            syscall(1, 1, "\r\n", 2);
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if (n > start) { syscall(1, 1, buf + start, n - start); }
+    return 0;
+}
+
+# Block for one keypress from stdin (raw mode is already set by the TUI).
+fn _ai_overlay_wait_key() {
+    var kb[4];
+    syscall(0, 0, &kb, 1);      # read(fd=0, buf, 1)
+    return 0;
+}
+
+# `?` handler for the shu-ai TUI: take over the screen, ask hoosh about the
+# selected pid (blocking — an "asking…" line shows first), render the answer
+# (or the redacted-context fallback), and wait for a key. The caller repaints
+# the frame on return. Incremental SSE streaming is a later refinement; this
+# is request→render. Mirrors ai_explain's privacy + fallback semantics.
+fn ai_tui_explain(pid) {
+    var prompt[2048];
+    var plen = _ai_prompt_for_pid(pid, &prompt, 2048);
+
+    var pid_str[24];
+    _proc_int_to_cstr(pid, &pid_str);
+
+    tty_clear();
+    tty_move(1, 1);
+    _ai_puts("AI explain — PID ");
+    _ai_puts(&pid_str);
+    _ai_puts("\r\n");
+
+    if (plen < 0) {
+        _ai_puts("  process is gone.\r\n  [any key to close]");
+        _ai_overlay_wait_key();
+        return 0;
+    }
+
+    _ai_puts("  asking hoosh…\r\n");
+    var answer[16384];
+    var rc = ai_hoosh_explain(&prompt, plen, &answer, 16384);
+
+    tty_clear();
+    tty_move(1, 1);
+    _ai_puts("AI explain — PID ");
+    _ai_puts(&pid_str);
+    _ai_puts("\r\n\r\n");
+
+    if (rc >= 0) {
+        _ai_overlay_print(&answer, rc);
+    } else {
+        _ai_puts("  hoosh unavailable — redacted context that would be sent:\r\n\r\n");
+        _ai_overlay_print(&prompt, plen);
+    }
+    _ai_puts("\r\n\r\n  [any key to close]");
+    _ai_overlay_wait_key();
+    return 0;
 }
