@@ -23,29 +23,33 @@
 
 ## M3 — AI integration — substantive milestone, in progress
 
-The substantive case for first-party. `chakshu` becomes the panel where the AGNOS LLM stack meets the live system view. Landing across 0.7.2–0.7.4 (the foundation shipped at 0.7.2 rather than waiting for one big v0.8.0 cut).
+The substantive case for first-party. `chakshu` becomes the panel where the AGNOS LLM stack meets the live system view. Landing across 0.7.2–0.7.5 (incremental cuts rather than one big v0.8.0).
 
 **Foundation — shipped v0.7.2** (`src/ai.cyr`):
 
 - [x] Prompt assembly per design-spec §6.2 (with privacy redaction)
 - [x] niyama-driven secret-pattern redaction in cmdline args (re2; `src/ai.cyr`)
-- [x] `--explain <pid>` — non-interactive one-shot (prints the **redacted context** that will be sent; live answer at 0.7.3)
-- [x] `?` key — captures the selected process; transient hint now, streamed overlay at 0.7.3
+- [x] `--explain <pid>` — non-interactive one-shot (redacted-context preview)
 
-**Live transport — v0.7.3:**
+**Live transport — shipped v0.7.3:**
 
-- [ ] daimon JSON-RPC client (sandhi)
-- [ ] hoosh streaming response renderer (modal overlay in the TUI)
-- [ ] Smoke gate: `--explain <self-pid>` returns something model-shaped
+- [x] hoosh HTTP client via sandhi — `--explain` POSTs `/v1/chat/completions`, prints the answer, falls back to the redacted context on failure. (design-spec §6.3 corrected: HTTP, not the stale Unix-socket framing.)
+- [x] `?` key — in-TUI explain **overlay** (`ai_tui_explain`); request→render for now
+- [x] **lean/AI binary split** — default `shu` (monitor, ~0.84 MB) vs `shu-ai` (+AI, ~2.57 MB); AI deps confined to `ai/cyrius.cyml`
 
-**Logs + anomaly stream — v0.7.4:**
+**SSE streaming — v0.7.4:**
+
+- [ ] Incremental streamed render in the `?` overlay via `sandhi_http_stream` (fnptr callback parsing SSE `data:` deltas) + Esc-cancel — replaces the 0.7.3 request→render placeholder
+- [ ] Smoke gate: `--explain <self-pid>` returns something model-shaped (needs a live hoosh in CI or a stub gateway)
+
+**Logs + anomaly stream — v0.7.5:**
 
 - [ ] `--watch` — anomaly stream (subscribe to aegis/phylax events)
 - [ ] `--with-logs` opt-in for sakshi log context in prompts
 
 **Gate to M4**: a user can ask "why is this process spiking" and get a coherent answer that quotes real /proc data.
 
-> **Size watch (carried to M4):** wiring niyama for redaction pushed the binary to ~1.38 MB — over M4's relaxed `< 1 MB` budget. The bulk is the `unicode` tables niyama's re2 hard-references + niyama's unused engines. Decide at M4: real `--strip-dead`, or revert to a chakshu-local redactor.
+> **Size note:** the lean/AI split (0.7.3) keeps the default `shu` at ~0.84 MB (under btop's install); the AI heft (~2.57 MB, sandhi's tls/sigil/sakshi chain) is confined to the opt-in `shu-ai`. M4 size work now targets the lean monitor only (design-spec §8 `<256 KB`, still ~3.3× over).
 
 ---
 

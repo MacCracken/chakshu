@@ -2,7 +2,9 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — M3 live transport (0.7.3, in progress)
+## [Unreleased]
+
+## [0.7.3] — 2026-06-10 — M3 live transport: lean/AI split + hoosh `--explain` + `?` overlay
 
 ### Added
 

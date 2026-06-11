@@ -7,7 +7,7 @@
 # logic lives here once. `ai_explain` resolves to whichever is included.
 
 # Keep CHAKSHU_VERSION in sync with the VERSION file.
-var CHAKSHU_VERSION = "chakshu 0.7.2";
+var CHAKSHU_VERSION = "chakshu 0.7.3";
 
 # Exit codes per design-spec §9
 var EXIT_OK    = 0;

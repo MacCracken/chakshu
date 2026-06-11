@@ -1,6 +1,6 @@
 # chakshu — State
 
-> **Status**: Active | **Last Updated**: 2026-06-10 (v0.7.2 cut — **M3 foundation**: `--explain` redacted-context preview + niyama-driven secret redaction; toolchain → 6.1.28, niyama 1.0.4 + `unicode` wired)
+> **Status**: Active | **Last Updated**: 2026-06-10 (v0.7.3 cut — **M3 live transport**: lean/AI binary split (`shu` ~0.84 MB + `shu-ai` ~2.57 MB), live `--explain` via hoosh, `?` explain overlay; toolchain → 6.1.29)
 >
 > Volatile state — version, toolchain pin, milestone progress, binary size.
 > Refreshed every release. Durable rules live in
@@ -13,10 +13,10 @@
 
 | Field | Value |
 |-------|-------|
-| Version | **0.7.2** — **M3 foundation.** `--explain <PID>` and the TUI `?` key are wired; both assemble a **privacy-redacted context** (process facts the user can already see + niyama-driven secret-value redaction of the cmdline) and print/point at it. The live daimon JSON-RPC call + streamed answer land at 0.7.3; `--watch` / `--with-logs` at 0.7.4. New module `src/ai.cyr`. |
+| Version | **0.7.3** — **M3 live transport.** `--explain <PID>` POSTs the redacted prompt to the hoosh gateway (`POST /v1/chat/completions`) via sandhi and prints the answer; the `?` key overlays it in the TUI. Foundation (0.7.2) redaction + prompt assembly unchanged. Shipped as a **lean/AI binary split** — see Binary. Next: SSE streaming (0.7.4); `--watch` / `--with-logs` (0.7.5). |
 | Cyrius toolchain pin | `6.1.29` (both manifests) — bumped 6.1.27→28 for directory-style stdlib (`lib/unicode/*.cyr`; 6.1.27 errored `cannot read ./lib/unicode.cyr`), then 28→29 (current wrapper). (`json`→`bayan` rename from 6.1.x still applies; `json`/`base64`/`bigint` all folded into `bayan`.) |
 | Genesis cycle | v6.1.x — toolchain rev adopted; both manifests pin 6.1.29 |
-| Active milestone | **M3 — AI integration** (in progress, 0.7.3). Foundation (0.7.2): redaction + prompt assembly + `--explain`/`?`. Live transport (0.7.3, **WIP, uncommitted**): `--explain` POSTs to hoosh via sandhi + the **lean/AI binary split** (below). Remaining: TUI streaming overlay; live-hoosh verification; `--watch` + `--with-logs` (0.7.4). |
+| Active milestone | **M3 — AI integration** (in progress). Foundation (0.7.2): redaction + prompt assembly. Live transport (0.7.3, **cut**): `--explain` + `?` overlay POST to hoosh via sandhi; lean/AI binary split. The overlay is request→render (blocking). Remaining: **SSE streaming** (0.7.4 — `sandhi_http_stream` + Esc-cancel); `--watch` + `--with-logs` (0.7.5). Live-hoosh happy-path still needs manual verification on a box running the gateway. |
 | Next milestone | **M4 — Polish + perf** |
 | Binary | **Two builds** (0.7.3 split): lean **`shu`** (build/shu, monitor only) and **`shu-ai`** (ai/build/shu-ai, +AI). System Health Utility, per ADR 0001. |
 | Binary size | **Lean `shu`: ~0.84 MB** (883 057 B — text 666 641 + bss 216 416), no AI deps — under btop's 1.7 MB install, beats htop once its ncurses/libc are counted. **`shu-ai`: ~2.57 MB** (sandhi's tls/sigil/sakshi/keccak chain + niyama/unicode). The split exists *because* the toolchain force-links listed stdlib (DCE NOPs but keeps bytes), so AI deps in the manifest = unavoidable bloat — kept out of the lean manifest, present only in `ai/cyrius.cyml`. Design-spec §8 `<256 KB` applies to the lean monitor (still ~3.3× over → M4: DCE/`--strip-dead`); `shu-ai` is explicitly the heavy opt-in. |
