@@ -4,6 +4,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased] — 0.7.4 (in progress)
 
+### Added
+
+- **SSE streaming in the `?` overlay.** The TUI explain overlay now streams
+  hoosh's answer incrementally (`ai_hoosh_stream` → `sandhi_http_stream`
+  with `"stream":true`): sandhi parses the SSE, and `_ai_stream_cb` extracts
+  each OpenAI `delta.content` (reusing `_ai_extract_content`) and renders it
+  as it arrives. **Esc / q cancels mid-stream** (non-blocking `poll(stdin)`
+  in the callback returns 0). Falls back to the redacted-context preview if
+  nothing streams. `--explain` (CLI one-shot) stays request→render. Replaces
+  the 0.7.3 blocking placeholder. Happy-path needs a live hoosh + real TTY
+  to verify visually.
+
 ### Changed
 
 - **hoosh 2.3.5 compatibility — bearer-token auth.** hoosh now enforces
@@ -18,9 +30,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Pending
 
-- SSE streaming in the `?` overlay (`sandhi_http_stream` + Esc-cancel) —
-  contract locked (`cb(ctx, sse_event)→1/0`, `sandhi_sse_event_data`); not
-  yet wired. `--explain` smoke gate.
+- `--explain` smoke gate (needs a live or stubbed hoosh in CI).
+- Live-hoosh verification pass: confirm the real served model name
+  (`$CHAKSHU_MODEL`, default "default") and the streamed `?` overlay visually.
 
 ## [0.7.3] — 2026-06-10 — M3 live transport: lean/AI split + hoosh `--explain` + `?` overlay
 
