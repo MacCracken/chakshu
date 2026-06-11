@@ -23,28 +23,43 @@ Replace `htop`/`btop` as the AGNOS default system monitor, then surpass them wit
 
 ## Quick Start
 
+Two binaries (see [`docs/development/state.md`](docs/development/state.md) for the lean/AI split rationale):
+
 ```bash
+# Lean monitor — default `shu` (no AI deps)
 cyrius deps                                          # populate lib/ from cyrius.cyml
 cyrius build src/main.cyr build/shu                  # build
-cyrius test  tests/chakshu.tcyr                      # tests
+cyrius test  tests/chakshu.tcyr                      # monitor tests (57)
 ./build/shu --version
+
+# AI build — `shu-ai` (ai/ sub-project; shares ../src/* so needs the env flag)
+cd ai && cyrius deps
+CYRIUS_ALLOW_PARENT_INCLUDES=1 cyrius build main.cyr build/shu-ai
+CYRIUS_ALLOW_PARENT_INCLUDES=1 cyrius test tests/chakshu-ai.tcyr   # AI tests (13)
 ```
 
 ## Architecture
 
-Module responsibilities (planned — not all files exist yet at v0.1.0):
+Shared monitor source (`src/`), compiled into BOTH builds:
 
-- **`main.cyr`** — entry, CLI parsing, mode dispatch (TUI vs `-p` plain snapshot vs `--explain`)
-- **`proc/` (planned)** — `/proc` parsers (`/proc/[pid]/stat`, `/proc/[pid]/status`, `/proc/meminfo`, `/proc/stat`, `/proc/diskstats`, `/proc/net/dev`)
-- **`tui/` (planned)** — render loop, panel layout (process table, CPU graph, memory bar, disk/net rates), termios raw mode, key bindings
-- **`ai/` (planned, M3+)** — daimon JSON-RPC client (sandhi), prompt assembly from `/proc` snapshot + recent log context, hoosh streaming responses
+- **`cli.cyr`** — shared CLI: `chakshu_main()`, version/help, arg parsing, mode dispatch. `CHAKSHU_VERSION` lives here.
+- **`proc.cyr`** — `/proc` parsers (`/proc/[pid]/stat`+`status`, `meminfo`, `stat`, `diskstats`, `net/dev`)
+- **`processes.cyr`** — process table model, per-pid CPU%/MEM%, sort
+- **`snapshot.cyr`** — `-p` plain-mode render; **`tui.cyr`** — TUI render loop, panels, key bindings (via `darshana`)
+- Identity/static facts (hostname/kernel/distro/cpu/mem/gpu) come from **`mihi`** (`lib/mihi.cyr`).
+
+Build-specific entries + AI module:
+
+- **`src/main.cyr`** (lean entry) → includes `src/ai_stub.cyr` (a no-op `ai_explain`/`ai_tui_explain` pointing at `shu-ai`). Builds `shu`.
+- **`ai/main.cyr`** (AI entry, in the `ai/` sub-project) → includes the real **`src/ai.cyr`** + the `sandhi`/`niyama` dep chain. Builds `shu-ai`.
+- **`src/ai.cyr`** — secret redaction (`niyama` re2), prompt assembly from the `/proc` snapshot, and the hoosh HTTP client (`sandhi`): `--explain` one-shot + the streamed `?` overlay.
 
 ## Key Constraints
 
-- **No libc, no FFI.** `/proc` is plain text; the kernel ABI is the contract.
-- **No external deps until justified.** Stdlib + sandhi (M3) + niyama (M3) are the planned envelope. No ncurses, no procps, no sysinfo.
-- **AI is opt-in.** `--explain` and `?` key trigger LLM calls; the TUI never makes a network/IPC call without an explicit user action.
-- **Privacy.** When asking daimon "why is process X spiking", send only the data the user can already see in the TUI. No /home contents, no env vars, no command-line args without redaction.
+- **No libc, no FFI — in the lean `shu`.** `/proc` is plain text; the kernel ABI is the contract. The default monitor stays pure. **Exception (documented):** `shu-ai` pulls `sandhi`, whose HTTP/TLS client dlopens libc (`getaddrinfo`/libssl), so the AI build is *not* a pure no-libc binary and its live path only runs on a libc host. Keep the AI deps out of the root manifest (`cyrius.cyml`) — they live only in `ai/cyrius.cyml`.
+- **No external deps until justified.** AI envelope: `sandhi` (hoosh HTTP transport) + `niyama` (re2 redaction), both confined to the `ai/` build. No ncurses, no procps, no sysinfo.
+- **AI is opt-in — at the binary level.** Only `shu-ai` makes LLM calls, and only on `--explain` / the `?` key. The lean `shu` cannot reach the network at all.
+- **Privacy.** When asking hoosh "why is process X spiking", send only the data the user can already see in the TUI. No /home contents, no env vars, no command-line args without redaction (secret patterns stripped via niyama re2).
 
 ## Development Process
 

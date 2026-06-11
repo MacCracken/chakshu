@@ -20,16 +20,21 @@ The Sanskrit name **चक्षु** *chakṣu* means *the eye* / *the faculty 
 
 ## Status
 
-**v0.1.0 — scaffold.** Skeleton + design spec. Nothing useful runs yet. See [docs/development/roadmap.md](docs/development/roadmap.md) for the M0–M5 milestone arc to v1.0.
+**v0.7.4 — M3 (AI integration) nearly complete.** What works today:
 
-If you want a working system monitor *today* on AGNOS, install `htop` or `btop` from the Bazaar:
+- **M1 — plain snapshot** (`shu -p`): host / uptime / load / mem / cpu / disk / net + sortable top-N process table.
+- **M2 — full TUI** (`shu`): alt-screen, 1 Hz refresh, ↑↓ select, `s` sort, `f` filter, `k` kill-with-confirm, `--pid N` focus, 16-colour theme.
+- **M3 — AI integration** (in the `shu-ai` build): `--explain <pid>` and the `?` key send a **privacy-redacted** process context to the AGNOS LLM gateway (`hoosh`) and stream the answer back.
 
-```sh
-ark bazaar install htop
-ark bazaar install btop
-```
+**Two binaries** (see [the split](#install)): the default **`shu`** is the lean monitor (~0.84 MB, zero deps, no libc); **`shu-ai`** adds the AI panel (~2.6 MB; pulls `sandhi`/`niyama`).
 
-`chakshu` will replace those defaults once it reaches parity (M2) and surpasses them with AI integration (M3).
+Remaining before v1.0: M3 close (`--watch`, `--with-logs` — v0.7.5), then M4 polish/perf and M5 ship. See [docs/development/roadmap.md](docs/development/roadmap.md).
+
+> The AI live path needs a running `hoosh` gateway and has only been exercised in CI / on a real box — not yet field-verified. `htop` / `btop` remain the AGNOS Bazaar defaults until chakshu ships at v1.0:
+> ```sh
+> ark bazaar install htop
+> ark bazaar install btop
+> ```
 
 ---
 
@@ -39,13 +44,25 @@ ark bazaar install btop
 # AGNOS / Cyrius native package manager (post-v1.0)
 pkg install chakshu
 
-# From source — Cyrius toolchain 5.9.32+ on $PATH
+# From source — Cyrius toolchain 6.1.29+ on $PATH
 git clone https://github.com/MacCracken/chakshu
 cd chakshu
+
+# Lean monitor — the default `shu` (no AI deps, no libc)
 cyrius deps
 cyrius build src/main.cyr build/shu
 ./build/shu
+
+# AI build — `shu-ai` (adds --explain / ? via the hoosh gateway).
+# Lives in ai/ as a sub-project sharing the monitor source via ../src/*,
+# so it needs CYRIUS_ALLOW_PARENT_INCLUDES=1.
+cd ai
+cyrius deps
+CYRIUS_ALLOW_PARENT_INCLUDES=1 cyrius build main.cyr build/shu-ai
+./build/shu-ai
 ```
+
+Why two binaries? The Cyrius toolchain links every declared stdlib module into the binary (dead code is NOP'd, not dropped), so the AI dep chain (`sandhi`'s TLS/HTTP stack + `niyama`'s regex/unicode tables) would bloat every build to ~2.6 MB. Confining those deps to `ai/cyrius.cyml` keeps the default `shu` at ~0.84 MB — smaller than btop's install and fully self-contained (no libc / ncurses). `shu-ai` is the opt-in heavy build; note that `sandhi` dlopens libc for DNS/TLS, so **`shu-ai` (unlike `shu`) is not a pure no-libc binary** and its live path only runs on a host with libc.
 
 ---
 
@@ -55,9 +72,21 @@ cyrius build src/main.cyr build/shu
 shu                  # full TUI: processes + cpu + mem + disk + net
 shu -p               # plain snapshot, one frame to stdout (pipeable)
 shu --pid 1234       # focus a single process
-shu --explain 1234   # AI: "why is process 1234 doing what it's doing?" (M3+)
-shu --watch          # tail-mode: anomalies flagged via aegis/phylax (M3+)
+
+# AI (the shu-ai build only):
+shu-ai --explain 1234   # ask hoosh "why is process 1234 doing what it's doing?"
+shu-ai --watch          # tail-mode: anomalies flagged via aegis/phylax (v0.7.5)
 ```
+
+The AI build talks to the `hoosh` gateway over HTTP. Configure via env:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `CHAKSHU_HOOSH_URL` | `http://127.0.0.1:8088/v1/chat/completions` | gateway endpoint |
+| `CHAKSHU_MODEL` | `default` | model name passed to hoosh |
+| `CHAKSHU_HOOSH_TOKEN` | *(unset)* | sent as `Authorization: Bearer …` when set (hoosh 2.3.5+ auth) |
+
+Only the redacted, on-screen process facts are sent — no `/home` contents, no env vars, no un-redacted command-line args (secrets like `--password=`/`--token=`/`*KEY*` are stripped). The lean `shu` is monitor-only; `--explain` / `?` there point you at `shu-ai`.
 
 Inside the TUI:
 
@@ -66,9 +95,9 @@ Inside the TUI:
 | `q` / `Esc` | Quit |
 | `↑` `↓` | Move selection |
 | `k` | Kill selected process (with confirm) |
-| `?` | AI explanation of the selected row (M3+) |
 | `f` | Filter |
 | `s` | Sort |
+| `?` | AI explanation of the selected row, streamed in an overlay (`shu-ai`; Esc/q cancels) |
 
 ---
 

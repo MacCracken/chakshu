@@ -26,33 +26,25 @@
 
 ## Dependency Envelope
 
-Pinned in `cyrius.cyml [deps].stdlib` (23 modules — the parser needs the
-full chain present for the concatenated dist bundles; DCE drops what the
-linked binary doesn't reach):
+Two manifests since the 0.7.3 lean/AI split. The toolchain force-links every
+declared stdlib module (DCE NOPs the unreached, keeps the bytes), so AI deps
+are kept out of the lean manifest entirely.
 
-```
-syscalls alloc fmt io fs str string slice vec
-args chrono hashmap process tagged assert
-agnosys fnptr thread freelist ct bayan bench
-unicode
-```
+**Lean `shu` — root `cyrius.cyml`** (monitor only, no libc):
 
-`unicode` (added v0.7.2) is a **directory-style** stdlib module
-(`lib/unicode/*.cyr`) — required by niyama's re2/fuzzy engines and only
-resolvable by the 6.1.28+ dep resolver.
+- stdlib (22): `syscalls alloc fmt io fs str string slice vec args chrono hashmap process tagged assert agnosys fnptr thread freelist ct bayan bench`
+- git deps: **darshana** `0.7.0` (TTY/raw-mode — chakshu has zero termios/ANSI of its own), **mihi** `1.0.0` (identity probes: hostname/kernel/distro/cpu/mem/uptime/gpu_* via `lib/mihi.cyr`), **ai-hwaccel** `2.2.6` (transitive via mihi; GPU panel; pin tracks mihi's own, not ai-hwaccel latest).
 
-**Git deps (pulled, in `lib/` via `cyrius deps`)**:
+**AI `shu-ai` — `ai/cyrius.cyml`** (= the lean deps **plus**):
 
-- **darshana** `0.7.0` — Linux TTY/raw-mode primitives (termios, ANSI, cursor). Powers the M2 TUI; chakshu has zero termios/ANSI code of its own. Already ecosystem-current at the 0.7.1 cut.
-- **mihi** `1.0.0` — system-info probe library. Identity reads in chakshu's `-p` and TUI paths go through `lib/mihi.cyr` (hostname/kernel/distro/cpu_model/cpu_count/mem_total/mem_free/uptime/gpu_*). Per-frame deltas stay chakshu-local. Advanced `0.8.0` → `1.0.0` at v0.7.1 (mihi's v1.0 ship; same bundled surface).
-- **ai-hwaccel** `2.2.6` (transitive via mihi) — accelerator-detection backends called via mihi's no-exec API for the GPU panel. **Pin tracks mihi's own `[deps.ai-hwaccel]` tag, not ai-hwaccel's latest** (2.3.x exists; mihi 1.0.0 still pins 2.2.6) — keeps the concatenated bundle ABI-consistent.
-- **niyama** `1.0.4` (added v0.7.2) — regex engines. chakshu uses only the **re2** surface (`niyama_re2_compile`/`_search`/`_group_*`) in `src/ai.cyr` for §6.2 secret redaction; the bre/pcre/fuzzy/vim engines DCE-NOP. First niyama tag built on 6.1.27+; pulls the `unicode` stdlib module. **Carries the bulk of the 0.7.2 size jump** — see Binary size.
+- stdlib: `+ unicode` (directory-style module, `lib/unicode/*.cyr`; needs the 6.1.28+ resolver) `+` the sandhi chain (`async atomic regression mmap dynlib fdlopen net http tls ws sakshi sigil keccak thread_local`) `+ sandhi` itself.
+- **sandhi** is consumed as a **stdlib module, not a git dep** — the folded-in toolchain copy compiles alongside `net.cyr`/`tls.cyr` so its bare socket/TLS constants resolve (the 6.1.21-built git dist could not). It's the hoosh HTTP transport and the bulk of the AI build's ~2.6 MB.
+- git deps: `+` **niyama** `1.0.4` — re2 secret-redaction (`src/ai.cyr`); the bre/pcre/fuzzy/vim engines DCE-NOP. Pulls the `unicode` stdlib module.
 
-**Not yet pulled**:
+**Not yet pulled / pending**:
 
-- `net` (M2, stdlib) — `/proc/net` parsing for the network panel.
-- `sandhi` (M3, 0.7.3) — daimon/hoosh JSON-RPC transport for the live `--explain` call.
-- `niyama` (M3) — redaction patterns for AI-prompt assembly.
+- `--watch` (phylax/aegis event bus) + `--with-logs` (sakshi log context) transport — v0.7.5, in the AI build.
+- The lean monitor's network panel still uses chakshu-local `/proc/net` parsing (no `net` stdlib dep needed there).
 
 ## Milestone Status
 
@@ -63,8 +55,8 @@ resolvable by the 6.1.28+ dep resolver.
 | M2 | Full TUI | **Closed (v0.5.0)** — Slices A–G.3 shipped across v0.2.1–v0.4.0; G.4 close audit (privacy/FFI/signals/buffers/perf) green. Powered by **darshana 0.3.0** — chakshu has zero termios/ANSI code of its own. See CHANGELOG `[0.5.0]` for the M2 arc summary + audit findings. |
 | M2.5 | mihi integration | **Closed (v0.6.0)** — identity probes routed through mihi 0.8.0; toolchain bumped 5.10.20 → 6.0.1; GPU panel in `-p` and TUI table mode. Unblocked mihi v1.0 (shipped; chakshu pin advanced to 1.0.0 at v0.7.1). See CHANGELOG `[0.6.0]`. |
 | — | AGNOS build target | **Cycle open (v0.7.0)** — `shu` runs on AGNOS: stats via mihi `uname`/`sysinfo`, kernel-log view via the `klog` syscall (unified klug ring), filtering delegated to the agnsh `grep` builtin. Inline; no platform-abstraction layer yet. See CHANGELOG `[0.7.0]`. |
-| M3 | AI integration | Not started |
-| M4 | Polish + perf | Not started |
+| M3 | AI integration | **Near done** — redaction + prompt assembly (v0.7.2); live `--explain` + `?` overlay via hoosh + lean/AI binary split (v0.7.3); SSE streaming + hoosh 2.3.5 bearer auth + `--explain` stub smoke (v0.7.4). **Remaining: `--watch` + `--with-logs` (v0.7.5) → then M3 closes.** Live path is CI/real-box-only (sandhi dlopens libc). |
+| M4 | Polish + perf | Not started — size work now targets the **lean** monitor (design-spec §8 `<256 KB`, ~3.3× over); `shu-ai`'s ~2.6 MB is the accepted opt-in cost. |
 | M5 | v1.0 ship | Not started |
 
 ## Release Process

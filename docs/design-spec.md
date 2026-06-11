@@ -23,8 +23,8 @@ Binary name: `shu` — **S**ystem **H**ealth **U**tility, a contraction of *chak
 - Network I/O rates (per-interface + aggregate)
 - Kill selected process (with confirm)
 - Plain-snapshot mode (`-p`) — single-frame text dump, pipeable
-- AI explanation of selected row / system state (M3+) via `daimon` + `hoosh`
-- Anomaly flagging (M3+) via `aegis` / `phylax` hooks
+- AI explanation of selected row / system state via the `hoosh` LLM gateway (HTTP) — shipped in the `shu-ai` build (v0.7.3+)
+- Anomaly flagging via `aegis` / `phylax` hooks — pending v0.7.5
 
 **Out of scope (for v1):**
 
@@ -103,14 +103,14 @@ Layout is text-anchored rather than box-drawn — bars and graphs are M4-polish 
 | TUI | default | Full-screen interactive monitor |
 | Plain | `-p` / pipe-to-tty-detected | Single frame to stdout, no termios changes, no alt-buffer |
 | Single-process | `--pid N` | TUI focused on one process (full process tree, fds, threads) |
-| Explain | `--explain N` | AI explanation of process N — prompt assembly, hoosh call, response printed, exit |
-| Watch | `--watch` (M3+) | Tail-mode: show events flagged by aegis/phylax as they occur |
+| Explain | `--explain N` | AI explanation of process N — redacted prompt → hoosh, answer printed, exit (`shu-ai`; v0.7.3) |
+| Watch | `--watch` | Tail-mode: show events flagged by aegis/phylax as they occur (`shu-ai`; pending v0.7.5) |
 
 ---
 
-## 6. AI Integration (M3+)
+## 6. AI Integration (M3)
 
-**Not in scope until parity (M2) is closed.** Documented here so design decisions in M0–M2 don't paint M3 into a corner.
+**Implemented in the `shu-ai` build (v0.7.2–v0.7.4).** §6.1–§6.3 below describe the shipped behaviour; §6.4 (`--watch`) is still pending (v0.7.5). The lean `shu` build has no AI surface — `--explain`/`?` there point users at `shu-ai`.
 
 ### 6.1 Trigger surface
 
@@ -133,13 +133,21 @@ Excluded: env vars, /home paths, file contents, network packets.
 
 ### 6.3 Transport
 
-- `daimon` over `sandhi` JSON-RPC (Unix socket — `XDG_RUNTIME_DIR/daimon.sock`)
-- Streamed response rendered into a modal overlay
-- Cancellable via `Esc`
+> **Corrected v0.7.3 (was: "daimon over sandhi JSON-RPC, Unix socket — `daimon.sock`").** The real AGNOS LLM path is `hoosh`'s **OpenAI-compatible HTTP API** (`hoosh` is an HTTP server per its ADR-001), not a Unix-socket JSON-RPC to `daimon`.
 
-### 6.4 Anomaly stream (M3+)
+- **HTTP `POST /v1/chat/completions`** to the `hoosh` gateway via `sandhi`'s HTTP client. Default `http://127.0.0.1:8088`; override with `$CHAKSHU_HOOSH_URL`. Model via `$CHAKSHU_MODEL`. Bearer auth via `$CHAKSHU_HOOSH_TOKEN` (hoosh 2.3.5+).
+- OpenAI request `{model, messages:[{role:"user", content:<prompt>}]}`; answer extracted from the response `content`.
+- The `?` overlay sets `"stream":true` and renders the **SSE** deltas incrementally into a modal overlay; **Esc/q cancels** (non-blocking poll). `--explain` is request→render (one-shot). On any failure it falls back to printing the redacted context.
+- Caveat: `sandhi` dlopens libc (`getaddrinfo`/libssl), so this path runs only on a libc host — see [`state.md`](development/state.md) "runtime-libc caveat".
 
-`aegis` and `phylax` already publish events. `chakshu --watch` subscribes to that bus (sandhi pub/sub via `majra`?  TBD at M3 design) and renders flagged events in a dedicated panel.
+> If `hoosh` later exposes a Unix socket for internal use, a socket transport can be added behind the same `$CHAKSHU_HOOSH_URL` selection. For now it's HTTP.
+
+### 6.4 Anomaly stream + log context (pending — v0.7.5, closes M3)
+
+- `--watch`: `aegis` and `phylax` already publish events. `chakshu --watch` subscribes to that bus (transport TBD — sandhi pub/sub or polling the relevant hoosh/phylax HTTP endpoint) and renders flagged events in a dedicated panel.
+- `--with-logs`: opt-in to fold the last N `sakshi` log lines for the focused pid into the `--explain`/`?` prompt (§6.2). Off by default; privacy rules in §6.2 still apply.
+
+Both land in the `shu-ai` build.
 
 ---
 
@@ -158,9 +166,9 @@ OPTIONS:
   --rate <HZ>        Refresh rate (0.2–10, default 1)
   --color <when>     auto | always | never (default auto)
   --pid <PID>        Focus a single process
-  --explain <PID>    Print AI explanation and exit (M3+)
-  --watch            Anomaly stream mode (M3+)
-  --with-logs        Allow AI prompts to include sakshi log context (M3+)
+  --explain <PID>    Ask hoosh to explain PID and exit (shu-ai build; v0.7.3)
+  --watch            Anomaly stream mode (shu-ai build; pending v0.7.5)
+  --with-logs        Allow AI prompts to include sakshi log context (shu-ai; pending v0.7.5)
   -h, --help         Show help
   -V, --version      Show version
 ```

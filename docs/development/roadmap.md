@@ -1,6 +1,6 @@
 # chakshu — Roadmap
 
-> **Status**: M2.5 closed (v0.6.0). v0.7.x spent on the **AGNOS build-target cycle** + toolchain/dep catch-up (mihi 1.0, Cyrius 6.1.27, `json`→`bayan`). **M3 (AI integration) is the next substantive milestone.** | **Last Updated**: 2026-06-10
+> **Status**: M0–M2.5 closed; **M3 (AI integration) nearly done** — live `--explain` + streamed `?` overlay via hoosh shipped across v0.7.2–v0.7.4 (lean/AI binary split). **One cut left to close M3: v0.7.5 (`--watch` + `--with-logs`).** Then M4 (polish/perf) and M5 (v1.0 ship). | **Last Updated**: 2026-06-10
 >
 > The path from v0.1.0 (scaffold) to v1.0 (ships as the AGNOS default system monitor, replacing the third-party `htop`/`btop` Bazaar packages).
 
