@@ -127,6 +127,8 @@ jobs:
         # gate (drop continue-on-error) once it's seen passing here.
         continue-on-error: true
         run: python3 tests/hoosh_stub_smoke.py ai/build/shu-ai
+
+      - name: DCE parity check
         # Release builds set CYRIUS_DCE=1 to dead-code-eliminate
         # unused stdlib functions. The DCE'd binary must produce the
         # same observable behavior as the debug build, or the DCE
