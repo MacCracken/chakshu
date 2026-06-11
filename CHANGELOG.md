@@ -2,7 +2,25 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [Unreleased] — 0.7.4 (in progress)
+
+### Changed
+
+- **hoosh 2.3.5 compatibility — bearer-token auth.** hoosh now enforces
+  `Authorization: Bearer <token>` on `/v1/*` when tokens are configured (a
+  token-less gateway still "allows all", so unauthenticated calls keep
+  working against it). `--explain` and the `?` overlay now send the header
+  when `$CHAKSHU_HOOSH_TOKEN` is set, and omit it otherwise — compatible
+  with both modes. New `_ai_hoosh_headers` builds Content-Type + optional
+  auth, reused by the (upcoming) SSE stream path. Endpoint / port / request
+  / response are unchanged from 0.7.3 (`POST /v1/chat/completions`, `:8088`,
+  OpenAI format, `"content"` extraction).
+
+### Pending
+
+- SSE streaming in the `?` overlay (`sandhi_http_stream` + Esc-cancel) —
+  contract locked (`cb(ctx, sse_event)→1/0`, `sandhi_sse_event_data`); not
+  yet wired. `--explain` smoke gate.
 
 ## [0.7.3] — 2026-06-10 — M3 live transport: lean/AI split + hoosh `--explain` + `?` overlay
 

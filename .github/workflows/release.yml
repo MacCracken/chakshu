@@ -103,7 +103,7 @@ jobs:
       - name: Resolve dependencies
         run: cyrius deps
 
-      - name: Build DCE'd binary
+      - name: Build DCE'd binary (lean shu)
         run: |
           mkdir -p build
           cyrius build src/main.cyr build/shu
@@ -112,18 +112,42 @@ jobs:
       - name: Re-run smoke on the release binary
         run: bash scripts/smoke.sh build/shu
 
-      - name: Package release artifact
-        # Ships the binary + project metadata. No vendored lib/ —
-        # consumers building from source run `cyrius deps` themselves.
-        # No runtime data dir (chakshu reads /proc and /sys, no
-        # bundled grammars or fixtures to ship).
+      - name: Build DCE'd binary (shu-ai)
+        # The AI variant: ai/ sub-project sharing ../src/* (parent includes
+        # permitted) + the sandhi/niyama dep chain. Inherits CYRIUS_DCE=1
+        # from the job env. The monitor surface is identical, so the same
+        # smoke applies — exercises shu-ai's CLI/snapshot paths too.
+        env:
+          CYRIUS_ALLOW_PARENT_INCLUDES: "1"
         run: |
+          cd ai
+          cyrius deps
+          mkdir -p build
+          cyrius build main.cyr build/shu-ai
+          echo "shu-ai: $(wc -c < build/shu-ai) bytes"
+          bash ../scripts/smoke.sh build/shu-ai
+
+      - name: Package release artifacts
+        # Ships both binaries + project metadata as separate tarballs:
+        #   chakshu-<ver>-<target>      → lean `shu` (monitor, ~0.84 MB)
+        #   chakshu-ai-<ver>-<target>   → `shu-ai` (+AI, ~2.57 MB)
+        # No vendored lib/ — consumers building from source run
+        # `cyrius deps` themselves. The downstream SHA256/release steps
+        # glob *.tar.gz, so a second tarball flows through automatically.
+        run: |
+          mkdir -p out
+
           PKG="chakshu-${VERSION}-${{ matrix.target }}"
           mkdir -p "pkg/$PKG"
           cp build/shu "pkg/$PKG/"
           cp README.md LICENSE CHANGELOG.md VERSION "pkg/$PKG/"
-          mkdir -p out
           tar czf "out/${PKG}.tar.gz" -C pkg "$PKG"
+
+          PKGAI="chakshu-ai-${VERSION}-${{ matrix.target }}"
+          mkdir -p "pkg/$PKGAI"
+          cp ai/build/shu-ai "pkg/$PKGAI/"
+          cp README.md LICENSE CHANGELOG.md VERSION "pkg/$PKGAI/"
+          tar czf "out/${PKGAI}.tar.gz" -C pkg "$PKGAI"
 
       - name: Generate SHA256
         run: |
