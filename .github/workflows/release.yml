@@ -52,8 +52,8 @@ jobs:
             exit 1
           fi
 
-          if ! grep -qE "CHAKSHU_VERSION *= *\"chakshu ${VERSION}\"" src/main.cyr; then
-            echo "::error::CHAKSHU_VERSION in src/main.cyr != VERSION ($VERSION)" >&2
+          if ! grep -qE "CHAKSHU_VERSION *= *\"chakshu ${VERSION}\"" src/cli.cyr; then
+            echo "::error::CHAKSHU_VERSION in src/cli.cyr != VERSION ($VERSION)" >&2
             exit 1
           fi
 
