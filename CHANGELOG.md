@@ -2,7 +2,9 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — 0.7.4 (in progress)
+## [Unreleased]
+
+## [0.7.4] — 2026-06-10 — M3 live transport II: hoosh 2.3.5 auth + SSE streaming + `--explain` smoke
 
 ### Added
 

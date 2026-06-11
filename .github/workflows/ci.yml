@@ -104,7 +104,6 @@ jobs:
         # permits the parent-dir includes cyrius blocks by default) and
         # adds src/ai.cyr + the sandhi/niyama dep chain. Builds `shu-ai`
         # and runs the AI test suite (redaction / prompt / JSON marshalling).
-        # The live hoosh POST is verified manually (needs a gateway).
         env:
           CYRIUS_ALLOW_PARENT_INCLUDES: "1"
         run: |
@@ -115,7 +114,19 @@ jobs:
           xxd -l 4 build/shu-ai | grep -q "7f45 4c46"
           cyrius test tests/chakshu-ai.tcyr
 
-      - name: DCE parity check
+      - name: hoosh-stub smoke (shu-ai --explain end-to-end)
+        # Stands up a tiny OpenAI-shaped gateway and runs `shu-ai --explain`
+        # against it (design-spec §10 / roadmap "--explain returns something
+        # model-shaped" gate): exercises the sandhi HTTP POST, content
+        # extraction, and the bearer-token header for real.
+        #
+        # continue-on-error for now: sandhi resolves DNS via fdlopen→libc
+        # getaddrinfo, which does NOT work in a no-libc/sandboxed context
+        # (it can't be validated on the maintainer's dev box). This gate is
+        # pending its first green on a CI runner with libc; promote to a hard
+        # gate (drop continue-on-error) once it's seen passing here.
+        continue-on-error: true
+        run: python3 tests/hoosh_stub_smoke.py ai/build/shu-ai
         # Release builds set CYRIUS_DCE=1 to dead-code-eliminate
         # unused stdlib functions. The DCE'd binary must produce the
         # same observable behavior as the debug build, or the DCE

@@ -37,19 +37,22 @@ The substantive case for first-party. `chakshu` becomes the panel where the AGNO
 - [x] `?` key — in-TUI explain **overlay** (`ai_tui_explain`); request→render for now
 - [x] **lean/AI binary split** — default `shu` (monitor, ~0.84 MB) vs `shu-ai` (+AI, ~2.57 MB); AI deps confined to `ai/cyrius.cyml`
 
-**SSE streaming — v0.7.4:**
+**SSE streaming + hoosh 2.3.5 — shipped v0.7.4:**
 
-- [ ] Incremental streamed render in the `?` overlay via `sandhi_http_stream` (fnptr callback parsing SSE `data:` deltas) + Esc-cancel — replaces the 0.7.3 request→render placeholder
-- [ ] Smoke gate: `--explain <self-pid>` returns something model-shaped (needs a live hoosh in CI or a stub gateway)
+- [x] Incremental streamed render in the `?` overlay via `sandhi_http_stream` (fnptr `_ai_stream_cb` extracts each OpenAI `delta.content`) + Esc/q cancel (non-blocking `poll(stdin)`). Falls back to the context preview if nothing streams.
+- [x] hoosh **2.3.5** bearer-token auth — `Authorization: Bearer $CHAKSHU_HOOSH_TOKEN` when set (token-less gateway still open).
+- [x] Smoke gate: `tests/hoosh_stub_smoke.py` stands up an OpenAI-shaped stub and runs `shu-ai --explain` against it (POST + content extraction + Bearer header). **Soft CI gate** — sandhi's `fdlopen`→libc `getaddrinfo` can't run in a no-libc/sandbox context, so it's pending its first green on a libc CI runner (then promote to hard).
 
-**Logs + anomaly stream — v0.7.5:**
+**Logs + anomaly stream — v0.7.5 (closes M3):**
 
 - [ ] `--watch` — anomaly stream (subscribe to aegis/phylax events)
 - [ ] `--with-logs` opt-in for sakshi log context in prompts
 
 **Gate to M4**: a user can ask "why is this process spiking" and get a coherent answer that quotes real /proc data.
 
-> **Size note:** the lean/AI split (0.7.3) keeps the default `shu` at ~0.84 MB (under btop's install); the AI heft (~2.57 MB, sandhi's tls/sigil/sakshi chain) is confined to the opt-in `shu-ai`. M4 size work now targets the lean monitor only (design-spec §8 `<256 KB`, still ~3.3× over).
+> **Runtime-libc caveat (0.7.4):** sandhi's HTTP client dlopens libc (`getaddrinfo`/libssl), so **`shu-ai` is not a pure no-libc binary** and its live path only runs on a libc host (CI/AGNOS). The lean `shu` (no sandhi) stays pure no-libc per CLAUDE.md. If this becomes a problem, the fallback is a chakshu-local raw-HTTP-over-TCP client (no sandhi, no dlopen).
+
+> **Size note:** the lean/AI split keeps the default `shu` at ~0.84 MB (under btop's install); the AI heft (~2.57 MB) is confined to the opt-in `shu-ai`. M4 size work targets the lean monitor only (design-spec §8 `<256 KB`, still ~3.3× over).
 
 ---
 

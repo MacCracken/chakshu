@@ -1,6 +1,6 @@
 # chakshu — State
 
-> **Status**: Active | **Last Updated**: 2026-06-10 (v0.7.3 cut — **M3 live transport**: lean/AI binary split (`shu` ~0.84 MB + `shu-ai` ~2.57 MB), live `--explain` via hoosh, `?` explain overlay; toolchain → 6.1.29)
+> **Status**: Active | **Last Updated**: 2026-06-10 (v0.7.4 cut — **M3 live transport II**: hoosh 2.3.5 bearer-token auth, SSE streaming in the `?` overlay (Esc-cancel), `--explain` hoosh-stub smoke gate. Live hoosh path is CI/real-box-only — sandhi dlopens libc, so it can't run in a no-libc/sandbox context.)
 >
 > Volatile state — version, toolchain pin, milestone progress, binary size.
 > Refreshed every release. Durable rules live in
@@ -13,10 +13,10 @@
 
 | Field | Value |
 |-------|-------|
-| Version | **0.7.3** — **M3 live transport.** `--explain <PID>` POSTs the redacted prompt to the hoosh gateway (`POST /v1/chat/completions`) via sandhi and prints the answer; the `?` key overlays it in the TUI. Foundation (0.7.2) redaction + prompt assembly unchanged. Shipped as a **lean/AI binary split** — see Binary. Next: SSE streaming (0.7.4); `--watch` / `--with-logs` (0.7.5). |
+| Version | **0.7.4** — **M3 live transport II.** hoosh **2.3.5** compat: optional `Authorization: Bearer $CHAKSHU_HOOSH_TOKEN`. The `?` overlay now **streams** the answer (SSE via `sandhi_http_stream`, Esc/q cancels); `--explain` stays request→render. New `--explain` hoosh-stub smoke (`tests/hoosh_stub_smoke.py`) — soft CI gate (sandhi's libc-dlopen networking can't run in the dev sandbox). Next: `--watch` / `--with-logs` (0.7.5). |
 | Cyrius toolchain pin | `6.1.29` (both manifests) — bumped 6.1.27→28 for directory-style stdlib (`lib/unicode/*.cyr`; 6.1.27 errored `cannot read ./lib/unicode.cyr`), then 28→29 (current wrapper). (`json`→`bayan` rename from 6.1.x still applies; `json`/`base64`/`bigint` all folded into `bayan`.) |
 | Genesis cycle | v6.1.x — toolchain rev adopted; both manifests pin 6.1.29 |
-| Active milestone | **M3 — AI integration** (in progress). Foundation (0.7.2): redaction + prompt assembly. Live transport (0.7.3, **cut**): `--explain` + `?` overlay POST to hoosh via sandhi; lean/AI binary split. The overlay is request→render (blocking). Remaining: **SSE streaming** (0.7.4 — `sandhi_http_stream` + Esc-cancel); `--watch` + `--with-logs` (0.7.5). Live-hoosh happy-path still needs manual verification on a box running the gateway. |
+| Active milestone | **M3 — AI integration** (near done). 0.7.2 foundation; 0.7.3 live `--explain` + `?` overlay + lean/AI split; 0.7.4 hoosh 2.3.5 auth + SSE streaming + smoke gate. **Remaining: `--watch` + `--with-logs` (0.7.5)**, then M3 closes. **Caveat:** the live hoosh path (sandhi HTTP) needs runtime libc (sandhi dlopens `getaddrinfo`/libssl) — so `shu-ai` is **not** a pure no-libc binary, and the transport can only be exercised on a libc host (CI/AGNOS), not the dev sandbox. Lean `shu` stays pure no-libc. |
 | Next milestone | **M4 — Polish + perf** |
 | Binary | **Two builds** (0.7.3 split): lean **`shu`** (build/shu, monitor only) and **`shu-ai`** (ai/build/shu-ai, +AI). System Health Utility, per ADR 0001. |
 | Binary size | **Lean `shu`: ~0.84 MB** (883 057 B — text 666 641 + bss 216 416), no AI deps — under btop's 1.7 MB install, beats htop once its ncurses/libc are counted. **`shu-ai`: ~2.57 MB** (sandhi's tls/sigil/sakshi/keccak chain + niyama/unicode). The split exists *because* the toolchain force-links listed stdlib (DCE NOPs but keeps bytes), so AI deps in the manifest = unavoidable bloat — kept out of the lean manifest, present only in `ai/cyrius.cyml`. Design-spec §8 `<256 KB` applies to the lean monitor (still ~3.3× over → M4: DCE/`--strip-dead`); `shu-ai` is explicitly the heavy opt-in. |
