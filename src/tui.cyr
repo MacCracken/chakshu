@@ -262,6 +262,11 @@ fn _tui_color_state(s) {
 var TUI_MODE_NORMAL       = 0;
 var TUI_MODE_FILTER       = 1;
 var TUI_MODE_CONFIRM_KILL = 2;
+# M3 foundation (v0.7.2): `?` captures the selected pid and shows a
+# transient hint pointing at `shu --explain <pid>`. The interactive
+# streamed overlay replaces this status message at v0.7.3.
+var TUI_MODE_EXPLAIN      = 3;
+var _tui_explain_pid      = 0;
 
 # `k` captures the selected pid; `y` in confirm mode sends the
 # signal. SIGTERM (15) is the polite-shutdown convention; SIGKILL
@@ -948,11 +953,18 @@ fn _tui_render_status() {
         pos = pos + _tui_status_append_bytes(&sbuf, pos, max, &pid_str, pid_len);
         pos = pos + _tui_status_append(&sbuf, pos, max, "? [y/N]");
     }
+    elif (_tui_mode == TUI_MODE_EXPLAIN) {
+        pos = pos + _tui_status_append(&sbuf, pos, max, "explain PID ");
+        var ep[24];
+        var el = _proc_int_to_cstr(_tui_explain_pid, &ep);
+        pos = pos + _tui_status_append_bytes(&sbuf, pos, max, &ep, el);
+        pos = pos + _tui_status_append(&sbuf, pos, max, ": run  shu --explain <pid>  for context (live overlay: 0.7.3)  [any key]");
+    }
     else {
         # ↑↓ are 3-byte UTF-8 each (E2 86 91 / E2 86 93). The literal
         # below uses the byte escapes directly so the source isn't
         # sensitive to editor encoding.
-        pos = pos + _tui_status_append(&sbuf, pos, max, "[\xe2\x86\x91\xe2\x86\x93] move  [s] sort  [f] filter  [k] kill  [q] quit");
+        pos = pos + _tui_status_append(&sbuf, pos, max, "[\xe2\x86\x91\xe2\x86\x93] move  [s] sort  [f] filter  [k] kill  [?] explain  [q] quit");
         if (_tui_filter_n > 0) {
             pos = pos + _tui_status_append(&sbuf, pos, max, "  filter: ");
             pos = pos + _tui_status_append_bytes(&sbuf, pos, max, &_tui_filter_buf, _tui_filter_n);
@@ -1004,6 +1016,14 @@ fn _tui_dispatch_key(k) {
         else { _tui_mode = TUI_MODE_NORMAL; tui_render_frame(); }
         return 0;
     }
+    if (_tui_mode == TUI_MODE_EXPLAIN) {
+        # Transient hint (M3 foundation) — EOF exits, any other key
+        # dismisses back to Normal. The 0.7.3 overlay replaces this.
+        if (k < 0) { return 1; }
+        _tui_mode = TUI_MODE_NORMAL;
+        tui_render_frame();
+        return 0;
+    }
     # Normal mode. In focus mode (--pid set) most table keybinds are
     # no-ops (no selection, no sort, no filter); only q/Ctrl-C/k apply.
     if (k == 113)        { return 1; }                                                      # 'q'
@@ -1035,6 +1055,18 @@ fn _tui_dispatch_key(k) {
     elif (k == KEY_DOWN) { _tui_select_down(); tui_render_frame(); }
     elif (k == 115)      { _tui_cycle_sort();  tui_render_frame(); }                        # 's'
     elif (k == 102)      { _tui_mode = TUI_MODE_FILTER; tui_render_frame(); }               # 'f'
+    elif (k == 63)       {                                                                  # '?'
+        # AI explain (M3 foundation) — capture the selected row's pid
+        # and show the transient hint. Streamed overlay lands at 0.7.3.
+        if (_tui_filtered_n > 0) {
+            var sel_e = _tui_selected_idx;
+            if (sel_e >= _tui_filtered_n) { sel_e = _tui_filtered_n - 1; }
+            var abs_e = load64(&_tui_filtered_idx + sel_e * 8);
+            _tui_explain_pid = load64(_proc_recs + abs_e * PROC_REC_SIZE + 0);
+            _tui_mode = TUI_MODE_EXPLAIN;
+            tui_render_frame();
+        }
+    }
     return 0;
 }
 

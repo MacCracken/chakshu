@@ -4,6 +4,64 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-06-10 — M3 foundation: `--explain` context + niyama redaction
+
+**Minor — first AI-integration surface (M3 foundation).** `--explain
+<PID>` and the TUI `?` key are wired; the live daimon transport +
+streamed answer land at 0.7.3, `--watch` / `--with-logs` at 0.7.4.
+
+### Added
+
+- **`src/ai.cyr`** — AI-integration module:
+  - **`ai_redact_cmdline`** — design-spec §6.2 secret redaction, driven
+    by niyama's re2 engine. Tokenizes the printable cmdline; for any
+    `key=value` whose key matches `password|token|secret|key|passwd`
+    (case-insensitive on the lead letter and on KEY), the value is
+    replaced with `***`. Fail-safe: if the detector regex can't compile,
+    `key=value` values are redacted rather than leaked.
+  - **`ai_build_prompt`** — assembles the explain prompt from facts the
+    user can already see (process identity/state/rss, redacted command,
+    one-line system summary). Pure formatter; privacy by construction —
+    no env vars, no /home, no untrimmed args (design-spec §6.2).
+  - **`ai_explain`** — `--explain <PID>` one-shot: gathers /proc facts,
+    redacts, assembles, and prints the **redacted context that will be
+    sent** to daimon, then reports transport status. Makes the prompt
+    auditable now ("AI is opt-in and visible", design-spec §2.2/§6).
+- **`--explain <PID>`** wired in `src/main.cyr` (was a placeholder).
+- **TUI `?` key** — captures the selected row's pid and shows a transient
+  hint pointing at `shu --explain <pid>`; `[?] explain` added to the
+  status-line hints. The streamed overlay replaces the hint at 0.7.3.
+- **Tests** — 8 new assertions (65 total): exact-output redaction cases
+  (privacy-critical) + prompt-assembly shape.
+
+### Changed
+
+- **`cyrius.cyml [package].cyrius`** — `6.1.27` → `6.1.28`. 6.1.28's dep
+  resolver handles **directory-style stdlib modules**, which 6.1.27 could
+  not — required to pull `unicode` (see below). No source change.
+- **`cyrius.cyml [deps]`** — added **niyama `1.0.4`** (re2 redaction; first
+  niyama tag built on 6.1.27+) and the **`unicode`** stdlib module (niyama's
+  re2/fuzzy engines reference `unicode_category` / `unicode_to_lower` / the
+  `NFD`/`NFC` normalization constants). ai-hwaccel stays 2.2.6, mihi 1.0.0,
+  darshana 0.7.0.
+- **`cyrius.lock`** — regenerated (now includes niyama + the `unicode`
+  directory module).
+- **`VERSION` / `CHAKSHU_VERSION`** — `0.7.1` → `0.7.2`.
+
+### Notes
+
+- **Binary size jumped to ~1.38 MB** (text 1 182 614 + bss 264 536),
+  **over the relaxed `< 1 MB` M4 budget**. niyama's re2 hard-references the
+  `unicode` data tables (~350 KB) plus niyama's own bundle (~248 KB), even
+  though chakshu uses only re2 on ASCII patterns. This is the size/justifi-
+  cation tension CLAUDE.md flags ("no external deps until justified"); see
+  the M4 carry-forward in `docs/development/state.md`. Options on the table:
+  pursue real DCE/`--strip-dead` of the unused niyama engines + unicode
+  tables, or revert to a chakshu-local redactor.
+- **`unicode` is a directory-style stdlib module** (`lib/unicode/*.cyr`).
+  Pulling it requires the 6.1.28 resolver; 6.1.27 errored with
+  `cannot read ./lib/unicode.cyr`.
+
 ## [0.7.1] — 2026-06-10 — toolchain + mihi v1.0 dep refresh
 
 **Patch — toolchain bump and ecosystem-current dep refresh.** No

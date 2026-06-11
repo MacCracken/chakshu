@@ -1,0 +1,331 @@
+# ai.cyr — AI integration: prompt assembly + secret redaction + the
+# `--explain` one-shot. M3 foundation (chakshu v0.7.2).
+#
+# Scope at 0.7.2 (per docs/development/roadmap.md, M3 — AI integration):
+#   - ai_redact_cmdline  — niyama re2-driven secret-value redaction (§6.2)
+#   - ai_build_prompt    — assemble the explain prompt from process +
+#                          system facts the user can already see (§6.2)
+#   - ai_explain         — `--explain <pid>` one-shot: gather, redact,
+#                          assemble, print the (redacted) context that
+#                          WOULD be sent, and report daimon transport
+#                          status. The live JSON-RPC call + streamed
+#                          response render land at 0.7.3; --watch /
+#                          --with-logs at 0.7.4.
+#
+# Privacy (design-spec §6.2 + CLAUDE.md): the prompt carries only data
+# the user can already see in the TUI / -p surface — process identity,
+# state, mem, and a REDACTED cmdline. No env vars, no /home contents,
+# no untrimmed args. Secret values (--password=, --token=, *KEY*=, ...)
+# are stripped before assembly.
+
+# Cap on cmdline bytes assembled into the prompt — design-spec §6.2:
+# "the first 256 bytes of /proc/[pid]/cmdline".
+var AI_CMDLINE_CAP = 256;
+
+# --- small output appenders -------------------------------------------
+# Each returns the new output cursor; all clamp at cap-1 to leave room
+# for a trailing null.
+
+fn _ai_app(out, pos, cap, s) {
+    var sl = strlen(s);
+    var i = 0;
+    while (i < sl) {
+        if (pos < cap - 1) { store8(out + pos, load8(s + i)); pos = pos + 1; }
+        i = i + 1;
+    }
+    return pos;
+}
+
+fn _ai_app_ch(out, pos, cap, ch) {
+    if (pos < cap - 1) { store8(out + pos, ch); pos = pos + 1; }
+    return pos;
+}
+
+fn _ai_app_n(out, pos, cap, num) {
+    var nb[24];
+    var nl = _proc_int_to_cstr(num, &nb);
+    var i = 0;
+    while (i < nl) {
+        if (pos < cap - 1) { store8(out + pos, load8(&nb + i)); pos = pos + 1; }
+        i = i + 1;
+    }
+    return pos;
+}
+
+# --- secret redaction (niyama re2) ------------------------------------
+
+# Lazily-compiled re2 NFA flagging a secret-looking key. Matches anywhere
+# in the key token (the part before '='): password / token / secret / key
+# / passwd, case-insensitive on the leading letter and on KEY. Compiled
+# once on first use. _tried guards against recompiling after a failure.
+var _ai_secret_nfa       = 0;
+var _ai_secret_nfa_tried = 0;
+
+fn _ai_secret_pattern_nfa() {
+    if (_ai_secret_nfa_tried == 0) {
+        _ai_secret_nfa_tried = 1;
+        _ai_secret_nfa = niyama_re2_compile("[Pp]assword|[Tt]oken|[Ss]ecret|[Kk][Ee][Yy]|[Pp]asswd");
+    }
+    return _ai_secret_nfa;
+}
+
+# Is the key token buf[key_off, key_end) secret-looking? Copies the key
+# into a scratch cstring and runs the re2 search. Fail-safe: if the
+# detector NFA is unavailable (compile failed), treat the key as secret
+# so a broken regex never leaks a value.
+fn _ai_key_is_secret(buf, key_off, key_end) {
+    var nfa = _ai_secret_pattern_nfa();
+    if (nfa == 0) { return 1; }
+    var klen = key_end - key_off;
+    if (klen <= 0) { return 0; }
+    if (klen > 63) { klen = 63; }
+    var kbuf[64];
+    var i = 0;
+    while (i < klen) {
+        store8(&kbuf + i, load8(buf + key_off + i));
+        i = i + 1;
+    }
+    store8(&kbuf + klen, 0);
+    if (niyama_re2_search(nfa, &kbuf) >= 0) { return 1; }
+    return 0;
+}
+
+# Redact secret VALUES from a printable (space-separated) command line.
+# For each space-delimited token containing '=', if the key (before '=')
+# is secret-looking, the value (after '=') is replaced with "***";
+# otherwise the token is copied verbatim. Tokens without '=' are copied
+# verbatim. Output is null-terminated. Returns output length (excl null).
+#
+# in_buf must be null-terminated; in_len is its length (excl null).
+fn ai_redact_cmdline(in_buf, in_len, out, cap) {
+    var op = 0;
+    var i = 0;
+    while (i < in_len) {
+        var tok_start = i;
+        # token spans [tok_start, j) until next space or end
+        var j = i;
+        while (j < in_len) {
+            if (load8(in_buf + j) == 32) { break; }
+            j = j + 1;
+        }
+        # locate '=' within the token
+        var eq = 0 - 1;
+        var t = tok_start;
+        while (t < j) {
+            if (load8(in_buf + t) == 61) { eq = t; break; }
+            t = t + 1;
+        }
+        var redact = 0;
+        if (eq >= 0) {
+            if (_ai_key_is_secret(in_buf, tok_start, eq) == 1) { redact = 1; }
+        }
+        if (redact == 1) {
+            # copy key + '=' verbatim, then "***"
+            var k = tok_start;
+            while (k <= eq) {
+                if (op < cap - 1) { store8(out + op, load8(in_buf + k)); op = op + 1; }
+                k = k + 1;
+            }
+            var s = 0;
+            while (s < 3) {
+                if (op < cap - 1) { store8(out + op, 42); op = op + 1; }  # '*'
+                s = s + 1;
+            }
+        } else {
+            var c = tok_start;
+            while (c < j) {
+                if (op < cap - 1) { store8(out + op, load8(in_buf + c)); op = op + 1; }
+                c = c + 1;
+            }
+        }
+        # re-emit the single token separator (space), then advance
+        if (j < in_len) {
+            if (op < cap - 1) { store8(out + op, 32); op = op + 1; }
+            i = j + 1;
+        } else {
+            i = j;
+        }
+    }
+    store8(out + op, 0);
+    return op;
+}
+
+# --- prompt assembly (§6.2) -------------------------------------------
+
+# Assemble the explain prompt into `out` (cap bytes) from facts the user
+# can already see. `comm`, `redacted`, and `sysinfo` are cstrings;
+# `state_ch` is the ASCII process-state byte. Returns prompt length
+# (excl null). Pure formatter — no I/O, unit-tested.
+fn ai_build_prompt(out, cap, pid, comm, state_ch, ppid, uid, rss_kb, redacted, sysinfo) {
+    var pos = 0;
+    pos = _ai_app(out, pos, cap, "Explain this Linux process using only the facts below.\n\n");
+    pos = _ai_app(out, pos, cap, "process: ");
+    pos = _ai_app(out, pos, cap, comm);
+    pos = _ai_app(out, pos, cap, " (pid ");
+    pos = _ai_app_n(out, pos, cap, pid);
+    pos = _ai_app(out, pos, cap, ", ppid ");
+    pos = _ai_app_n(out, pos, cap, ppid);
+    pos = _ai_app(out, pos, cap, ", uid ");
+    pos = _ai_app_n(out, pos, cap, uid);
+    pos = _ai_app(out, pos, cap, ")\n");
+    pos = _ai_app(out, pos, cap, "state:   ");
+    pos = _ai_app_ch(out, pos, cap, state_ch);
+    pos = _ai_app(out, pos, cap, "\n");
+    pos = _ai_app(out, pos, cap, "rss:     ");
+    pos = _ai_app_n(out, pos, cap, rss_kb);
+    pos = _ai_app(out, pos, cap, " kB\n");
+    pos = _ai_app(out, pos, cap, "command: ");
+    pos = _ai_app(out, pos, cap, redacted);
+    pos = _ai_app(out, pos, cap, "\n");
+    pos = _ai_app(out, pos, cap, "system:  ");
+    pos = _ai_app(out, pos, cap, sysinfo);
+    pos = _ai_app(out, pos, cap, "\n");
+    store8(out + pos, 0);
+    return pos;
+}
+
+# One-line system summary: "load <l1 l5 l15>  mem <used>/<total> MiB".
+# Uses the same identity/load sources as the -p header.
+fn _ai_system_summary(out, cap) {
+    var pos = 0;
+    pos = _ai_app(out, pos, cap, "load ");
+    var lbuf[8192];
+    var ln = proc_read("/proc/loadavg", &lbuf, 8192);
+    if (ln > 0) {
+        var lp = proc_loadavg_prefix_len(&lbuf, ln);
+        var i = 0;
+        while (i < lp) {
+            if (pos < cap - 1) { store8(out + pos, load8(&lbuf + i)); pos = pos + 1; }
+            i = i + 1;
+        }
+    }
+    pos = _ai_app(out, pos, cap, "  mem ");
+    var scratch[8192];
+    var mt = mihi_mem_total(&scratch, 8192);
+    var mf = mihi_mem_free(&scratch, 8192);
+    var used_mib  = (mt - mf) / 1048576;
+    var total_mib = mt / 1048576;
+    pos = _ai_app_n(out, pos, cap, used_mib);
+    pos = _ai_app(out, pos, cap, "/");
+    pos = _ai_app_n(out, pos, cap, total_mib);
+    pos = _ai_app(out, pos, cap, " MiB");
+    store8(out + pos, 0);
+    return pos;
+}
+
+# --- daimon transport (probe only at 0.7.2) ---------------------------
+
+# Resolve the daimon socket path into `out` and probe for its existence.
+# Path is $XDG_RUNTIME_DIR/daimon.sock (design-spec §6.3), falling back
+# to /run/user/<uid>/daimon.sock when the env var is unset. Returns 1 if
+# the socket path exists, 0 otherwise. (Reading XDG_RUNTIME_DIR here is
+# for transport addressing, NOT prompt content — privacy rule intact.)
+fn ai_daimon_socket(out, cap) {
+    var pos = 0;
+    var xrd = getenv("XDG_RUNTIME_DIR");
+    if (xrd != 0) {
+        pos = _ai_app(out, pos, cap, xrd);
+    } else {
+        pos = _ai_app(out, pos, cap, "/run/user/");
+        var uid = syscall(102, 0, 0, 0);   # getuid(2)
+        pos = _ai_app_n(out, pos, cap, uid);
+    }
+    pos = _ai_app(out, pos, cap, "/daimon.sock");
+    store8(out + pos, 0);
+    # access(path, F_OK=0) — syscall 21; 0 means the path exists.
+    if (syscall(21, out, 0, 0) == 0) { return 1; }
+    return 0;
+}
+
+# --- `--explain <pid>` one-shot ---------------------------------------
+
+# Gather the process facts, redact the cmdline, assemble the prompt, and
+# print it as the context that --explain WILL send to daimon. Returns
+# EXIT_OK, or EXIT_ERR if the pid is gone / unparseable. The live call +
+# streamed answer land in v0.7.3; this cut makes the (redacted) context
+# auditable — which is exactly the privacy posture design-spec §2.2 / §6
+# asks for ("AI is opt-in and visible").
+fn ai_explain(pid) {
+    var pid_str[24];
+    _proc_int_to_cstr(pid, &pid_str);
+
+    # /proc/<pid>/stat → state, ticks, rss (pages), comm
+    var stat_path[64];
+    proc_pid_path(&pid_str, "/stat", &stat_path);
+    var stat_buf[8192];
+    var sn = file_read_all(&stat_path, &stat_buf, 8191);
+    if (sn <= 0) {
+        eprint_cstr("chakshu: --explain ");
+        eprint_cstr(&pid_str);
+        eprintln(": no such process");
+        return EXIT_ERR;
+    }
+    var rec[48];
+    if (proc_pid_stat_parse(&stat_buf, sn, &rec) != 0) {
+        eprintln("chakshu: --explain: cannot parse process stat");
+        return EXIT_ERR;
+    }
+    var state_ch  = load64(&rec + 0);
+    var rss_pages = load64(&rec + 16);
+    var comm      = &rec + 24;
+    var rss_kb    = rss_pages * 4;          # 4 KiB pages
+
+    # /proc/<pid>/status → PPid, Uid
+    var status_path[64];
+    proc_pid_path(&pid_str, "/status", &status_path);
+    var status_buf[8192];
+    var stn = file_read_all(&status_path, &status_buf, 8191);
+    var ppid_val = 0;
+    var uid_val  = 0;
+    if (stn > 0) {
+        store8(&status_buf + stn, 0);
+        ppid_val = proc_meminfo_field(&status_buf, "PPid:");
+        uid_val  = proc_meminfo_field(&status_buf, "Uid:");
+    }
+
+    # /proc/<pid>/cmdline → printable → redacted (capped per §6.2)
+    var cmd_raw[512];
+    var craw_n = _proc_read_cmdline(&pid_str, &cmd_raw, 512);
+    if (craw_n > AI_CMDLINE_CAP) {
+        craw_n = AI_CMDLINE_CAP;
+        store8(&cmd_raw + craw_n, 0);
+    }
+    var cmd_red[512];
+    if (craw_n > 0) {
+        ai_redact_cmdline(&cmd_raw, craw_n, &cmd_red, 512);
+    } else {
+        # kernel thread / unreadable cmdline — bracket the comm
+        store8(&cmd_red, 91);               # '['
+        var cl = strlen(comm);
+        var ci = 0;
+        while (ci < cl) {
+            store8(&cmd_red + 1 + ci, load8(comm + ci));
+            ci = ci + 1;
+        }
+        store8(&cmd_red + 1 + cl, 93);      # ']'
+        store8(&cmd_red + 1 + cl + 1, 0);
+    }
+
+    var sysinfo[256];
+    _ai_system_summary(&sysinfo, 256);
+
+    var prompt[2048];
+    var plen = ai_build_prompt(&prompt, 2048, pid, comm, state_ch, ppid_val, uid_val, rss_kb, &cmd_red, &sysinfo);
+    syscall(1, 1, &prompt, plen);
+
+    # Transport status — to stderr so the stdout context stays pipeable.
+    var sock[256];
+    var present = ai_daimon_socket(&sock, 256);
+    eprintln("");
+    eprint_cstr("chakshu: above is the redacted context for PID ");
+    eprint_cstr(&pid_str);
+    eprintln(" that --explain will send to daimon.");
+    if (present == 1) {
+        eprint_cstr("chakshu: daimon socket present (");
+    } else {
+        eprint_cstr("chakshu: daimon socket not found (");
+    }
+    eprint_cstr(&sock);
+    eprintln("); live transport + streamed answer land in v0.7.3.");
+    return EXIT_OK;
+}

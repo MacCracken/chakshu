@@ -10,14 +10,16 @@
 include "lib/darshana.cyr"
 include "lib/ai-hwaccel.cyr"
 include "lib/mihi.cyr"
+include "lib/niyama.cyr"
 include "src/proc.cyr"
 include "src/processes.cyr"
+include "src/ai.cyr"
 include "src/snapshot.cyr"
 include "src/tui.cyr"
 
 # Keep CHAKSHU_VERSION in sync with the VERSION file.
 # A future CI check will enforce equality; for now, manual.
-var CHAKSHU_VERSION = "chakshu 0.7.1";
+var CHAKSHU_VERSION = "chakshu 0.7.2";
 
 # Exit codes per design-spec §9
 var EXIT_OK    = 0;
@@ -36,8 +38,8 @@ fn print_help() {
     println("  shu [OPTIONS]            Full TUI: ↑↓ select, s sort, f filter, k kill, q quit");
     println("  shu -p                   Plain snapshot (host/uptime/load/mem/cpu/disk/net + top-N process table)");
     println("  shu --pid <PID>          Focus a single process (status / cmdline / k to kill)");
-    println("  shu --explain <PID>      AI explanation (M3+)");
-    println("  shu --watch              Anomaly stream (M3+)");
+    println("  shu --explain <PID>      AI explain: redacted context preview (live answer: 0.7.3)");
+    println("  shu --watch              Anomaly stream (0.7.4)");
     println("");
     println("Options:");
     println("  -p                        Plain snapshot mode (single frame to stdout)");
@@ -46,15 +48,15 @@ fn print_help() {
     println("  --rate <HZ>               TUI refresh rate (integer 1-10, default 1; fractional Hz later)");
     println("  --color <when>            auto | always | never (default auto; TUI only)");
     println("  --pid <PID>               Focus a single process (validates PID exists at startup)");
-    println("  --explain <PID>           Print AI explanation and exit [M3+]");
-    println("  --watch                   Anomaly stream mode [M3+]");
-    println("  --with-logs               Allow AI prompts to include sakshi log context [M3+]");
+    println("  --explain <PID>           Print the redacted AI context for PID and exit (live daimon answer: 0.7.3)");
+    println("  --watch                   Anomaly stream mode (0.7.4)");
+    println("  --with-logs               Allow AI prompts to include sakshi log context (0.7.4)");
     println("  -h, --help                Show this help");
     println("  -V, --version             Show version");
     println("");
-    println("Status: M2 complete (full interactive TUI). M3 brings");
-    println("AI integration (--explain, --watch, --with-logs).");
-    println("See docs/development/roadmap.md.");
+    println("Status: M2 complete (full interactive TUI). M3 AI integration");
+    println("underway — --explain assembles a privacy-redacted context now;");
+    println("live daimon transport lands at 0.7.3. See docs/development/roadmap.md.");
     return EXIT_OK;
 }
 
@@ -242,9 +244,25 @@ fn main() {
             continue;
         }
 
+        # --explain <PID> — AI explain one-shot. Terminal mode (assemble
+        # the redacted context, print it, report transport status, exit).
+        # M3 foundation at v0.7.2: context preview only; the live daimon
+        # call + streamed answer land at v0.7.3.
+        if (streq(a, "--explain") == 1) {
+            if (i + 1 >= n) {
+                eprintln("chakshu: --explain requires <PID> (positive integer)");
+                return EXIT_USAGE;
+            }
+            var ev = atoi(argv(i + 1));
+            if (ev < 1) {
+                eprintln("chakshu: --explain: PID must be >= 1");
+                return EXIT_USAGE;
+            }
+            return ai_explain(ev);
+        }
+
         # Recognized flags that are not yet implemented — emit a
         # clear placeholder rather than a generic "unknown flag".
-        if (streq(a, "--explain") == 1)   { return print_unimplemented("--explain"); }
         if (streq(a, "--watch") == 1)     { return print_unimplemented("--watch"); }
         if (streq(a, "--with-logs") == 1) { return print_unimplemented("--with-logs"); }
 

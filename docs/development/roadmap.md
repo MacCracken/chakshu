@@ -21,21 +21,31 @@
 
 ---
 
-## M3 — AI integration (v0.8.0) — next substantive milestone
+## M3 — AI integration — substantive milestone, in progress
 
-The substantive case for first-party. `chakshu` becomes the panel where the AGNOS LLM stack meets the live system view.
+The substantive case for first-party. `chakshu` becomes the panel where the AGNOS LLM stack meets the live system view. Landing across 0.7.2–0.7.4 (the foundation shipped at 0.7.2 rather than waiting for one big v0.8.0 cut).
+
+**Foundation — shipped v0.7.2** (`src/ai.cyr`):
+
+- [x] Prompt assembly per design-spec §6.2 (with privacy redaction)
+- [x] niyama-driven secret-pattern redaction in cmdline args (re2; `src/ai.cyr`)
+- [x] `--explain <pid>` — non-interactive one-shot (prints the **redacted context** that will be sent; live answer at 0.7.3)
+- [x] `?` key — captures the selected process; transient hint now, streamed overlay at 0.7.3
+
+**Live transport — v0.7.3:**
 
 - [ ] daimon JSON-RPC client (sandhi)
 - [ ] hoosh streaming response renderer (modal overlay in the TUI)
-- [ ] Prompt assembly per design-spec §6.2 (with privacy redaction)
-- [ ] `?` key — "explain selected process"
-- [ ] `--explain <pid>` — non-interactive one-shot
-- [ ] `--watch` — anomaly stream (subscribe to aegis/phylax events)
-- [ ] `--with-logs` opt-in for sakshi log context in prompts
-- [ ] niyama-driven secret-pattern redaction in cmdline args
 - [ ] Smoke gate: `--explain <self-pid>` returns something model-shaped
 
+**Logs + anomaly stream — v0.7.4:**
+
+- [ ] `--watch` — anomaly stream (subscribe to aegis/phylax events)
+- [ ] `--with-logs` opt-in for sakshi log context in prompts
+
 **Gate to M4**: a user can ask "why is this process spiking" and get a coherent answer that quotes real /proc data.
+
+> **Size watch (carried to M4):** wiring niyama for redaction pushed the binary to ~1.38 MB — over M4's relaxed `< 1 MB` budget. The bulk is the `unicode` tables niyama's re2 hard-references + niyama's unused engines. Decide at M4: real `--strip-dead`, or revert to a chakshu-local redactor.
 
 ---
 
@@ -46,7 +56,7 @@ The substantive case for first-party. `chakshu` becomes the panel where the AGNO
 - [ ] CPU: `< 0.5%` at 1 Hz on a 4-core box
 - [ ] Cold start `< 5ms`
 - [ ] Manual TTY checks documented in `tests/`
-- [ ] Binary size budget — **target `< 1 MB` for now** (interim relaxation; design-spec §8's `< 256 KB` stays the long-term aspiration). Currently ~861 KB. Bulk is ai-hwaccel's DCE-NOPed backend stack + the `bayan` module's `.bss`; revisit via codegen `--strip-dead` or the `alloc()` restructure the build hint flags.
+- [ ] Binary size budget — **target `< 1 MB` for now** (interim relaxation; design-spec §8's `< 256 KB` stays the long-term aspiration). **Currently ~1.38 MB — over budget** as of 0.7.2: niyama's re2 pulls the `unicode` tables (~350 KB) + its unused engines (~248 KB), on top of ai-hwaccel's DCE-NOPed backend stack. Decide here: pursue real codegen `--strip-dead` of the unused niyama engines + unicode data, or revert redaction to a chakshu-local matcher (drops the niyama dep entirely).
 - [ ] Deepen GPU telemetry — basic GPU panel shipped at M2.5; richer per-device stats means **updating the `ai-hwaccel` dep** (currently held at 2.2.6 to match mihi's own pin, so this may need a coordinated mihi bump).
 - [ ] Theme support (dark / light, configurable)
 

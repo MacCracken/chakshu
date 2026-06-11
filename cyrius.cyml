@@ -5,7 +5,7 @@ description = "The eye — AI-augmented system monitor for AGNOS / Cyrius"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/chakshu"
 language = "cyrius"
-cyrius = "6.1.27"
+cyrius = "6.1.28"
 
 [build]
 entry = "src/main.cyr"
@@ -36,6 +36,9 @@ output = "shu"
 #                           bayan_csv_* / bayan_cyml_* families). The bundle
 #                           calls bayan_json_get; requesting the old `json`
 #                           name fails to resolve under 6.1.27.
+#   unicode               — pulled in at M3 foundation (v0.7.2) by niyama's
+#                           dist bundle (re2/pcre engines reference
+#                           unicode_category / unicode_props / NFD tables).
 #   bench                 — referenced by mihi's bench harness
 # Pulled in later cycles (kept off the critical path until needed):
 #   net     — /proc/net parsing once chakshu wants per-interface detail
@@ -65,6 +68,7 @@ stdlib = [
     "ct",
     "bayan",
     "bench",
+    "unicode",
 ]
 
 # darshana — Linux TTY/raw-mode primitives (termios, ANSI, cursor).
@@ -118,3 +122,17 @@ modules = ["dist/mihi.cyr"]
 git = "https://github.com/MacCracken/ai-hwaccel.git"
 tag = "2.2.6"
 modules = ["dist/ai-hwaccel.cyr"]
+
+# niyama — regex engines (bre/re2/pcre/fuzzy/vim). Pulled in at the M3
+# foundation (v0.7.2) for design-spec §6.2's "niyama-driven secret-pattern
+# redaction" of /proc/[pid]/cmdline before it enters an AI prompt. chakshu
+# uses only the re2 surface (niyama_re2_compile / _search / _group_*) via
+# src/ai.cyr; the other engines DCE-NOP. Pinned at 1.0.4 — the first niyama
+# tag built against Cyrius 6.1.27 (earlier tags pinned 6.0.1 and risked the
+# unicode-stdlib cross-version drift that bit the json→bayan rename). niyama
+# itself has no git deps; its bundle needs the `unicode` stdlib module
+# (added above).
+[deps.niyama]
+git = "https://github.com/MacCracken/niyama.git"
+tag = "1.0.4"
+modules = ["dist/niyama.cyr"]

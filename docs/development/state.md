@@ -1,6 +1,6 @@
 # chakshu — State
 
-> **Status**: Active | **Last Updated**: 2026-06-10 (v0.7.1 cut — toolchain + mihi v1.0 dep refresh; manifest pin realigned to the host wrapper at 6.1.27, mihi pin advanced to its v1.0 ship)
+> **Status**: Active | **Last Updated**: 2026-06-10 (v0.7.2 cut — **M3 foundation**: `--explain` redacted-context preview + niyama-driven secret redaction; toolchain → 6.1.28, niyama 1.0.4 + `unicode` wired)
 >
 > Volatile state — version, toolchain pin, milestone progress, binary size.
 > Refreshed every release. Durable rules live in
@@ -13,39 +13,45 @@
 
 | Field | Value |
 |-------|-------|
-| Version | **0.7.1** — toolchain + dep refresh on the open AGNOS cycle. mihi pin advanced `0.8.0` → `1.0.0` (mihi's v1.0 ship — unblocked once chakshu, its gating consumer, integrated at 0.6.0); identity surface read through `lib/mihi.cyr` is unchanged. No behavior change at the chakshu surface. |
-| Cyrius toolchain pin | `6.1.27` (cyrius.cyml `[package].cyrius`) — realigned to the host wrapper, which had drifted ahead of the stale `6.0.1` manifest pin. One manifest change required by the rev: the stdlib JSON module was renamed `json` → `bayan` in the 6.1.x line (6.0.x `lib/json.cyr` → 6.1.27 `lib/bayan.cyr`), so `[deps].stdlib` now lists `bayan`. See CHANGELOG `[0.7.1]` Fixed. |
-| Genesis cycle | v6.1.x — toolchain rev adopted; manifest pin now matches wrapper |
-| Active milestone | **AGNOS build target** (cycle-opened at v0.7.0 — `shu` on AGNOS via mihi `uname`/`sysinfo` + the `klog` syscall kernel-log view; filtering delegated to agnsh `grep`) → then **M3 — AI integration** (daimon/hoosh; not started) |
-| Next milestone | **M4 — Polish + perf** (binary size pressure is the priority — see Carry-Forward) |
+| Version | **0.7.2** — **M3 foundation.** `--explain <PID>` and the TUI `?` key are wired; both assemble a **privacy-redacted context** (process facts the user can already see + niyama-driven secret-value redaction of the cmdline) and print/point at it. The live daimon JSON-RPC call + streamed answer land at 0.7.3; `--watch` / `--with-logs` at 0.7.4. New module `src/ai.cyr`. |
+| Cyrius toolchain pin | `6.1.28` (cyrius.cyml `[package].cyrius`) — bumped from 6.1.27 because 6.1.28's dep resolver handles **directory-style stdlib modules** (`lib/unicode/*.cyr`); 6.1.27 errored `cannot read ./lib/unicode.cyr` when pulling `unicode` for niyama. No source change from the rev itself. (`json`→`bayan` rename from 6.1.x still applies.) |
+| Genesis cycle | v6.1.x — toolchain rev adopted; manifest pin matches wrapper (6.1.28) |
+| Active milestone | **M3 — AI integration** (foundation landed v0.7.2: redaction + prompt assembly + `--explain`/`?` plumbing). Remaining: live daimon/hoosh transport + streamed overlay (0.7.3); `--watch` anomaly stream + `--with-logs` sakshi context (0.7.4). |
+| Next milestone | **M4 — Polish + perf** (binary size pressure is now acute — see Binary size + Carry-Forward) |
 | Binary | `shu` (build/shu) — System Health Utility, per ADR 0001 |
-| Binary size | 882 120 bytes (~861 KB) — text 665 285 + bss 216 360 + data 0 (clean build against 6.1.27's `bayan.cyr`). DCE and non-DCE are byte-identical: DCE NOPs unreachable code but keeps `.bss`. Grew ~+80 KB over 0.6.0 — the `json` → `bayan` stdlib module is fuller (json + csv + cyml families) than the old `json.cyr`, on top of the AGNOS klog view + mihi 1.0.0 bytes. Design-spec §8 `<256 KB` target is now ~3.4× over — **deferred to M4** (actuals diverge from spec by design here; the gap is the known DCE/`.bss`-stripping limitation — pressure Cyrius codegen for `--strip-dead`, or pursue the `alloc()`-restructure the build hint flags for the 216 KB `.bss`). |
-| Lines of Cyrius | src/{main,proc,processes,snapshot,tui}.cyr — 2 503 LoC (main 274 / proc 475 / processes 292 / snapshot 268 / tui 1 194). Growth since 0.6.0 from the AGNOS surface (klog kernel-log view) on top of the M2 TUI. Does **not** include lib/{darshana,mihi,ai-hwaccel}.cyr (resolved via cyrius deps). |
-| Test count | 57 assertions across 13 groups (TUI render path needs PTY-based testing — lands at Slice G) |
+| Binary size | **1 447 150 bytes (~1.38 MB)** — text 1 182 614 + bss 264 536 + data 0. **Over the relaxed `< 1 MB` M4 budget.** The +~565 KB jump from 0.7.1 (861 KB) is niyama's bundle (~248 KB, 5 regex engines — chakshu uses only re2) plus the `unicode` data tables (~350 KB) its re2 engine hard-references (`unicode_category` / `unicode_to_lower` / `NFD`/`NFC`). DCE NOPs the unused engines but keeps their bytes. **M4 decision pending**: pursue real `--strip-dead` of the unused niyama engines + unicode tables, or revert redaction to a chakshu-local matcher (no niyama dep). Design-spec §8 `<256 KB` is now ~5.5× over. |
+| Lines of Cyrius | src/{main,proc,processes,snapshot,tui,ai}.cyr — 2 884 LoC (ai.cyr +331 for the M3 foundation). Does **not** include lib/{darshana,mihi,ai-hwaccel,niyama}.cyr (resolved via cyrius deps). |
+| Test count | 65 assertions across 15 groups (+8 at 0.7.2: exact-output redaction cases + prompt-assembly shape). TUI render path still needs PTY-based testing. |
 | `shu -p` wall time | ~113 ms (100 ms sample window + ~13 ms work). Roadmap gate `< 30 ms` work-budget met with margin. |
 
 ## Dependency Envelope
 
-Pinned in `cyrius.cyml [deps].stdlib` (22 modules — the parser needs the
+Pinned in `cyrius.cyml [deps].stdlib` (23 modules — the parser needs the
 full chain present for the concatenated dist bundles; DCE drops what the
 linked binary doesn't reach):
 
 ```
 syscalls alloc fmt io fs str string slice vec
 args chrono hashmap process tagged assert
-agnosys fnptr thread freelist ct json bench
+agnosys fnptr thread freelist ct bayan bench
+unicode
 ```
+
+`unicode` (added v0.7.2) is a **directory-style** stdlib module
+(`lib/unicode/*.cyr`) — required by niyama's re2/fuzzy engines and only
+resolvable by the 6.1.28+ dep resolver.
 
 **Git deps (pulled, in `lib/` via `cyrius deps`)**:
 
 - **darshana** `0.7.0` — Linux TTY/raw-mode primitives (termios, ANSI, cursor). Powers the M2 TUI; chakshu has zero termios/ANSI code of its own. Already ecosystem-current at the 0.7.1 cut.
 - **mihi** `1.0.0` — system-info probe library. Identity reads in chakshu's `-p` and TUI paths go through `lib/mihi.cyr` (hostname/kernel/distro/cpu_model/cpu_count/mem_total/mem_free/uptime/gpu_*). Per-frame deltas stay chakshu-local. Advanced `0.8.0` → `1.0.0` at v0.7.1 (mihi's v1.0 ship; same bundled surface).
 - **ai-hwaccel** `2.2.6` (transitive via mihi) — accelerator-detection backends called via mihi's no-exec API for the GPU panel. **Pin tracks mihi's own `[deps.ai-hwaccel]` tag, not ai-hwaccel's latest** (2.3.x exists; mihi 1.0.0 still pins 2.2.6) — keeps the concatenated bundle ABI-consistent.
+- **niyama** `1.0.4` (added v0.7.2) — regex engines. chakshu uses only the **re2** surface (`niyama_re2_compile`/`_search`/`_group_*`) in `src/ai.cyr` for §6.2 secret redaction; the bre/pcre/fuzzy/vim engines DCE-NOP. First niyama tag built on 6.1.27+; pulls the `unicode` stdlib module. **Carries the bulk of the 0.7.2 size jump** — see Binary size.
 
 **Not yet pulled**:
 
 - `net` (M2, stdlib) — `/proc/net` parsing for the network panel.
-- `sandhi` (M3) — daimon/hoosh JSON-RPC transport.
+- `sandhi` (M3, 0.7.3) — daimon/hoosh JSON-RPC transport for the live `--explain` call.
 - `niyama` (M3) — redaction patterns for AI-prompt assembly.
 
 ## Milestone Status
