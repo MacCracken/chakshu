@@ -1,0 +1,58 @@
+[package]
+name = "chakshu-ai"
+version = "${file:../VERSION}"
+description = "shu-ai — the AI-augmented build of chakshu (monitor + hoosh explain panel)"
+license = "GPL-3.0-only"
+repository = "https://github.com/MacCracken/chakshu"
+language = "cyrius"
+cyrius = "6.1.29"
+
+# The `shu-ai` build: lean chakshu core (../src/*) PLUS src/ai.cyr and its
+# transport chain. Shares the monitor source with the root build; the only
+# differences are this manifest's extra deps and ai/main.cyr swapping
+# src/ai_stub.cyr → ../src/ai.cyr. See docs/development/state.md for the
+# lean-vs-AI split rationale (binary size: ~0.86 MB vs ~2.57 MB).
+[build]
+entry = "main.cyr"
+output = "shu-ai"
+test = "tests/chakshu-ai.tcyr"
+
+[deps]
+# Monitor stdlib (matches ../cyrius.cyml) + the AI chain. sandhi is consumed
+# as a STDLIB module (folded into the toolchain as lib/sandhi.cyr) so its
+# bare socket/tls constants resolve alongside net.cyr/tls.cyr — the git-dep
+# dist could not (built for an older toolchain). The async/atomic/net/http/
+# tls/ws/sigil/sakshi/keccak/thread_local/mmap/dynlib/fdlopen/regression
+# entries are sandhi's transitive references; unicode is niyama's. DCE drops
+# what's unreached; json/base64/bigint are folded into `bayan`.
+stdlib = [
+    "syscalls", "alloc", "fmt", "io", "fs", "str", "string", "slice", "vec",
+    "args", "chrono", "hashmap", "process", "tagged", "assert", "agnosys",
+    "fnptr", "thread", "freelist", "ct", "bayan", "bench",
+    "unicode",
+    "async", "atomic", "regression", "mmap", "dynlib", "fdlopen",
+    "net", "http", "tls", "ws", "sakshi", "sigil", "keccak", "thread_local",
+    "sandhi",
+]
+
+[deps.darshana]
+git = "https://github.com/MacCracken/darshana.git"
+tag = "0.7.0"
+modules = ["dist/darshana.cyr"]
+
+[deps.mihi]
+git = "https://github.com/MacCracken/mihi.git"
+tag = "1.0.0"
+modules = ["dist/mihi.cyr"]
+
+[deps.ai-hwaccel]
+git = "https://github.com/MacCracken/ai-hwaccel.git"
+tag = "2.2.6"
+modules = ["dist/ai-hwaccel.cyr"]
+
+# niyama — re2 redaction engine (AI-only; design-spec §6.2). Git dep here,
+# not stdlib. Pinned 1.0.4 (first niyama tag built for 6.1.27+).
+[deps.niyama]
+git = "https://github.com/MacCracken/niyama.git"
+tag = "1.0.4"
+modules = ["dist/niyama.cyr"]

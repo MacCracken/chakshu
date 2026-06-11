@@ -1,0 +1,24 @@
+# chakshu — `shu-ai` entry point (AI-augmented build).
+#
+# Identical to the lean ../src/main.cyr except it links the real AI module
+# (../src/ai.cyr, not ai_stub) plus niyama (git dep) and sandhi (stdlib).
+# The monitor source is shared verbatim with the root build via ../src/*.
+# Built from this directory: `cyrius build main.cyr build/shu-ai`.
+#
+# Include order note: top-level symbols resolve globally (cyrius hoists
+# decls), so cross-module references (e.g. cli.cyr → ai_explain in ai.cyr)
+# resolve regardless of order. sandhi is auto-included (stdlib); niyama,
+# darshana, mihi, ai-hwaccel come from this sub-project's own lib/.
+include "lib/darshana.cyr"
+include "lib/ai-hwaccel.cyr"
+include "lib/mihi.cyr"
+include "lib/niyama.cyr"
+include "../src/proc.cyr"
+include "../src/processes.cyr"
+include "../src/ai.cyr"
+include "../src/snapshot.cyr"
+include "../src/tui.cyr"
+include "../src/cli.cyr"
+
+var r = chakshu_main();
+syscall(SYS_EXIT, r);

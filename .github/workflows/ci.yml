@@ -98,6 +98,23 @@ jobs:
         # returns non-zero rows/cols (pty.fork() default is 0x0).
         run: python3 tests/integration_smoke.py build/shu
 
+      - name: Build + test shu-ai (AI variant)
+        # The AI build lives in ai/ as a sub-project: it shares the
+        # monitor source via ../src/* (CYRIUS_ALLOW_PARENT_INCLUDES=1
+        # permits the parent-dir includes cyrius blocks by default) and
+        # adds src/ai.cyr + the sandhi/niyama dep chain. Builds `shu-ai`
+        # and runs the AI test suite (redaction / prompt / JSON marshalling).
+        # The live hoosh POST is verified manually (needs a gateway).
+        env:
+          CYRIUS_ALLOW_PARENT_INCLUDES: "1"
+        run: |
+          cd ai
+          cyrius deps
+          mkdir -p build
+          cyrius build main.cyr build/shu-ai
+          xxd -l 4 build/shu-ai | grep -q "7f45 4c46"
+          cyrius test tests/chakshu-ai.tcyr
+
       - name: DCE parity check
         # Release builds set CYRIUS_DCE=1 to dead-code-eliminate
         # unused stdlib functions. The DCE'd binary must produce the
@@ -198,9 +215,9 @@ jobs:
         # Single source of truth is the VERSION file. Three derived
         # surfaces must agree: the CHANGELOG section header, the
         # cyrius.cyml indirection, and CHAKSHU_VERSION baked into the
-        # binary by src/main.cyr. CI fails closed on drift — version
-        # bump is a deliberate per-milestone act per CLAUDE.md, not
-        # something to fix up after the fact.
+        # binary by src/cli.cyr (shared by both shu and shu-ai). CI
+        # fails closed on drift — version bump is a deliberate
+        # per-milestone act per CLAUDE.md, not a fix-up after the fact.
         run: |
           VERSION=$(cat VERSION | tr -d '[:space:]')
           echo "VERSION file: $VERSION"
@@ -208,6 +225,6 @@ jobs:
             || { echo "FAIL: CHANGELOG.md missing section [${VERSION}]"; exit 1; }
           grep -qE '^version *= *"\$\{file:VERSION\}"' cyrius.cyml \
             || { echo "FAIL: cyrius.cyml version no longer pulls from VERSION"; exit 1; }
-          grep -qE "CHAKSHU_VERSION *= *\"chakshu ${VERSION}\"" src/main.cyr \
-            || { echo "FAIL: CHAKSHU_VERSION in src/main.cyr != $VERSION"; exit 1; }
+          grep -qE "CHAKSHU_VERSION *= *\"chakshu ${VERSION}\"" src/cli.cyr \
+            || { echo "FAIL: CHAKSHU_VERSION in src/cli.cyr != $VERSION"; exit 1; }
           echo "Version consistent: VERSION = CHANGELOG = cyrius.cyml = CHAKSHU_VERSION = $VERSION"

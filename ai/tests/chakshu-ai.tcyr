@@ -1,0 +1,85 @@
+# shu-ai test suite — the AI module (src/ai.cyr). Covers the pure,
+# verifiable parts: niyama-driven secret redaction (privacy-critical),
+# prompt assembly, and the hoosh JSON request/response marshalling. The
+# live POST itself needs a running hoosh gateway and is verified manually.
+# Run from ai/: `cyrius test tests/chakshu-ai.tcyr`.
+#
+# Needs the AI dep chain: niyama (re2) + mihi (→ ai-hwaccel) for the
+# _ai_system_summary link; sandhi is auto-included (stdlib).
+include "lib/ai-hwaccel.cyr"
+include "lib/mihi.cyr"
+include "lib/niyama.cyr"
+include "../src/proc.cyr"
+include "../src/processes.cyr"
+include "../src/ai.cyr"
+
+# ai.cyr's ai_explain returns these app-wide exit codes (defined in
+# cli.cyr, not included here); ai_explain itself isn't asserted, only the
+# pure helpers, so provide the constants for a clean link.
+var EXIT_OK  = 0;
+var EXIT_ERR = 1;
+
+fn main() {
+    alloc_init();
+
+    # ----- M3 foundation (v0.7.2) — redaction + assembly --------------
+    # Secret redaction is privacy-critical (design-spec §6.2): a value
+    # that should be stripped must never reach the prompt. Exact-output
+    # assertions so a regression is unambiguous.
+    test_group("ai.cyr — secret redaction (niyama re2)");
+    var rbuf[256];
+
+    var c1 = "--password=hunter2 --port=8080";
+    ai_redact_cmdline(c1, strlen(c1), &rbuf, 256);
+    assert_eq(streq(&rbuf, "--password=*** --port=8080"), 1, "redacts --password value, keeps --port");
+
+    var c2 = "API_KEY=abc123 --verbose";
+    ai_redact_cmdline(c2, strlen(c2), &rbuf, 256);
+    assert_eq(streq(&rbuf, "API_KEY=*** --verbose"), 1, "redacts API_KEY value (KEY anywhere in key)");
+
+    var c3 = "--token=xyz";
+    ai_redact_cmdline(c3, strlen(c3), &rbuf, 256);
+    assert_eq(streq(&rbuf, "--token=***"), 1, "redacts a lone --token value");
+
+    var c4 = "nginx -g daemon off;";
+    ai_redact_cmdline(c4, strlen(c4), &rbuf, 256);
+    assert_eq(streq(&rbuf, "nginx -g daemon off;"), 1, "tokens without '=' pass through unchanged");
+
+    var c5 = "--secret=s --user=bob --passwd=p";
+    ai_redact_cmdline(c5, strlen(c5), &rbuf, 256);
+    assert_eq(streq(&rbuf, "--secret=*** --user=bob --passwd=***"), 1, "redacts secret/passwd, keeps --user");
+
+    var c6 = "--port=8080 --host=localhost";
+    ai_redact_cmdline(c6, strlen(c6), &rbuf, 256);
+    assert_eq(streq(&rbuf, "--port=8080 --host=localhost"), 1, "benign key=value tokens untouched");
+
+    test_group("ai.cyr — prompt assembly");
+    var pbuf[2048];
+    var pl = ai_build_prompt(&pbuf, 2048, 1234, "nginx", 83, 1, 33, 4096, "--token=***", "load 0.1 0.2 0.3  mem 100/200 MiB");
+    assert(pl > 0, "prompt has nonzero length");
+    assert_eq(memeq(&pbuf, "Explain this Linux process", 26), 1, "prompt opens with the framing line");
+
+    # ----- M3 live transport (v0.7.3) — JSON marshalling -------------
+    test_group("ai.cyr — JSON escape (request marshalling)");
+    var jb[256];
+    var j1 = "a\"b\\c";                       # a " b \ c
+    _ai_json_escape(j1, strlen(j1), &jb, 256);
+    assert_eq(streq(&jb, "a\\\"b\\\\c"), 1, "escapes quote and backslash");
+    var j2 = "x\ny";                          # x <newline> y
+    _ai_json_escape(j2, strlen(j2), &jb, 256);
+    assert_eq(streq(&jb, "x\\ny"), 1, "escapes newline to backslash-n");
+
+    test_group("ai.cyr — content extraction (response parsing)");
+    var cb[256];
+    var resp_ok = "{\"choices\":[{\"message\":{\"content\":\"Hello\\nworld\"}}]}";
+    var ce = _ai_extract_content(resp_ok, strlen(resp_ok), &cb, 256);
+    assert(ce > 0, "content field found");
+    assert_eq(streq(&cb, "Hello\nworld"), 1, "unescapes \\n inside content");
+    var resp_err = "{\"error\":{\"message\":\"bad model\"}}";
+    assert_eq(_ai_extract_content(resp_err, strlen(resp_err), &cb, 256), 0 - 1, "no content field returns -1");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(60, exit_code);

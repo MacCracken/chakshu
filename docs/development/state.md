@@ -14,14 +14,14 @@
 | Field | Value |
 |-------|-------|
 | Version | **0.7.2** — **M3 foundation.** `--explain <PID>` and the TUI `?` key are wired; both assemble a **privacy-redacted context** (process facts the user can already see + niyama-driven secret-value redaction of the cmdline) and print/point at it. The live daimon JSON-RPC call + streamed answer land at 0.7.3; `--watch` / `--with-logs` at 0.7.4. New module `src/ai.cyr`. |
-| Cyrius toolchain pin | `6.1.28` (cyrius.cyml `[package].cyrius`) — bumped from 6.1.27 because 6.1.28's dep resolver handles **directory-style stdlib modules** (`lib/unicode/*.cyr`); 6.1.27 errored `cannot read ./lib/unicode.cyr` when pulling `unicode` for niyama. No source change from the rev itself. (`json`→`bayan` rename from 6.1.x still applies.) |
-| Genesis cycle | v6.1.x — toolchain rev adopted; manifest pin matches wrapper (6.1.28) |
-| Active milestone | **M3 — AI integration** (foundation landed v0.7.2: redaction + prompt assembly + `--explain`/`?` plumbing). Remaining: live daimon/hoosh transport + streamed overlay (0.7.3); `--watch` anomaly stream + `--with-logs` sakshi context (0.7.4). |
-| Next milestone | **M4 — Polish + perf** (binary size pressure is now acute — see Binary size + Carry-Forward) |
-| Binary | `shu` (build/shu) — System Health Utility, per ADR 0001 |
-| Binary size | **1 447 150 bytes (~1.38 MB)** — text 1 182 614 + bss 264 536 + data 0. **Over the relaxed `< 1 MB` M4 budget.** The +~565 KB jump from 0.7.1 (861 KB) is niyama's bundle (~248 KB, 5 regex engines — chakshu uses only re2) plus the `unicode` data tables (~350 KB) its re2 engine hard-references (`unicode_category` / `unicode_to_lower` / `NFD`/`NFC`). DCE NOPs the unused engines but keeps their bytes. **M4 decision pending**: pursue real `--strip-dead` of the unused niyama engines + unicode tables, or revert redaction to a chakshu-local matcher (no niyama dep). Design-spec §8 `<256 KB` is now ~5.5× over. |
-| Lines of Cyrius | src/{main,proc,processes,snapshot,tui,ai}.cyr — 2 884 LoC (ai.cyr +331 for the M3 foundation). Does **not** include lib/{darshana,mihi,ai-hwaccel,niyama}.cyr (resolved via cyrius deps). |
-| Test count | 65 assertions across 15 groups (+8 at 0.7.2: exact-output redaction cases + prompt-assembly shape). TUI render path still needs PTY-based testing. |
+| Cyrius toolchain pin | `6.1.29` (both manifests) — bumped 6.1.27→28 for directory-style stdlib (`lib/unicode/*.cyr`; 6.1.27 errored `cannot read ./lib/unicode.cyr`), then 28→29 (current wrapper). (`json`→`bayan` rename from 6.1.x still applies; `json`/`base64`/`bigint` all folded into `bayan`.) |
+| Genesis cycle | v6.1.x — toolchain rev adopted; both manifests pin 6.1.29 |
+| Active milestone | **M3 — AI integration** (in progress, 0.7.3). Foundation (0.7.2): redaction + prompt assembly + `--explain`/`?`. Live transport (0.7.3, **WIP, uncommitted**): `--explain` POSTs to hoosh via sandhi + the **lean/AI binary split** (below). Remaining: TUI streaming overlay; live-hoosh verification; `--watch` + `--with-logs` (0.7.4). |
+| Next milestone | **M4 — Polish + perf** |
+| Binary | **Two builds** (0.7.3 split): lean **`shu`** (build/shu, monitor only) and **`shu-ai`** (ai/build/shu-ai, +AI). System Health Utility, per ADR 0001. |
+| Binary size | **Lean `shu`: ~0.84 MB** (883 057 B — text 666 641 + bss 216 416), no AI deps — under btop's 1.7 MB install, beats htop once its ncurses/libc are counted. **`shu-ai`: ~2.57 MB** (sandhi's tls/sigil/sakshi/keccak chain + niyama/unicode). The split exists *because* the toolchain force-links listed stdlib (DCE NOPs but keeps bytes), so AI deps in the manifest = unavoidable bloat — kept out of the lean manifest, present only in `ai/cyrius.cyml`. Design-spec §8 `<256 KB` applies to the lean monitor (still ~3.3× over → M4: DCE/`--strip-dead`); `shu-ai` is explicitly the heavy opt-in. |
+| Lines of Cyrius | Shared core src/{proc,processes,snapshot,tui,cli}.cyr + entries (main.cyr lean / ai/main.cyr) + ai.cyr (AI, ~370 LoC w/ live transport) / ai_stub.cyr (lean). Deps via cyrius deps (per-build lib/). |
+| Test count | **Two suites**: monitor `tests/chakshu.tcyr` (57) + AI `ai/tests/chakshu-ai.tcyr` (13 — redaction / prompt / JSON marshalling). TUI render path still needs PTY-based testing. |
 | `shu -p` wall time | ~113 ms (100 ms sample window + ~13 ms work). Roadmap gate `< 30 ms` work-budget met with margin. |
 
 ## Dependency Envelope

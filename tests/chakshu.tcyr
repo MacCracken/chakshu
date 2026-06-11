@@ -1,27 +1,13 @@
 # chakshu test suite
 # Stdlib auto-included via cyrius.cyml
 
-# Pull in the modules under test. Including main.cyr would also pull
-# in main()/syscall(SYS_EXIT) at top-level, so we include the parser
-# modules directly. The render orchestration in snapshot.cyr/tui.cyr is
-# exercised by the integration smoke (build/shu -p) rather than asserted
-# here. ai.cyr's redaction needs niyama (re2); _ai_system_summary needs
-# mihi (→ ai-hwaccel) — pulled in so the test links clean even though
-# only the pure functions (ai_redact_cmdline / ai_build_prompt) are
-# asserted here.
-include "lib/ai-hwaccel.cyr"
-include "lib/mihi.cyr"
-include "lib/niyama.cyr"
+# Monitor (lean `shu`) test suite — /proc parsers. Including main.cyr
+# would also pull in chakshu_main()/syscall(SYS_EXIT) at top-level, so we
+# include the parser module directly. Render orchestration is exercised by
+# the integration smoke (build/shu -p). The AI module's tests (redaction /
+# prompt / JSON marshalling) live in ai/tests/chakshu-ai.tcyr — they need
+# the AI dep chain that only the shu-ai build carries.
 include "src/proc.cyr"
-include "src/processes.cyr"
-include "src/ai.cyr"
-
-# ai.cyr's orchestration path (ai_explain) returns these app-wide exit
-# codes, which live in main.cyr. The test build doesn't include main.cyr
-# (it would pull in a second main()), so provide them here. ai_explain
-# itself isn't asserted — only the pure ai_redact_cmdline / ai_build_prompt.
-var EXIT_OK  = 0;
-var EXIT_ERR = 1;
 
 fn main() {
     alloc_init();
@@ -174,43 +160,6 @@ fn main() {
     proc_netdev_agg(net_fix2, strlen(net_fix2), &nrx2, &ntx2);
     assert_eq(nrx2, 400, "two non-lo interfaces sum rx");
     assert_eq(ntx2, 600, "two non-lo interfaces sum tx");
-
-    # ----- M3 foundation (v0.7.2) — ai.cyr ----------------------------
-    # Secret redaction is privacy-critical (design-spec §6.2): a value
-    # that should be stripped must never reach the prompt. Assert exact
-    # output strings so a regression is unambiguous.
-    test_group("ai.cyr — secret redaction (niyama re2)");
-    var rbuf[256];
-
-    var c1 = "--password=hunter2 --port=8080";
-    ai_redact_cmdline(c1, strlen(c1), &rbuf, 256);
-    assert_eq(streq(&rbuf, "--password=*** --port=8080"), 1, "redacts --password value, keeps --port");
-
-    var c2 = "API_KEY=abc123 --verbose";
-    ai_redact_cmdline(c2, strlen(c2), &rbuf, 256);
-    assert_eq(streq(&rbuf, "API_KEY=*** --verbose"), 1, "redacts API_KEY value (KEY anywhere in key)");
-
-    var c3 = "--token=xyz";
-    ai_redact_cmdline(c3, strlen(c3), &rbuf, 256);
-    assert_eq(streq(&rbuf, "--token=***"), 1, "redacts a lone --token value");
-
-    var c4 = "nginx -g daemon off;";
-    ai_redact_cmdline(c4, strlen(c4), &rbuf, 256);
-    assert_eq(streq(&rbuf, "nginx -g daemon off;"), 1, "tokens without '=' pass through unchanged");
-
-    var c5 = "--secret=s --user=bob --passwd=p";
-    ai_redact_cmdline(c5, strlen(c5), &rbuf, 256);
-    assert_eq(streq(&rbuf, "--secret=*** --user=bob --passwd=***"), 1, "redacts secret/passwd, keeps --user");
-
-    var c6 = "--port=8080 --host=localhost";
-    ai_redact_cmdline(c6, strlen(c6), &rbuf, 256);
-    assert_eq(streq(&rbuf, "--port=8080 --host=localhost"), 1, "benign key=value tokens untouched");
-
-    test_group("ai.cyr — prompt assembly");
-    var pbuf[2048];
-    var pl = ai_build_prompt(&pbuf, 2048, 1234, "nginx", 83, 1, 33, 4096, "--token=***", "load 0.1 0.2 0.3  mem 100/200 MiB");
-    assert(pl > 0, "prompt has nonzero length");
-    assert_eq(memeq(&pbuf, "Explain this Linux process", 26), 1, "prompt opens with the framing line");
 
     return assert_summary();
 }

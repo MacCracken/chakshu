@@ -1,0 +1,16 @@
+# ai_stub.cyr — lean-build stand-in for src/ai.cyr.
+#
+# The default `shu` binary is the monitor only: it does NOT link the AI
+# transport (sandhi) or the redaction engine (niyama), which together add
+# ~1.7 MB. `--explain` (and the TUI `?` key) resolve to this stub, which
+# points the user at the `shu-ai` build. The real implementation lives in
+# src/ai.cyr and is linked only by ai/main.cyr → `shu-ai`.
+#
+# Keep this in signature-sync with the entry points cli.cyr / tui.cyr call:
+# only ai_explain(pid) is referenced from the shared CLI path today.
+
+fn ai_explain(pid) {
+    eprintln("chakshu: AI explain is not in this build.");
+    eprintln("chakshu: run the `shu-ai` build for --explain (hoosh-backed AI).");
+    return EXIT_ERR;
+}

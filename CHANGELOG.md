@@ -2,7 +2,37 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [Unreleased] — M3 live transport (0.7.3, in progress)
+
+### Added
+
+- **Live `--explain` via hoosh** (`src/ai.cyr`): builds an OpenAI chat
+  request, POSTs to the hoosh gateway (`POST /v1/chat/completions`,
+  default `:8088`, overridable via `$CHAKSHU_HOOSH_URL` / `$CHAKSHU_MODEL`)
+  using sandhi's HTTP client, extracts the answer, and prints it. Any
+  failure (unreachable / non-200 / no content) degrades to the redacted-
+  context preview. JSON escape + content extraction unit-tested. The live
+  POST needs a running hoosh to verify; design-spec §6.3's "Unix socket /
+  daimon.sock" framing was stale — the real path is hoosh's HTTP API.
+
+### Changed — **lean / AI binary split**
+
+- **`shu` is now monitor-only (~0.86 MB)** — no AI deps. The AI build
+  `shu-ai` (~2.57 MB) lives in `ai/` as a sub-project that shares the
+  monitor source (`../src/*`, via `CYRIUS_ALLOW_PARENT_INCLUDES=1`) and
+  adds `src/ai.cyr` + the sandhi/niyama dep chain. Rationale: AI deps are
+  force-linked by the toolchain (DCE NOPs but keeps bytes), so the only way
+  to keep the default monitor small is to keep those deps out of its
+  manifest. Lean `shu` is now smaller than btop's install and beats htop
+  once their shared libs (ncurses/libc/libstdc++) are counted.
+- **CLI extracted to `src/cli.cyr`** (shared `chakshu_main()`); `src/main.cyr`
+  (lean) includes `src/ai_stub.cyr`, `ai/main.cyr` includes `src/ai.cyr`.
+  `--explain` / `?` in the lean build point users at `shu-ai`.
+- **Tests split**: `tests/chakshu.tcyr` (monitor parsers, 57) +
+  `ai/tests/chakshu-ai.tcyr` (redaction / prompt / JSON, 13).
+- **CI** builds + tests both binaries; version check now reads
+  `CHAKSHU_VERSION` from `src/cli.cyr`.
+- **Toolchain pin** `6.1.28` → `6.1.29`.
 
 ## [0.7.2] — 2026-06-10 — M3 foundation: `--explain` context + niyama redaction
 

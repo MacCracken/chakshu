@@ -8,6 +8,10 @@
 # Tracked: cyrius.cyml [deps] + cyrius.lock if/when one is produced.
 /lib/
 
+# AI sub-project (shu-ai build) — its own regenerated deps + build output.
+/ai/lib/
+/ai/build/
+
 # Release / toolchain artifacts
 cyrius-*.tar.gz
 *.tar.gz

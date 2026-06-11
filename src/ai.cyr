@@ -213,28 +213,120 @@ fn _ai_system_summary(out, cap) {
     return pos;
 }
 
-# --- daimon transport (probe only at 0.7.2) ---------------------------
+# --- hoosh transport (HTTP — M3 live, v0.7.3) -------------------------
+# design-spec §6.3's "daimon over Unix socket" framing is stale: the AGNOS
+# LLM gateway `hoosh` is an OpenAI-compatible HTTP server (hoosh ADR-001) —
+# POST /v1/chat/completions, default :8088. chakshu reaches it through
+# sandhi's HTTP client (folded into stdlib). $CHAKSHU_HOOSH_URL and
+# $CHAKSHU_MODEL override the endpoint + model. (Env reads here are for
+# transport addressing, NOT prompt content — privacy rule intact.)
 
-# Resolve the daimon socket path into `out` and probe for its existence.
-# Path is $XDG_RUNTIME_DIR/daimon.sock (design-spec §6.3), falling back
-# to /run/user/<uid>/daimon.sock when the env var is unset. Returns 1 if
-# the socket path exists, 0 otherwise. (Reading XDG_RUNTIME_DIR here is
-# for transport addressing, NOT prompt content — privacy rule intact.)
-fn ai_daimon_socket(out, cap) {
+var AI_DEFAULT_HOOSH_URL = "http://127.0.0.1:8088/v1/chat/completions";
+var AI_DEFAULT_MODEL     = "default";
+
+# Copy $name into `out`, or `fallback` when unset. Returns length.
+fn _ai_env_or(out, cap, name, fallback) {
+    var v = getenv(name);
     var pos = 0;
-    var xrd = getenv("XDG_RUNTIME_DIR");
-    if (xrd != 0) {
-        pos = _ai_app(out, pos, cap, xrd);
-    } else {
-        pos = _ai_app(out, pos, cap, "/run/user/");
-        var uid = syscall(102, 0, 0, 0);   # getuid(2)
-        pos = _ai_app_n(out, pos, cap, uid);
-    }
-    pos = _ai_app(out, pos, cap, "/daimon.sock");
+    if (v != 0) { pos = _ai_app(out, pos, cap, v); }
+    else        { pos = _ai_app(out, pos, cap, fallback); }
     store8(out + pos, 0);
-    # access(path, F_OK=0) — syscall 21; 0 means the path exists.
-    if (syscall(21, out, 0, 0) == 0) { return 1; }
-    return 0;
+    return pos;
+}
+
+# Escape in_len bytes of `in_buf` as a JSON string value (no surrounding
+# quotes) into `out`: ", \, \n, \r, \t handled; other C0 controls dropped.
+# Returns output length. Pure — unit-tested.
+fn _ai_json_escape(in_buf, in_len, out, cap) {
+    var op = 0;
+    var i = 0;
+    while (i < in_len) {
+        var c = load8(in_buf + i);
+        if (c == 34)   { if (op < cap - 2) { store8(out + op, 92); op = op + 1; store8(out + op, 34);  op = op + 1; } }
+        elif (c == 92) { if (op < cap - 2) { store8(out + op, 92); op = op + 1; store8(out + op, 92);  op = op + 1; } }
+        elif (c == 10) { if (op < cap - 2) { store8(out + op, 92); op = op + 1; store8(out + op, 110); op = op + 1; } }
+        elif (c == 13) { if (op < cap - 2) { store8(out + op, 92); op = op + 1; store8(out + op, 114); op = op + 1; } }
+        elif (c == 9)  { if (op < cap - 2) { store8(out + op, 92); op = op + 1; store8(out + op, 116); op = op + 1; } }
+        elif (c >= 32) { if (op < cap - 1) { store8(out + op, c); op = op + 1; } }
+        i = i + 1;
+    }
+    store8(out + op, 0);
+    return op;
+}
+
+# Extract the first `"content":"..."` string value from an OpenAI-style
+# response `body` into `out`, unescaping \n \t \r \" \\ \/. Returns output
+# length, or -1 if no content field is present (e.g. an error body).
+# Best-effort; full JSON parsing is sandhi's job if a richer path is needed.
+# Pure — unit-tested.
+fn _ai_extract_content(body, body_len, out, cap) {
+    var needle = "\"content\":\"";
+    var nlen = strlen(needle);
+    var start = 0 - 1;
+    var i = 0;
+    while (i + nlen <= body_len) {
+        if (memeq(body + i, needle, nlen) == 1) { start = i + nlen; break; }
+        i = i + 1;
+    }
+    if (start < 0) { return 0 - 1; }
+    var op = 0;
+    var j = start;
+    while (j < body_len) {
+        var c = load8(body + j);
+        if (c == 34) { break; }                 # closing unescaped quote
+        if (c == 92) {                            # escape sequence
+            j = j + 1;
+            if (j >= body_len) { break; }
+            var e = load8(body + j);
+            if (e == 110)   { c = 10; }           # \n
+            elif (e == 116) { c = 9; }            # \t
+            elif (e == 114) { c = 13; }           # \r
+            elif (e == 34)  { c = 34; }           # \"
+            elif (e == 92)  { c = 92; }           # \\
+            elif (e == 47)  { c = 47; }           # \/
+            else            { c = e; }            # passthrough
+        }
+        if (op < cap - 1) { store8(out + op, c); op = op + 1; }
+        j = j + 1;
+    }
+    store8(out + op, 0);
+    return op;
+}
+
+# POST the prompt to hoosh as an OpenAI chat request; write the answer
+# into `out`. Returns:
+#   >=0 answer length | -1 transport error | -2 non-200 | -3 no content.
+# Happy-path needs a live hoosh to verify; the failure paths degrade
+# gracefully (caller falls back to the redacted-context preview).
+fn ai_hoosh_explain(prompt, plen, out, cap) {
+    var url[512];
+    _ai_env_or(&url, 512, "CHAKSHU_HOOSH_URL", AI_DEFAULT_HOOSH_URL);
+    var model[128];
+    _ai_env_or(&model, 128, "CHAKSHU_MODEL", AI_DEFAULT_MODEL);
+
+    var esc_prompt[4096];
+    _ai_json_escape(prompt, plen, &esc_prompt, 4096);
+    var esc_model[256];
+    _ai_json_escape(&model, strlen(&model), &esc_model, 256);
+
+    # {"model":"<m>","messages":[{"role":"user","content":"<prompt>"}]}
+    var body[6144];
+    var bp = 0;
+    bp = _ai_app(&body, bp, 6144, "{\"model\":\"");
+    bp = _ai_app(&body, bp, 6144, &esc_model);
+    bp = _ai_app(&body, bp, 6144, "\",\"messages\":[{\"role\":\"user\",\"content\":\"");
+    bp = _ai_app(&body, bp, 6144, &esc_prompt);
+    bp = _ai_app(&body, bp, 6144, "\"}]}");
+    store8(&body + bp, 0);
+
+    var h = sandhi_headers_new();
+    sandhi_headers_set_a(default_alloc(), h, "Content-Type", "application/json");
+    var resp = sandhi_http_post(&url, h, &body, bp);
+    if (resp == 0) { return 0 - 1; }
+    var st = sandhi_http_status(resp);
+    if (st == 0)   { return 0 - 1; }   # no HTTP status → transport failure
+    if (st != 200) { return 0 - 2; }
+    return _ai_extract_content(sandhi_http_body(resp), sandhi_http_body_len(resp), out, cap);
 }
 
 # --- `--explain <pid>` one-shot ---------------------------------------
@@ -311,21 +403,27 @@ fn ai_explain(pid) {
 
     var prompt[2048];
     var plen = ai_build_prompt(&prompt, 2048, pid, comm, state_ch, ppid_val, uid_val, rss_kb, &cmd_red, &sysinfo);
-    syscall(1, 1, &prompt, plen);
 
-    # Transport status — to stderr so the stdout context stays pipeable.
-    var sock[256];
-    var present = ai_daimon_socket(&sock, 256);
-    eprintln("");
-    eprint_cstr("chakshu: above is the redacted context for PID ");
-    eprint_cstr(&pid_str);
-    eprintln(" that --explain will send to daimon.");
-    if (present == 1) {
-        eprint_cstr("chakshu: daimon socket present (");
-    } else {
-        eprint_cstr("chakshu: daimon socket not found (");
+    # Send to hoosh; print its answer. On ANY failure, fall back to the
+    # redacted-context preview (the 0.7.2 behavior) so --explain always
+    # yields something useful and auditable, even with no gateway running.
+    var answer[16384];
+    var rc = ai_hoosh_explain(&prompt, plen, &answer, 16384);
+    if (rc >= 0) {
+        syscall(1, 1, &answer, rc);
+        syscall(1, 1, "\n", 1);
+        return EXIT_OK;
     }
-    eprint_cstr(&sock);
-    eprintln("); live transport + streamed answer land in v0.7.3.");
+
+    var url[512];
+    _ai_env_or(&url, 512, "CHAKSHU_HOOSH_URL", AI_DEFAULT_HOOSH_URL);
+    eprint_cstr("chakshu: hoosh ");
+    if (rc == 0 - 1)   { eprint_cstr("unreachable at "); }
+    elif (rc == 0 - 2) { eprint_cstr("returned a non-200 status — "); }
+    else               { eprint_cstr("response had no content field — "); }
+    eprint_cstr(&url);
+    eprintln("; showing the redacted context that would be sent:");
+    eprintln("");
+    syscall(1, 1, &prompt, plen);
     return EXIT_OK;
 }
