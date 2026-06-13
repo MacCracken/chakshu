@@ -5,7 +5,7 @@ description = "shu-ai — the AI-augmented build of chakshu (monitor + hoosh exp
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/chakshu"
 language = "cyrius"
-cyrius = "6.1.29"
+cyrius = "6.2.2"
 
 # The `shu-ai` build: lean chakshu core (../src/*) PLUS src/ai.cyr and its
 # transport chain. Shares the monitor source with the root build; the only
@@ -51,8 +51,8 @@ tag = "2.2.6"
 modules = ["dist/ai-hwaccel.cyr"]
 
 # niyama — re2 redaction engine (AI-only; design-spec §6.2). Git dep here,
-# not stdlib. Pinned 1.0.4 (first niyama tag built for 6.1.27+).
+# not stdlib. Pinned 1.0.5 (latest; 1.0.4 was the first 6.1.27+ tag).
 [deps.niyama]
 git = "https://github.com/MacCracken/niyama.git"
-tag = "1.0.4"
+tag = "1.0.5"
 modules = ["dist/niyama.cyr"]

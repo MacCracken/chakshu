@@ -1,6 +1,6 @@
 # chakshu — Roadmap
 
-> **Status**: M0–M2.5 closed; **M3 (AI integration) nearly done** — live `--explain` + streamed `?` overlay via hoosh shipped across v0.7.2–v0.7.4 (lean/AI binary split). **One cut left to close M3: v0.7.5 (`--watch` + `--with-logs`).** Then M4 (polish/perf) and M5 (v1.0 ship). | **Last Updated**: 2026-06-10
+> **Status**: M0–M2.5 closed; **M3 (AI integration) nearly done** — live `--explain` + streamed `?` overlay via hoosh shipped across v0.7.2–v0.7.4 (lean/AI binary split); v0.7.5 was an interim toolchain/dep refresh (Cyrius 6.2.2, niyama 1.0.5). **One cut left to close M3: v0.7.6 (`--watch` + `--with-logs`).** Then M4 (polish/perf) and M5 (v1.0 ship). | **Last Updated**: 2026-06-13
 >
 > The path from v0.1.0 (scaffold) to v1.0 (ships as the AGNOS default system monitor, replacing the third-party `htop`/`btop` Bazaar packages).
 
@@ -18,12 +18,13 @@
 - **v0.6.1 (2026-05-20)** — darshana 0.3.0 → 0.4.1 forward-compat refresh. No behavior change.
 - **v0.7.0 (2026-06-06) — AGNOS build-target cycle opened.** `shu` targets AGNOS: system stats via mihi `uname` / `sysinfo`. The **`klug` kernel-log view** (via the `klog` syscall) is **deferred until the AGNOS cycle picks up** — described at cut-time but not yet implemented in `src/`.
 - **v0.7.1 (2026-06-10)** — Cyrius 6.0.1 → 6.1.27; mihi 0.8.0 → 1.0.0; stdlib `json` → `bayan` (6.1.x rename); ai-hwaccel held at 2.2.6 to match mihi's transitive pin. No behavior change at the chakshu surface. See CHANGELOG `[0.7.1]`.
+- **v0.7.5 (2026-06-13)** — Cyrius 6.1.29 → 6.2.2 (both manifests); niyama 1.0.4 → 1.0.5 (AI build). darshana 0.7.0 / mihi 1.0.0 already latest; ai-hwaccel still held at 2.2.6 (mihi pin). Both builds + smoke green on 6.2.2; no behavior change. The M3-closing `--watch` / `--with-logs` feature cut moved here from 0.7.5 → **0.7.6**. See CHANGELOG `[0.7.5]`.
 
 ---
 
 ## M3 — AI integration — substantive milestone, in progress
 
-The substantive case for first-party. `chakshu` becomes the panel where the AGNOS LLM stack meets the live system view. Landing across 0.7.2–0.7.5 (incremental cuts rather than one big v0.8.0).
+The substantive case for first-party. `chakshu` becomes the panel where the AGNOS LLM stack meets the live system view. Landing across 0.7.2–0.7.6 (incremental cuts rather than one big v0.8.0).
 
 **Foundation — shipped v0.7.2** (`src/ai.cyr`):
 
@@ -43,7 +44,7 @@ The substantive case for first-party. `chakshu` becomes the panel where the AGNO
 - [x] hoosh **2.3.5** bearer-token auth — `Authorization: Bearer $CHAKSHU_HOOSH_TOKEN` when set (token-less gateway still open).
 - [x] Smoke gate: `tests/hoosh_stub_smoke.py` stands up an OpenAI-shaped stub and runs `shu-ai --explain` against it (POST + content extraction + Bearer header). **Soft CI gate** — sandhi's `fdlopen`→libc `getaddrinfo` can't run in a no-libc/sandbox context, so it's pending its first green on a libc CI runner (then promote to hard).
 
-**Logs + anomaly stream — v0.7.5 (closes M3):**
+**Logs + anomaly stream — v0.7.6 (closes M3):**
 
 - [ ] `--watch` — anomaly stream (subscribe to aegis/phylax events)
 - [ ] `--with-logs` opt-in for sakshi log context in prompts

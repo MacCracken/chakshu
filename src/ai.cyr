@@ -10,7 +10,7 @@
 #                          WOULD be sent, and report daimon transport
 #                          status. The live JSON-RPC call + streamed
 #                          response render land at 0.7.3; --watch /
-#                          --with-logs at 0.7.4.
+#                          --with-logs at 0.7.6.
 #
 # Privacy (design-spec §6.2 + CLAUDE.md): the prompt carries only data
 # the user can already see in the TUI / -p surface — process identity,

@@ -4,6 +4,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.5] — 2026-06-13 — Interim refresh: Cyrius 6.2.2 + niyama 1.0.5
+
+Toolchain/dependency refresh. No new feature surface at the chakshu CLI —
+the M3-closing `--watch` / `--with-logs` cut moves to **v0.7.6**.
+
+### Changed
+
+- **Cyrius toolchain pin** `6.1.29` → `6.2.2` (both manifests). The
+  installed wrapper had already advanced to 6.2.2; this aligns the pins
+  with it. Both builds compile clean on 6.2.2 — lean `shu` (57 tests) and
+  `shu-ai` (13 tests) green, smoke gate PASS. No source changes were
+  required for the 6.1.x → 6.2.x line (the `json`→`bayan` rename and
+  directory-style stdlib modules from 6.1.x still apply).
+- **niyama** `1.0.4` → `1.0.5` (AI build only) — re2 redaction engine,
+  latest tag. Redaction tests unchanged and green.
+- Help text + `src/ai.cyr` header: the planned-cut labels for `--watch` /
+  `--with-logs` now read **(0.7.6)** (were 0.7.4 — those features have not
+  shipped yet; this tracks the renumbered feature cut).
+
+### Held
+
+- **ai-hwaccel** stays at **2.2.6** — pin tracks mihi 1.0.0's own
+  transitive pin to keep the concatenated `dist/mihi.cyr` +
+  `dist/ai-hwaccel.cyr` bundle ABI-consistent. 2.3.x tags exist; adopting
+  them is deferred to a coordinated mihi bump (roadmap M4).
+- **darshana** `0.7.0` and **mihi** `1.0.0` are already at their latest
+  tags — no change.
+
 ## [0.7.4] — 2026-06-10 — M3 live transport II: hoosh 2.3.5 auth + SSE streaming + `--explain` smoke
 
 ### Added

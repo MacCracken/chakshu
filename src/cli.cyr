@@ -7,7 +7,7 @@
 # logic lives here once. `ai_explain` resolves to whichever is included.
 
 # Keep CHAKSHU_VERSION in sync with the VERSION file.
-var CHAKSHU_VERSION = "chakshu 0.7.4";
+var CHAKSHU_VERSION = "chakshu 0.7.5";
 
 # Exit codes per design-spec §9
 var EXIT_OK    = 0;
@@ -27,7 +27,7 @@ fn print_help() {
     println("  shu -p                   Plain snapshot (host/uptime/load/mem/cpu/disk/net + top-N process table)");
     println("  shu --pid <PID>          Focus a single process (status / cmdline / k to kill)");
     println("  shu --explain <PID>      AI explain via hoosh (shu-ai build only)");
-    println("  shu --watch              Anomaly stream (0.7.4)");
+    println("  shu --watch              Anomaly stream (0.7.6)");
     println("");
     println("Options:");
     println("  -p                        Plain snapshot mode (single frame to stdout)");
@@ -37,8 +37,8 @@ fn print_help() {
     println("  --color <when>            auto | always | never (default auto; TUI only)");
     println("  --pid <PID>               Focus a single process (validates PID exists at startup)");
     println("  --explain <PID>           Ask hoosh to explain PID and exit (shu-ai build; redacted context)");
-    println("  --watch                   Anomaly stream mode (0.7.4)");
-    println("  --with-logs               Allow AI prompts to include sakshi log context (0.7.4)");
+    println("  --watch                   Anomaly stream mode (0.7.6)");
+    println("  --with-logs               Allow AI prompts to include sakshi log context (0.7.6)");
     println("  -h, --help                Show this help");
     println("  -V, --version             Show version");
     println("");
