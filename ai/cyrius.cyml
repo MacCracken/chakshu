@@ -5,7 +5,7 @@ description = "shu-ai — the AI-augmented build of chakshu (monitor + hoosh exp
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/chakshu"
 language = "cyrius"
-cyrius = "6.2.2"
+cyrius = "6.2.24"
 
 # The `shu-ai` build: lean chakshu core (../src/*) PLUS src/ai.cyr and its
 # transport chain. Shares the monitor source with the root build; the only
@@ -37,12 +37,12 @@ stdlib = [
 
 [deps.darshana]
 git = "https://github.com/MacCracken/darshana.git"
-tag = "0.7.0"
+tag = "0.7.1"
 modules = ["dist/darshana.cyr"]
 
 [deps.mihi]
 git = "https://github.com/MacCracken/mihi.git"
-tag = "1.0.0"
+tag = "1.1.1"
 modules = ["dist/mihi.cyr"]
 
 [deps.ai-hwaccel]

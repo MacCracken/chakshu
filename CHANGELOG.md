@@ -4,6 +4,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.6] — 2026-06-19 — Interim refresh: Cyrius 6.2.24 + mihi 1.1.1 + darshana 0.7.1
+
+Toolchain/dependency refresh. No new feature surface at the chakshu CLI —
+the M3-closing `--watch` / `--with-logs` cut moves to **v0.7.7**.
+
+### Changed
+
+- **Cyrius toolchain pin** `6.2.2` → `6.2.24` (both manifests), aligning
+  with the installed wrapper (6.2.25). Both builds compile clean — lean
+  `shu` (57 tests) and `shu-ai` (13 tests) green, smoke gate PASS. No
+  source changes were required for the 6.2.x line.
+- **mihi** `1.0.0` → `1.1.1` (both builds) — latest tag (built for cyrius
+  6.2.22). The identity/static API chakshu reads (hostname / kernel /
+  distro / cpu_model / cpu_count / mem_* / uptime / gpu_*) is unchanged.
+- **darshana** `0.7.0` → `0.7.1` (both builds) — latest tag (built for
+  cyrius 6.2.22). Patch-level refresh; the TTY/raw-mode surface chakshu
+  consumes is unchanged.
+
+### Held
+
+- **ai-hwaccel** stays at **2.2.6** — pin tracks mihi 1.1.1's own
+  transitive pin to keep the concatenated `dist/mihi.cyr` +
+  `dist/ai-hwaccel.cyr` bundle ABI-consistent. 2.3.x tags exist (up to
+  2.3.12); adopting them is deferred to a coordinated mihi bump.
+- **niyama** stays at **1.0.5** (AI build) — already the latest tag.
+
 ## [0.7.5] — 2026-06-13 — Interim refresh: Cyrius 6.2.2 + niyama 1.0.5
 
 Toolchain/dependency refresh. No new feature surface at the chakshu CLI —

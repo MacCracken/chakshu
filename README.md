@@ -20,7 +20,7 @@ The Sanskrit name **चक्षु** *chakṣu* means *the eye* / *the faculty 
 
 ## Status
 
-**v0.7.5 — M3 (AI integration) nearly complete.** What works today:
+**v0.7.6 — M3 (AI integration) nearly complete.** What works today:
 
 - **M1 — plain snapshot** (`shu -p`): host / uptime / load / mem / cpu / disk / net + sortable top-N process table.
 - **M2 — full TUI** (`shu`): alt-screen, 1 Hz refresh, ↑↓ select, `s` sort, `f` filter, `k` kill-with-confirm, `--pid N` focus, 16-colour theme.
@@ -28,7 +28,7 @@ The Sanskrit name **चक्षु** *chakṣu* means *the eye* / *the faculty 
 
 **Two binaries** (see [the split](#install)): the default **`shu`** is the lean monitor (~0.84 MB, zero deps, no libc); **`shu-ai`** adds the AI panel (~2.6 MB; pulls `sandhi`/`niyama`).
 
-Remaining before v1.0: M3 close (`--watch`, `--with-logs` — v0.7.6), then M4 polish/perf and M5 ship. See [docs/development/roadmap.md](docs/development/roadmap.md).
+Remaining before v1.0: M3 close (`--watch`, `--with-logs` — v0.7.7), then M4 polish/perf and M5 ship. See [docs/development/roadmap.md](docs/development/roadmap.md).
 
 > The AI live path needs a running `hoosh` gateway and has only been exercised in CI / on a real box — not yet field-verified. `htop` / `btop` remain the AGNOS Bazaar defaults until chakshu ships at v1.0:
 > ```sh
@@ -44,7 +44,7 @@ Remaining before v1.0: M3 close (`--watch`, `--with-logs` — v0.7.6), then M4 p
 # AGNOS / Cyrius native package manager (post-v1.0)
 pkg install chakshu
 
-# From source — Cyrius toolchain 6.2.2+ on $PATH
+# From source — Cyrius toolchain 6.2.24+ on $PATH
 git clone https://github.com/MacCracken/chakshu
 cd chakshu
 
@@ -75,7 +75,7 @@ shu --pid 1234       # focus a single process
 
 # AI (the shu-ai build only):
 shu-ai --explain 1234   # ask hoosh "why is process 1234 doing what it's doing?"
-shu-ai --watch          # tail-mode: anomalies flagged via aegis/phylax (v0.7.5)
+shu-ai --watch          # tail-mode: anomalies flagged via aegis/phylax (v0.7.7)
 ```
 
 The AI build talks to the `hoosh` gateway over HTTP. Configure via env:
