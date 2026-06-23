@@ -8,8 +8,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- **cyrius toolchain pin `6.2.24` → `6.2.36`** — aligns with the latest cyrius. Host build
-  re-verified clean; the `--agnos` build remains blocked **upstream** on the cyrius-stdlib
+- **cyrius toolchain pin `6.2.24` → `6.2.36`** — in **both** manifests: top-level `cyrius.cyml`
+  (lean `shu`) **and** `ai/cyrius.cyml` (`shu-ai`). Aligns with the latest cyrius. Both builds
+  re-verified clean (shu-ai via the CI's `CYRIUS_ALLOW_PARENT_INCLUDES=1`); the `--agnos` build
+  remains blocked **upstream** on the cyrius-stdlib
   `agnosys` Landlock gap (filed:
   `cyrius/docs/development/issues/2026-06-22-agnosys-stdlib-security-fns-not-agnos-gated.md`),
   not on this pin. (The planned `--watch` / `--with-logs` M3 cut slides to **v0.7.9**.)
