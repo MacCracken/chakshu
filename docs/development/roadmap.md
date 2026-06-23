@@ -20,6 +20,16 @@
 - **v0.7.1 (2026-06-10)** — Cyrius 6.0.1 → 6.1.27; mihi 0.8.0 → 1.0.0; stdlib `json` → `bayan` (6.1.x rename); ai-hwaccel held at 2.2.6 to match mihi's transitive pin. No behavior change at the chakshu surface. See CHANGELOG `[0.7.1]`.
 - **v0.7.5 (2026-06-13)** — Cyrius 6.1.29 → 6.2.2 (both manifests); niyama 1.0.4 → 1.0.5 (AI build). darshana 0.7.0 / mihi 1.0.0 already latest; ai-hwaccel still held at 2.2.6 (mihi pin). Both builds + smoke green on 6.2.2; no behavior change. See CHANGELOG `[0.7.5]`.
 - **v0.7.6 (2026-06-19)** — Cyrius 6.2.2 → 6.2.24 (both manifests); mihi 1.0.0 → 1.1.1 and darshana 0.7.0 → 0.7.1 (both builds). ai-hwaccel held at 2.2.6 (mihi 1.1.1 still pins it); niyama held at 1.0.5 (latest). Both builds + smoke green on 6.2.24; no behavior change. The M3-closing `--watch` / `--with-logs` feature cut moved 0.7.6 → **0.7.7**. See CHANGELOG `[0.7.6]`.
+- **v0.7.8 (2026-06-22)** — Cyrius 6.2.24 → 6.2.36; darshana 0.7.1 → 0.8.0 (agnos `tty_winsize` / winsize#60). See CHANGELOG `[0.7.8]`.
+- **v0.7.9 (2026-06-22) — agnosys retirement rewire.** cyrius retired the stale stdlib `agnosys` snapshot at 6.2.37; chakshu dropped `"agnosys"` from both manifests, added `"sys"`, bumped mihi 1.1.1 → 1.1.3 (the `sys_uname` / `sys_sysinfo` rewire) + cyrius → 6.2.37, brought `ai/` darshana → 0.8.0, and added a `cyrius lib sync` CI step. Host build clean. The `--watch` / `--with-logs` cut slides to **0.7.10**. See CHANGELOG `[0.7.9]`.
+
+---
+
+## AGNOS-readiness backlog (the `--agnos` build is not yet green)
+
+The `v0.7.0` AGNOS cycle was opened for the **identity/stats** surface (mihi `uname` / `sysinfo`) — that half builds `--agnos`. The **TUI render loop is not agnos-ready**, though: it's built on the Linux **signalfd + epoll** model — SIGWINCH-driven dynamic resize + signal multiplexing via darshana's `TTY_SIGMASK_*` / `tty_open_signalfd` / `epoll` (all Linux-only; ~18 signal-path refs in `src/tui.cyr`, zero agnos gating). As of **0.7.9** the `--agnos` build clears the old agnosys blocker and now stops at `TTY_SIGMASK_EXIT`.
+
+- [ ] **Agnos-native resize/signal handling for `shu`.** Either gate the signalfd/epoll path off under `CYRIUS_TARGET_AGNOS` (poll `winsize`#60 for size + `kbscan` for input each frame — no SIGWINCH, no signalfd) or wait on an agnos signal primitive. Its own arc; the lean `shu` runs on Linux today, AGNOS support is post-this.
 
 ---
 

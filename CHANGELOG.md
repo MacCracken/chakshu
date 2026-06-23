@@ -4,6 +4,29 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.9] — 2026-06-22
+
+### Changed
+
+- **Dropped `agnosys`; rewired the mihi probe chain onto the native `sys` stdlib module.**
+  cyrius retired the stale stdlib `agnosys` snapshot at **6.2.37**. chakshu pulled it only
+  transitively (via mihi's `agnosys_uname`), so this drops `"agnosys"` from the stdlib list in
+  **both** manifests (lean `shu` + `ai/` `shu-ai`), adds `"sys"`, and bumps **mihi `1.1.1` →
+  `1.1.3`** (the mihi half of the rewire → `sys_uname` / `sys_sysinfo`). Brought the `ai/`
+  manifest current too (darshana `0.7.1` → `0.8.0`, cyrius `6.2.36` → `6.2.37`), and added a
+  `cyrius lib sync` CI step on both build paths for the opt-in-vendored `sys` module (`lib/` is
+  gitignored / CI-regenerated). **Host build verified clean; no monitor-surface change.** The
+  planned `--watch` / `--with-logs` M3 cut slides to **v0.7.10**.
+
+### Known — AGNOS build gap (backlog)
+
+- With agnosys cleared, the `--agnos` build now reaches its **next** blocker: chakshu's TUI
+  render loop is built on the Linux **signalfd + epoll** model (SIGWINCH resize + signal
+  multiplexing via darshana's `TTY_SIGMASK_*` / `tty_open_signalfd`, all Linux-only — 18
+  signal-path refs, no agnos gating). Agnos-native `shu` is its own arc (agnos-native
+  resize/signal handling), tracked in `docs/development/roadmap.md`. The lean `shu` runs on
+  Linux today; AGNOS support lands post-this-cut.
+
 ## [0.7.8] — 2026-06-22
 
 ### Changed

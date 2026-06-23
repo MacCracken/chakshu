@@ -5,7 +5,7 @@ description = "The eye — AI-augmented system monitor for AGNOS / Cyrius"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/chakshu"
 language = "cyrius"
-cyrius = "6.2.36"
+cyrius = "6.2.37"
 
 [build]
 entry = "src/main.cyr"
@@ -61,7 +61,7 @@ stdlib = [
     "process",
     "tagged",
     "assert",
-    "agnosys",
+    "sys",
     "fnptr",
     "thread",
     "freelist",
@@ -124,7 +124,7 @@ modules = ["dist/darshana.cyr"]
 # identity/static API chakshu reads is unchanged.
 [deps.mihi]
 git = "https://github.com/MacCracken/mihi.git"
-tag = "1.1.1"
+tag = "1.1.3"
 modules = ["dist/mihi.cyr"]
 
 # ai-hwaccel — transitive from mihi/gpu.cyr (references

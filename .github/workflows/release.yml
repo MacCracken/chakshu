@@ -101,7 +101,10 @@ jobs:
           echo "$HOME/.cyrius/bin" >> $GITHUB_PATH
 
       - name: Resolve dependencies
-        run: cyrius deps
+        run: |
+          cyrius deps
+          cyrius lib sync   # vendor stdlib modules (incl. `sys`) into lib/ —
+                            # the lean build reads sys.cyr for mihi 1.1.3's sys_uname/sys_sysinfo
 
       - name: Build DCE'd binary (lean shu)
         run: |
@@ -122,6 +125,7 @@ jobs:
         run: |
           cd ai
           cyrius deps
+          cyrius lib sync
           mkdir -p build
           cyrius build main.cyr build/shu-ai
           echo "shu-ai: $(wc -c < build/shu-ai) bytes"
