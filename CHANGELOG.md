@@ -4,6 +4,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.8] — 2026-06-22
+
+### Changed
+
+- **cyrius toolchain pin `6.2.24` → `6.2.36`** — aligns with the latest cyrius. Host build
+  re-verified clean; the `--agnos` build remains blocked **upstream** on the cyrius-stdlib
+  `agnosys` Landlock gap (filed:
+  `cyrius/docs/development/issues/2026-06-22-agnosys-stdlib-security-fns-not-agnos-gated.md`),
+  not on this pin. (The planned `--watch` / `--with-logs` M3 cut slides to **v0.7.9**.)
+
 ## [0.7.7] — 2026-06-22 — Interim refresh: darshana 0.8.0 (agnos winsize#60)
 
 Dependency refresh. No new feature surface at the chakshu CLI. (The M3-closing
