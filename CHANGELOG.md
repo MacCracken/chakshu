@@ -4,6 +4,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.7] — 2026-06-22 — Interim refresh: darshana 0.8.0 (agnos winsize#60)
+
+Dependency refresh. No new feature surface at the chakshu CLI. (The M3-closing
+`--watch` / `--with-logs` cut that 0.7.6 earmarked for v0.7.7 shifts to **v0.7.8** —
+this slot is taken by the darshana refresh, mirroring 0.7.6's interim-refresh pattern.)
+
+### Changed
+
+- **`[deps.darshana]` 0.7.1 → 0.8.0** — darshana's minor cut adds the agnos
+  `tty_winsize` branch backed by the kernel `winsize`#60 syscall (agnos 1.45.13). On
+  Linux the TTY surface chakshu consumes is unchanged (host build clean); on agnos
+  `tty_winsize` now **resolves** (it was Linux-only, so an agnos build couldn't link
+  it), letting `_tui_update_winsize` read the real framebuffer console grid instead
+  of the 24×80 fallback. This benefit is **latent**: chakshu's agnos build is still
+  blocked upstream of winsize by the `agnosys` → `agnodrm` migration (the agnos target
+  fails on `agnosys`'s Landlock syscalls — unrelated to this dep bump). Host build
+  verified; agnos build deferred to the agnosys-migration arc.
+
 ## [0.7.6] — 2026-06-19 — Interim refresh: Cyrius 6.2.24 + mihi 1.1.1 + darshana 0.7.1
 
 Toolchain/dependency refresh. No new feature surface at the chakshu CLI —

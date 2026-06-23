@@ -1,3 +1,7 @@
+commit	04e04efab7a572d7d4ae89d4cb38ee71c06b9142	darshana	https://github.com/MacCracken/darshana.git	0.8.0
+commit	2b3714ba4da102e9302b87f741cd27a80b55f70e	mihi	https://github.com/MacCracken/mihi.git	1.1.1
+commit	b9af260480c9c8fcb5a958d3d4426fdd166efa5c	ai-hwaccel	https://github.com/MacCracken/ai-hwaccel.git	2.2.6
+commit	cfaa5e45fd8a74273e5bb33f26e67e95b566b5f7	agnosys	https://github.com/MacCracken/agnosys.git	1.4.0
 d9f3b17ddbbe1bba48917c3a679807b01c39c4a1ce776efdbdfbb7a1680e86e4  lib/tagged.cyr
 d7a14f337a9e8c67ac95023cddf58614a21d8aacd2eb1736da798843ccf0deba  lib/syscalls_macos.cyr
 d614ae2ff9261256a3e29068e400ac2f0342d3a7e5a4651aa9cef2399bafbbfa  lib/bayan.cyr
@@ -39,7 +43,7 @@ a3ce9d309b5489d72a376d3afdf153473078c740cdf991cf9e52be6c9ec33559  lib/io.cyr
 724cb440922e89ff60c76eba23670eeee53b9d1f3ffdde31ebe2e2f9badda9ed  lib/slice.cyr
 9fd6444e8cfcf7950837e955473adc5bab6d7bf4fa2c15f8ce2578360c4100eb  lib/hashmap.cyr
 af30844628c715c51cad83addf05c9de4fb12d4b84f97801322448b2df1091b1  lib/fnptr.cyr
-53926c8f3cc9223930dc2888afbe70fa49b3582869ab51e8ee8de4b6ace29556  lib/darshana.cyr
+a04b539f893feeab60232a35fd54afc546d9828b38ac6e4430c9c83069c73ed2  lib/darshana.cyr
 39fe97dbac447954aa0db7846d0236514dc083b3e3aa93b13484dab682f5abc1  lib/syscalls_windows.cyr
 96e804b93e6a3abe62ba72fc5fbaeac7c28d56d701eb9515b670681d56ed75c1  lib/syscalls_linux_common.cyr
 7965be5a82ff91be4fbf3dae692c6d4cd5465f0ccaab602e5710cc706f8fbbd9  lib/process_win.cyr

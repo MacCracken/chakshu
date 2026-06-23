@@ -92,12 +92,14 @@ stdlib = [
 # in chakshu/src/tui.cyr's own theme path — so this bump is a
 # forward-compat refresh, no behavior change.
 #
-# Bumped 0.7.0 → 0.7.1 at chakshu v0.7.6 (2026-06-19) — darshana's
-# latest tag (built for cyrius 6.2.22). Patch-level refresh; the TTY
-# surface chakshu consumes is unchanged.
+# Bumped 0.7.1 → 0.8.0 at chakshu v0.7.7 (2026-06-22) — darshana's minor
+# cut adding the agnos `tty_winsize` branch (winsize#60). The TTY surface is
+# unchanged on Linux; on agnos `tty_winsize` now RESOLVES (was Linux-only and
+# would have failed to link an agnos build), so `_tui_update_winsize` reads the
+# real framebuffer console grid instead of falling back to 24×80.
 [deps.darshana]
 git = "https://github.com/MacCracken/darshana.git"
-tag = "0.7.1"
+tag = "0.8.0"
 modules = ["dist/darshana.cyr"]
 
 # mihi — system-info probe library. M2.5 integration: chakshu shifts
