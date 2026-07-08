@@ -97,9 +97,18 @@ stdlib = [
 # unchanged on Linux; on agnos `tty_winsize` now RESOLVES (was Linux-only and
 # would have failed to link an agnos build), so `_tui_update_winsize` reads the
 # real framebuffer console grid instead of falling back to 24×80.
+#
+# Bumped 0.8.0 → 0.9.0 at chakshu v0.7.10 (2026-07-08) — darshana's minor cut
+# adding the agnos signalfd branch (`tty_open_signalfd` / `tty_close_signalfd` +
+# `TTY_SIGMASK_EXIT` / `TTY_SIGMASK_WINCH`, via sigprocmask#17 / signalfd#18).
+# This unblocks chakshu's `--agnos` link, which failed on the previously
+# Linux-only `TTY_SIGMASK_EXIT`. On agnos the interactive epoll/signalfd
+# input-mux stays gated out of `tui_run` (Linux-only stdlib epoll surface +
+# unreachable behind darshana's agnos `tty_raw` → -1); `shu -p` is the working
+# agnos path. No Linux-path change.
 [deps.darshana]
 git = "https://github.com/MacCracken/darshana.git"
-tag = "0.8.0"
+tag = "0.9.0"
 modules = ["dist/darshana.cyr"]
 
 # mihi — system-info probe library. M2.5 integration: chakshu shifts

@@ -1074,6 +1074,24 @@ fn tui_run(refresh_ms, sort_key, top_n, color_mode, focus_pid) {
         return EXIT_ERR;
     }
 
+    #ifdef CYRIUS_TARGET_AGNOS
+    # AGNOS has no raw-TTY input: darshana's `tty_raw` returns -1 on agnos (the
+    # kernel console runs its own line discipline — no termios), so control
+    # never reaches here and the interactive epoll/signalfd input-mux below is
+    # unreachable. It is also NOT portable to agnos — the cyrius stdlib epoll
+    # surface it uses (EPOLLIN / EPOLL_CTL_ADD / epoll_event_new + the 4-arg
+    # sys_epoll_ctl / sys_epoll_wait) is Linux-only, and mirshi's epoll#19-21
+    # carries no per-fd `data` tag this loop dispatches on. So the whole block
+    # is gated out of the agnos build; interactive `shu` degrades to the `-p`
+    # snapshot path (snapshot_print). This return mirrors the tty_raw bail above
+    # (unreachable, present so the agnos compile has a return path). darshana
+    # DOES provide the agnos signalfd peers (tty_open_signalfd / TTY_SIGMASK_*),
+    # so this stays a chakshu-side gate on the Linux-only epoll wiring, not a
+    # darshana gap.
+    return EXIT_ERR;
+    #endif
+
+    #ifndef CYRIUS_TARGET_AGNOS
     # Seed interactive state from CLI params. The render loop reads
     # these globals each frame; keypresses (s, ↑, ↓, f) mutate them in
     # place so changes apply immediately.
@@ -1205,4 +1223,5 @@ fn tui_run(refresh_ms, sort_key, top_n, color_mode, focus_pid) {
     if (sfd_winch >= 0) { file_close(sfd_winch); }
     if (epfd      >= 0) { file_close(epfd); }
     return EXIT_OK;
+    #endif
 }

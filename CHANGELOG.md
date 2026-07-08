@@ -4,6 +4,34 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.10] — 2026-07-08
+
+Unblocks the `--agnos` build (the `shu` entry in agnosticos' `build-dev.sh`
+agnos-dev docker image). `cyrius build --agnos src/main.cyr shu` failed to link
+on `undefined variable 'TTY_SIGMASK_EXIT'` — the first of several Linux-only
+symbols in `tui_run`'s interactive input-mux.
+
+### Changed
+
+- **darshana `0.8.0` → `0.9.0`** (`cyrius.cyml`) — picks up the agnos signalfd
+  branch (`tty_open_signalfd` / `tty_close_signalfd` + `TTY_SIGMASK_EXIT` /
+  `TTY_SIGMASK_WINCH`), which resolves those symbols on agnos. TTY surface
+  unchanged on Linux.
+
+### Fixed
+
+- **`--agnos` build** — gated `tui_run`'s epoll/signalfd interactive input-mux
+  behind `#ifndef CYRIUS_TARGET_AGNOS` (`src/tui.cyr`). The block is Linux-only
+  in shape — the cyrius stdlib epoll surface it uses (`EPOLLIN` /
+  `EPOLL_CTL_ADD` / `epoll_event_new` + 4-arg `sys_epoll_ctl` / `sys_epoll_wait`)
+  is absent / differently-shaped on agnos, and mirshi's epoll carries no per-fd
+  `data` tag this loop dispatches on. It is also **unreachable** on agnos:
+  darshana's `tty_raw` returns `-1` there, so `tui_run` bails to the
+  not-a-TTY message before the block. Interactive `shu` degrades to the `-p`
+  plain-snapshot path on agnos; the Linux TUI is byte-identical. Verified:
+  `--agnos` build succeeds and `shu` / `shu -p` run under mirshi (Linux path
+  unchanged).
+
 ## [0.7.9] — 2026-06-22
 
 ### Changed
