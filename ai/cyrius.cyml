@@ -5,7 +5,7 @@ description = "shu-ai — the AI-augmented build of chakshu (monitor + hoosh exp
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/chakshu"
 language = "cyrius"
-cyrius = "6.2.37"
+cyrius = "6.4.66"
 
 # The `shu-ai` build: lean chakshu core (../src/*) PLUS src/ai.cyr and its
 # transport chain. Shares the monitor source with the root build; the only
@@ -35,24 +35,33 @@ stdlib = [
     "sandhi",
 ]
 
+# darshana — kept in lockstep with the root manifest. Bumped 0.8.0 → 0.9.0
+# at chakshu v0.7.11 (2026-07-17) to match root cyrius.cyml (which advanced to
+# 0.9.0 at v0.7.10 for the agnos signalfd branch); this manifest had lagged.
 [deps.darshana]
 git = "https://github.com/MacCracken/darshana.git"
-tag = "0.8.0"
+tag = "0.9.0"
 modules = ["dist/darshana.cyr"]
 
+# mihi — kept in lockstep with root. Bumped 1.1.3 → 1.2.1 at v0.7.11
+# (2026-07-17); mihi 1.2.1 still pins ai-hwaccel 2.2.6 transitively.
 [deps.mihi]
 git = "https://github.com/MacCracken/mihi.git"
-tag = "1.1.3"
+tag = "1.2.1"
 modules = ["dist/mihi.cyr"]
 
+# ai-hwaccel — tracks mihi's transitive pin (2.2.6), NOT ai-hwaccel's latest
+# (2.3.14 as of 2026-07-17). Held to keep the concatenated mihi+ai-hwaccel
+# dist bundle ABI-consistent. See root cyrius.cyml for the full rationale.
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel.git"
 tag = "2.2.6"
 modules = ["dist/ai-hwaccel.cyr"]
 
 # niyama — re2 redaction engine (AI-only; design-spec §6.2). Git dep here,
-# not stdlib. Pinned 1.0.5 (latest; 1.0.4 was the first 6.1.27+ tag).
+# not stdlib. Bumped 1.0.5 → 1.0.6 at v0.7.11 (2026-07-17) — niyama's latest
+# tag, built for cyrius 6.4.64 (aligned with this manifest's 6.4.66 pin).
 [deps.niyama]
 git = "https://github.com/MacCracken/niyama.git"
-tag = "1.0.5"
+tag = "1.0.6"
 modules = ["dist/niyama.cyr"]

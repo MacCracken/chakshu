@@ -22,6 +22,7 @@
 - **v0.7.6 (2026-06-19)** — Cyrius 6.2.2 → 6.2.24 (both manifests); mihi 1.0.0 → 1.1.1 and darshana 0.7.0 → 0.7.1 (both builds). ai-hwaccel held at 2.2.6 (mihi 1.1.1 still pins it); niyama held at 1.0.5 (latest). Both builds + smoke green on 6.2.24; no behavior change. The M3-closing `--watch` / `--with-logs` feature cut moved 0.7.6 → **0.7.7**. See CHANGELOG `[0.7.6]`.
 - **v0.7.8 (2026-06-22)** — Cyrius 6.2.24 → 6.2.36; darshana 0.7.1 → 0.8.0 (agnos `tty_winsize` / winsize#60). See CHANGELOG `[0.7.8]`.
 - **v0.7.9 (2026-06-22) — agnosys retirement rewire.** cyrius retired the stale stdlib `agnosys` snapshot at 6.2.37; chakshu dropped `"agnosys"` from both manifests, added `"sys"`, bumped mihi 1.1.1 → 1.1.3 (the `sys_uname` / `sys_sysinfo` rewire) + cyrius → 6.2.37, brought `ai/` darshana → 0.8.0, and added a `cyrius lib sync` CI step. Host build clean. The `--watch` / `--with-logs` cut slides to **0.7.10**. See CHANGELOG `[0.7.9]`.
+- **v0.7.11 (2026-07-17)** — Cyrius 6.2.37 → 6.4.66 (both manifests, resolving the wrapper pin drift); mihi 1.1.3 → 1.2.1 (both); `ai/` darshana 0.8.0 → 0.9.0 (lockstep with root) and niyama 1.0.5 → 1.0.6. ai-hwaccel held at 2.2.6 (mihi 1.2.1 still pins it). Both builds + smoke green; lean `shu` shrank to ~0.48 MB. **Caveat:** `shu-ai` balloons ~2.27 → ~15.49 MB under the 6.4.66 codegen (13.48 MB static `.bss` from two oversized array locals promoted to shared globals in the sandhi/TLS chain — compiler, not deps; fixable only upstream). Flagged for M4. See CHANGELOG `[0.7.11]`.
 
 ---
 

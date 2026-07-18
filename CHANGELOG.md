@@ -4,6 +4,55 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.11] — 2026-07-17 — Interim refresh: Cyrius 6.4.66 + mihi 1.2.1 + niyama 1.0.6
+
+Toolchain/dependency refresh — no new feature surface at the chakshu CLI. Resolves
+the manifest pin drift (both manifests pinned `6.2.37`; the installed wrapper is
+`6.4.66`) and pulls every dependency to its current tag. Both builds compile clean
+and pass; version reports `chakshu 0.7.11`.
+
+### Changed
+
+- **Cyrius toolchain pin `6.2.37` → `6.4.66`** — in **both** manifests (`cyrius.cyml`
+  lean `shu`, `ai/cyrius.cyml` `shu-ai`). Spans the 6.3.x line and most of 6.4.x; no
+  chakshu source changes were needed (all stdlib modules chakshu declares still
+  resolve under 6.4.66).
+- **mihi `1.1.3` → `1.2.1`** (both manifests) — latest tag. mihi 1.2.1 still pins
+  ai-hwaccel `2.2.6` transitively, so chakshu's ai-hwaccel pin holds at `2.2.6`
+  (ABI-consistency of the concatenated `dist/mihi.cyr` + `dist/ai-hwaccel.cyr`
+  bundle). The identity/static API chakshu reads is unchanged.
+- **darshana `0.8.0` → `0.9.0`** (`ai/cyrius.cyml` only) — brings the AI manifest in
+  lockstep with the root manifest, which advanced to `0.9.0` at v0.7.10. No TTY
+  surface change on Linux.
+- **niyama `1.0.5` → `1.0.6`** (`ai/cyrius.cyml`) — latest tag (built for cyrius
+  6.4.64, aligned with the 6.4.66 pin). re2 redaction API unchanged.
+- **ai-hwaccel held at `2.2.6`** — deliberately *not* bumped to its latest (`2.3.14`);
+  the pin tracks whatever mihi pins transitively (2.2.6), not ai-hwaccel's own latest.
+
+### Verified
+
+- Lean `shu`: `cyrius build` clean, `tests/chakshu.tcyr` **57/57**, `scripts/smoke.sh`
+  **PASS** (17 gates, ~0.11 s wall). Binary shrank to **~0.48 MB** (495 512 B) under
+  6.4.66 — down from ~0.90 MB.
+- AI `shu-ai`: `cyrius build` clean (`CYRIUS_ALLOW_PARENT_INCLUDES=1`),
+  `tests/chakshu-ai.tcyr` **13/13**.
+
+### Known — `shu-ai` size regression under the 6.4.66 codegen (backlog / M4)
+
+- The AI build grew from **~2.27 MB to ~15.49 MB** purely as a function of the
+  toolchain pin. Isolated to the **compiler codegen**, not the dep bumps: the same
+  dep set built under a `6.2.37` pin is 2.27 MB; under `6.4.66` it is 15.49 MB.
+  The 6.4.66 compiler promotes two *oversized array locals* in the sandhi/TLS chain
+  into shared `.bss` globals (build note: *"oversized array local kept in shared
+  global (not per-thread) — exceeds per-fn stack budget; use alloc()"* ×2), producing
+  a **13.48 MB static `.bss`** where 6.2.37 emitted ~360 KB. The linker places
+  `.rodata` after that `.bss`, so the file physically extends to ~15 MB (not sparse).
+  DCE cannot strip it (it NOPs unreachable *code*, keeps `.bss`); the only fix is
+  upstream — the sandhi/TLS stdlib buffers moving to `alloc()`, or a cycc codegen
+  change. The **lean `shu` is unaffected** (it pulls none of that chain, and actually
+  shrank). Filed as an M4 / upstream-cyrius concern; the AI build remains the
+  documented heavy opt-in.
+
 ## [0.7.10] — 2026-07-08
 
 Unblocks the `--agnos` build (the `shu` entry in agnosticos' `build-dev.sh`
