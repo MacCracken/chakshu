@@ -5,13 +5,15 @@ description = "shu-ai — the AI-augmented build of chakshu (monitor + hoosh exp
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/chakshu"
 language = "cyrius"
-cyrius = "6.4.66"
+cyrius = "6.5.35"
 
 # The `shu-ai` build: lean chakshu core (../src/*) PLUS src/ai.cyr and its
 # transport chain. Shares the monitor source with the root build; the only
 # differences are this manifest's extra deps and ai/main.cyr swapping
 # src/ai_stub.cyr → ../src/ai.cyr. See docs/development/state.md for the
-# lean-vs-AI split rationale (binary size: ~0.86 MB vs ~2.57 MB).
+# lean-vs-AI split rationale (binary size at v0.7.12: ~0.86 MB vs ~3.02 MB —
+# shu-ai fell from ~15.49 MB when cyrius 6.5.22 reclaimed sigil's banked crypto
+# .bss; see docs/development/state.md).
 [build]
 entry = "main.cyr"
 output = "shu-ai"
@@ -35,33 +37,52 @@ stdlib = [
     "sandhi",
 ]
 
-# darshana — kept in lockstep with the root manifest. Bumped 0.8.0 → 0.9.0
-# at chakshu v0.7.11 (2026-07-17) to match root cyrius.cyml (which advanced to
-# 0.9.0 at v0.7.10 for the agnos signalfd branch); this manifest had lagged.
+# darshana — kept in lockstep with the root manifest. Bumped 0.9.0 → 1.0.0 at
+# chakshu v0.7.12 (2026-08-24) alongside root cyrius.cyml — darshana's v1.0 API
+# freeze (ADR 0003); bundle bodies identical to 0.9.4, and both deliberate 0.9.3
+# breaks hit zero chakshu call sites. See the root manifest for the full
+# rationale; these two blocks must not drift apart.
 [deps.darshana]
 git = "https://github.com/MacCracken/darshana.git"
-tag = "0.9.0"
+tag = "1.0.0"
 modules = ["dist/darshana.cyr"]
 
-# mihi — kept in lockstep with root. Bumped 1.1.3 → 1.2.1 at v0.7.11
-# (2026-07-17); mihi 1.2.1 still pins ai-hwaccel 2.2.6 transitively.
+# mihi — kept in lockstep with root. Bumped 1.2.1 → 1.2.4 at v0.7.12
+# (2026-08-24); mihi 1.2.4 advances its transitive ai-hwaccel pin to 2.3.18 and
+# clamps ai-hwaccel's detect logging to SK_WARN. See root cyrius.cyml.
 [deps.mihi]
 git = "https://github.com/MacCracken/mihi.git"
-tag = "1.2.1"
+tag = "1.2.4"
 modules = ["dist/mihi.cyr"]
 
-# ai-hwaccel — tracks mihi's transitive pin (2.2.6), NOT ai-hwaccel's latest
-# (2.3.14 as of 2026-07-17). Held to keep the concatenated mihi+ai-hwaccel
-# dist bundle ABI-consistent. See root cyrius.cyml for the full rationale.
+# ai-hwaccel — tracks mihi's transitive pin, NOT ai-hwaccel's latest. mihi 1.2.4
+# pins 2.3.18, so chakshu followed 2.2.6 → 2.3.18 at v0.7.12 (2026-08-24); the
+# tracking rule is unchanged, not suspended. Kept ABI-consistent with the
+# concatenated mihi+ai-hwaccel dist bundle. See root cyrius.cyml for the full
+# rationale and the list of renamed symbols chakshu does not reference.
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel.git"
-tag = "2.2.6"
+tag = "2.3.18"
 modules = ["dist/ai-hwaccel.cyr"]
 
 # niyama — re2 redaction engine (AI-only; design-spec §6.2). Git dep here,
-# not stdlib. Bumped 1.0.5 → 1.0.6 at v0.7.11 (2026-07-17) — niyama's latest
-# tag, built for cyrius 6.4.64 (aligned with this manifest's 6.4.66 pin).
+# not stdlib. Bumped 1.0.6 → 1.0.7 at v0.7.12 (2026-08-24) — a PIN-ONLY release:
+# niyama's own cyrius pin moved 6.4.64 → 6.5.29 with zero engine source changes,
+# and dist/niyama.cyr is byte-identical to 1.0.6 apart from its version header.
+# chakshu uses exactly two of its exported symbols — niyama_re2_compile and
+# niyama_re2_search, both in src/ai.cyr — unchanged in signature and body.
+# niyama 1.0.7 pins 6.5.29 against this manifest's 6.5.35: same 6.5.x line, six
+# patches behind, the same posture as the previous cut. `unicode` above stays
+# required by this bundle.
+#
+# HAZARD, for a future cut (do NOT act on it here): cyrius 6.5.30 folded niyama
+# 1.0.7 into the stdlib, so lib/niyama.cyr now also exists as a toolchain module
+# at the very version this git dep pins. There is no conflict today — "niyama"
+# is deliberately absent from [deps].stdlib above and no stdlib module includes
+# it, so exactly one copy lands in ai/lib/. niyama COULD be consumed as a stdlib
+# module the way sandhi already is, but never both at once: that would put two
+# definitions of every niyama_* symbol in the closure.
 [deps.niyama]
 git = "https://github.com/MacCracken/niyama.git"
-tag = "1.0.6"
+tag = "1.0.7"
 modules = ["dist/niyama.cyr"]

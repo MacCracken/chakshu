@@ -4,6 +4,149 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.12] — 2026-08-24 — Interim refresh: Cyrius 6.5.35 + darshana 1.0.0 + mihi 1.2.4 + ai-hwaccel 2.3.18
+
+Toolchain/dependency refresh — no new feature surface at the chakshu CLI. Resolves
+the manifest pin drift again (both manifests pinned `6.4.66`; the installed wrapper
+is `6.5.35`) and pulls every dependency to its current tag. **The `shu-ai` size
+regression filed at 0.7.11 is fixed by this toolchain jump** — the AI build falls
+from ~15.49 MB to ~3.02 MB. Both builds compile clean and pass; version reports
+`chakshu 0.7.12`. No chakshu source changes were required by any of the five bumps.
+
+### Changed
+
+- **Cyrius toolchain pin `6.4.66` → `6.5.35`** — in **both** manifests (`cyrius.cyml`
+  lean `shu`, `ai/cyrius.cyml` `shu-ai`). Every stdlib module both manifests declare
+  still resolves under 6.5.35 by the same name: the whole 6.4.66 → 6.5.35 stdlib
+  file-list diff is **two additions and zero removals** (`async_macos.cyr`,
+  `thread_macos.cyr`). `unicode` is still the directory-style module, and `sandhi`
+  is still shipped folded-in as `lib/sandhi.cyr` (1.9.0 → 1.9.10, public fn surface
+  836 → 836) — so no repeat of the `json`→`bayan` / `agnosys`→`sys` class of break.
+  The two genuinely breaking upstream changes in the window both miss chakshu:
+  `bayan_json_v_parse_str` → `_buf` (chakshu and all four vendored bundles reference
+  zero `bayan_*` symbols) and the 6.5.1 promotion of wrong-arity calls from warning
+  to hard error (zero mismatches — the clean build is the proof).
+- **darshana `0.9.0` → `1.0.0`** (both manifests) — darshana's **v1.0 API freeze**
+  (its ADR 0003). Bundle bodies are identical to 0.9.4; the substance of the span is
+  0.9.1 (its own pin → 6.5.35), 0.9.2 (aarch64 `SYS_IOCTL` fix), 0.9.3 (two
+  deliberate pre-freeze breaks) and 0.9.4 (docs/example only). Both 0.9.3 breaks hit
+  **zero** chakshu call sites — chakshu calls no `_buf` composer (color stays in
+  `src/tui.cyr`'s own theme path) and no `AGNOS_*` constant. All 15 symbols chakshu
+  does use are in ADR 0003's frozen tables at identical arity and constant values.
+- **mihi `1.2.1` → `1.2.4`** (both manifests) — **not a mechanical pin move.** mihi
+  1.2.2 advanced its own transitive ai-hwaccel pin to `2.3.18` and took on a `sakshi`
+  requirement: `_mihi_gpu_ensure()` clamps the sakshi log level to `SK_WARN` around
+  its one `registry_detect_no_exec()` call, because ai-hwaccel 2.3.x logs
+  `detect: profiles=N` at the default `SK_INFO` and would otherwise scribble on
+  stderr mid-TUI-frame. 1.2.3 hardened the shared `/proc` read path (looped reads,
+  bounded EINTR retry, truncation now fatal for meminfo/uptime/os-release) —
+  chakshu's 8192-byte scratch buffers sit well clear of every limit. 1.2.4 added an
+  aarch64 device-tree arm to `mihi_cpu_model` and an AGNOS `sysinfo` arm to
+  `mihi_mem_free`, the latter fixing a permanent `-1` that `shu -p --agnos` had been
+  subtracting in its used-memory line. The identity/static probe API chakshu reads
+  is unchanged; all 13 symbols re-verified arity-identical.
+- **ai-hwaccel `2.2.6` → `2.3.18`** (both manifests) — **the held pin finally moves.**
+  The tracking rule is unchanged, not suspended: the pin follows *mihi's*
+  `[deps.ai-hwaccel]` tag, and it sat at 2.2.6 for four cuts precisely because mihi
+  still pinned 2.2.6. mihi 1.2.4 pins 2.3.18, so chakshu follows. **Both pins must
+  move together** — 2.3.18 against mihi 1.2.1 compiles but leaks the `detect:` line
+  to stderr. The span crosses four deliberate symbol de-collisions (2.3.13 `ERR_*` →
+  `HWA_ERR_*`; 2.3.14 `registry_new` → `hw_registry_new`; 2.3.18 `BACKEND_COUNT` →
+  `AIHW_BACKEND_COUNT`, `Backend` → `AiHwBackend`, `path_exists` → `aihw_path_exists`);
+  chakshu references none of them — it reaches this surface only via `mihi_gpu_*`.
+  All nine structs are byte-identical, so the concatenated bundle stays ABI-consistent.
+- **niyama `1.0.6` → `1.0.7`** (`ai/cyrius.cyml`) — a **pin-only** release: niyama's
+  own cyrius pin moved 6.4.64 → 6.5.29 with zero engine source changes, and
+  `dist/niyama.cyr` is byte-identical to 1.0.6 apart from its version header. The two
+  symbols `src/ai.cyr` calls (`niyama_re2_compile`, `niyama_re2_search`) are unchanged.
+
+### Added
+
+- **`sakshi` declared in the lean root `[deps].stdlib`.** It is genuinely reachable in
+  the lean monitor — `src/snapshot.cyr` and `src/tui.cyr` call `mihi_gpu_count()`
+  unconditionally, which routes through mihi 1.2.4's sakshi level clamp — so DCE
+  cannot drop it. It already arrives transitively via the `dist/*.deps` sidecars that
+  mihi 1.2.4 and ai-hwaccel 2.3.18 newly ship (cyrius 6.5.30 fixed the `distlib` bug
+  that suppressed them), which makes the entry **redundant under cyrius ≥ 6.5.30 and
+  measured byte-neutral — 857 136 B with or without it.** It is declared anyway as
+  intent-documentation, and as insurance against a toolchain below 6.5.30 where
+  sidecar auto-resolution disappears and the omission becomes a hard link failure.
+  `sakshi` is pure-syscall (`clock_gettime`/`nanosleep`) — the no-libc rule holds
+  (`readelf -d build/shu`: no dynamic section).
+
+### Fixed
+
+- **`shu-ai` is back in its pre-6.4.66 size band: ~15.49 MB → ~3.02 MB**
+  (15 489 136 → 3 170 560 B), with static `.bss` falling **13 477 224 → 870 992 B
+  (−93.5%)**. This closes the M4 item filed at 0.7.11, purely as a function of the
+  toolchain pin — no dep or source change contributed.
+- **The 0.7.11 root-cause diagnosis of that bloat was misattributed and is corrected
+  here.** It was *not* "two oversized array locals in the sandhi/TLS chain." The
+  driver was **sigil's banked crypto workspace held as module-level array globals**:
+  6.4.66's `lib/sigil.cyr` declared ~1 587 782 top-level `var X[N]` elements
+  (`_rsa_blind_prod[65536]`, the `_bn_*` bignum engine, `_pss_*` — each 512 B ×
+  `SIGIL_CRYPTO_BANKS` = 64 lanes) ≈ 12.7 MB, i.e. **~94% of the measured `.bss`**.
+  cyrius 6.5.22 folded sigil 3.12.9, which localised the RSA sign/blind/CRT workspace
+  and the bignum engine to stack frames (upstream: *"9.53 MiB of .bss reclaimed"*).
+  6.5.35's sigil declares 13 954 such elements. The two actual "oversized array
+  local" notes — `sigil.cyr` `var SCR[352256]` (argon2 scratch) and `var buf[262144]`
+  (hash-file I/O scratch), ~614 KB combined — were only ~4.5% of the old figure,
+  which is exactly why they were the wrong suspect. **Those two notes still fire ×2
+  on the `shu-ai` build and are expected, not a residual regression.**
+- **Root `cyrius.cyml`'s `bayan` rationale corrected.** It claimed *"the bundle calls
+  `bayan_json_get`"* — it does not. ai-hwaccel's dist contains zero `bayan_*`
+  references (the only `json_*` tokens are four local variable names). `bayan` is
+  still required, but as a **parse-time leaf** declared by the dist sidecars. Recorded
+  so a future cut doesn't drop it for the stated-and-false reason — or keep it for one.
+
+### Known — lean `shu` size regression under the 6.5.x codegen (backlog / M4)
+
+- The lean monitor grew **495 512 → 857 136 B (+361 624 B, +73%)**, `.bss` **71 664 →
+  145 000 B**. Isolated by building the *old* dep set under the *new* toolchain:
+
+  | Build | Size | Delta |
+  |---|---:|---|
+  | 0.7.11 — 6.4.66 + old deps | 495 512 B | — |
+  | 6.5.35 + **old** deps | 757 616 B | **+262 104 B — toolchain** |
+  | 0.7.12 — 6.5.35 + new deps | 857 136 B | **+99 520 B — deps** |
+
+  So ~72% of the growth is the compiler and ~28% the dep bumps (ai-hwaccel's bundle
+  alone grew 179 098 → 209 216 B, plus `sakshi` newly in the lean closure). niyama's
+  1.0.7 changelog bisects the compiler half to **6.5.15 → 6.5.16**: cycc now emits
+  every manifest-included stdlib module rather than pruning to what `main` reaches,
+  and `CYRIUS_DCE=1` NOPs dead functions in place instead of removing them, never
+  dropping unreferenced data tables. Confirmed here — **`build/shu-dce` is 857 136 B,
+  byte-for-byte identical to the non-DCE build** (DCE parity still passes; it just no
+  longer shrinks anything). Against design-spec §8's `< 256 KB` target the lean
+  monitor moves from ~1.9× to **~3.3× over**. This replaces the `shu-ai` entry as the
+  M4 size item.
+
+### Verified
+
+- Lean `shu`: `cyrius build` clean, `tests/chakshu.tcyr` **57/57**, `scripts/smoke.sh`
+  **PASS** (17 gates), `tests/integration_smoke.py` PTY suite **7/7 PASS**, DCE parity
+  **PASS**. `shu -p` wall time **~112 ms**, unchanged. `shu --version` reports
+  `chakshu 0.7.12`.
+- `shu -p` renders the GPU line with **stderr exactly 0 bytes** — mihi 1.2.4's
+  `SK_WARN` clamp confirmed working; no `detect: profiles=N` leak into the frame.
+- AI `shu-ai`: `cyrius build` clean (`CYRIUS_ALLOW_PARENT_INCLUDES=1`),
+  `tests/chakshu-ai.tcyr` **13/13**.
+- `cyrius lint` over `src/*.cyr`: **0 non-cosmetic warnings** (the ci.yml gate).
+- `tests/hoosh_stub_smoke.py` still cannot run on the dev box (sandhi resolves via
+  `fdlopen`→libc `getaddrinfo`); the `--explain` fallback correctly printed the
+  redacted context instead. Unchanged posture — CI marks that gate `continue-on-error`
+  pending its first green on a libc runner.
+
+### Process note
+
+- Upstream now publishes a **`dist/*.deps` sidecar per bundle** naming the stdlib
+  leaves that fold requires. On every future dep bump, union the sidecars and diff
+  against `[deps].stdlib` — one command that would have caught this cut's `sakshi`
+  question, and the earlier `json`→`bayan`, `unicode`, and `agnosys`→`sys` surprises.
+- **`cyrius fmt` now rewrites files in place** as of 6.5.28 (`--check` is the
+  non-destructive form). Nothing in `ci.yml`, `release.yml` or `scripts/` invokes it —
+  do not add a bare `cyrius fmt` to CI.
+
 ## [0.7.11] — 2026-07-17 — Interim refresh: Cyrius 6.4.66 + mihi 1.2.1 + niyama 1.0.6
 
 Toolchain/dependency refresh — no new feature surface at the chakshu CLI. Resolves

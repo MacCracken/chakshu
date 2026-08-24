@@ -5,7 +5,7 @@ description = "The eye — AI-augmented system monitor for AGNOS / Cyrius"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/chakshu"
 language = "cyrius"
-cyrius = "6.4.66"
+cyrius = "6.5.35"
 
 [build]
 entry = "src/main.cyr"
@@ -29,13 +29,32 @@ output = "shu"
 #   agnosys               — shared uname(2)/sysinfo(2) Result wrapper
 #   fnptr/thread/freelist — referenced by ai-hwaccel's async detect path
 #   ct                    — compile-time helpers used by ai-hwaccel registry
-#   bayan                 — used by ai-hwaccel's detected-device serialization.
-#                           Renamed from `json` in the 6.1.x toolchain line
-#                           (6.0.x shipped lib/json.cyr; 6.1.27 ships
-#                           lib/bayan.cyr, which provides the bayan_json_* /
-#                           bayan_csv_* / bayan_cyml_* families). The bundle
-#                           calls bayan_json_get; requesting the old `json`
-#                           name fails to resolve under 6.1.27.
+#   bayan                 — required as a PARSE-TIME LEAF declared by mihi's
+#                           and ai-hwaccel's dist/*.deps sidecars. Renamed
+#                           from `json` in the 6.1.x toolchain line (6.0.x
+#                           shipped lib/json.cyr; 6.1.27 ships lib/bayan.cyr,
+#                           which provides the bayan_json_* / bayan_csv_* /
+#                           bayan_cyml_* families); requesting the old `json`
+#                           name still fails to resolve. CORRECTED at v0.7.12:
+#                           the prior note here claimed "the bundle calls
+#                           bayan_json_get" — it does not. ai-hwaccel's dist
+#                           contains zero bayan_* references (the only `json_*`
+#                           tokens are four local variable names). Keep the
+#                           entry — just not for that stated-and-false reason.
+#   sakshi                — structured logging, added at v0.7.12 with the
+#                           mihi 1.2.4 / ai-hwaccel 2.3.18 pair. GENUINELY
+#                           REACHABLE, not a parse-time leaf: src/snapshot.cyr
+#                           and src/tui.cyr call mihi_gpu_count() unconditionally,
+#                           which routes through _mihi_gpu_ensure() → sakshi
+#                           level clamp, so DCE cannot drop it. It also arrives
+#                           transitively via the new dist/*.deps sidecars, so
+#                           this entry is redundant under cyrius >= 6.5.30 and
+#                           measured byte-neutral (857 136 B either way) — it is
+#                           here as intent-documentation, and as insurance
+#                           against a toolchain below 6.5.30, where sidecar
+#                           auto-resolution disappears and the omission would
+#                           become a hard link failure. sakshi is pure-syscall
+#                           (clock_gettime/nanosleep) — the no-libc rule holds.
 #   unicode               — pulled in at M3 foundation (v0.7.2) by niyama's
 #                           dist bundle (re2/pcre engines reference
 #                           unicode_category / unicode_props / NFD tables).
@@ -63,18 +82,30 @@ stdlib = [
     "assert",
     "sys",
     "fnptr",
+    "sakshi",
     "thread",
     "freelist",
     "ct",
     "bayan",
     "bench",
 ]
-# NOTE: this is the LEAN `shu` build — monitor only. The AI dep chain
-# (unicode + sandhi/niyama + async/atomic/net/http/tls/ws/sigil/sakshi/
-# keccak/thread_local/mmap/dynlib/fdlopen/regression) lives ONLY in
-# ai/cyrius.cyml, which builds the `shu-ai` binary. Keeping it out here
-# is what holds `shu` to ~0.86 MB instead of ~2.57 MB. Don't re-add AI
-# deps to this manifest — add them to ai/cyrius.cyml.
+# NOTE: this is the LEAN `shu` build — monitor only. The AI transport chain
+# (unicode + sandhi/niyama + async/net/http/tls/ws/sigil/keccak/thread_local/
+# mmap/dynlib/fdlopen/regression) lives ONLY in ai/cyrius.cyml, which builds
+# the `shu-ai` binary. Keeping it out here is what holds `shu` to ~0.86 MB
+# instead of ~3.02 MB. Don't re-add those deps to this manifest — add them to
+# ai/cyrius.cyml.
+#
+# Amended at v0.7.12: `sakshi` and `atomic` are no longer AI-only — both are
+# now vendored into the lean lib/ as well (sakshi via the mihi/ai-hwaccel dist
+# sidecars, and reachable through mihi_gpu_count()). The rule that matters is
+# unchanged: no sandhi, no niyama, no TLS/HTTP stack in the lean build.
+#
+# PROCESS NOTE (v0.7.12): upstream now publishes a `dist/*.deps` sidecar per
+# bundle naming the stdlib leaves that fold requires. On every future dep bump,
+# union the sidecars and diff against [deps].stdlib below — one command that
+# would have caught this cut's sakshi question, and the earlier json→bayan,
+# unicode, and agnosys→sys surprises too.
 
 # darshana — Linux TTY/raw-mode primitives (termios, ANSI, cursor).
 # Picked up at M2 entry per the roadmap "Pre-M2 — TTY/termios lib
@@ -106,9 +137,25 @@ stdlib = [
 # input-mux stays gated out of `tui_run` (Linux-only stdlib epoll surface +
 # unreachable behind darshana's agnos `tty_raw` → -1); `shu -p` is the working
 # agnos path. No Linux-path change.
+#
+# Bumped 0.9.0 → 1.0.0 at chakshu v0.7.12 (2026-08-24) — darshana's v1.0 API
+# FREEZE (its ADR 0003). The bundle bodies are identical to 0.9.4; the substance
+# of the span is 0.9.1 (darshana's own toolchain pin → 6.5.35, an exact match for
+# this manifest, plus its first dist/darshana.deps sidecar), 0.9.2 (aarch64
+# SYS_IOCTL shadowing fix), 0.9.3 (two deliberate pre-freeze breaks) and 0.9.4
+# (docs/example only). Both 0.9.3 breaks hit ZERO chakshu call sites: chakshu
+# calls no `_buf` composer (color rendering stays in src/tui.cyr's own theme
+# path) and no `AGNOS_*` constant (renamed to `_AGNOS_*`, i.e. explicitly
+# not-API). The 15 symbols chakshu does use are all in ADR 0003's frozen tables
+# at identical arity and constant values, so 1.x minor bumps from here need no
+# diff read. Net gain for chakshu: `tty_open_signalfd` now rolls back its
+# SIG_BLOCK on failure and returns exactly -1, so the src/tui.cyr degrade path
+# no longer risks running a whole session with HUP/INT/TERM blocked.
+# 1.0.0 also drops darshana's own `var SYS_IOCTL = 16` in favour of the stdlib's
+# arch-aware value — do NOT drop "syscalls" from [deps].stdlib above.
 [deps.darshana]
 git = "https://github.com/MacCracken/darshana.git"
-tag = "0.9.0"
+tag = "1.0.0"
 modules = ["dist/darshana.cyr"]
 
 # mihi — system-info probe library. M2.5 integration: chakshu shifts
@@ -136,22 +183,48 @@ modules = ["dist/darshana.cyr"]
 # tag (built for cyrius 6.2.37). mihi 1.2.1 STILL pins ai-hwaccel 2.2.6
 # transitively, so chakshu's ai-hwaccel pin below holds at 2.2.6. The
 # identity/static API chakshu reads is unchanged.
+#
+# Bumped 1.2.1 → 1.2.4 at chakshu v0.7.12 (2026-08-24) — NOT a mechanical pin
+# move. mihi 1.2.2 advanced its own transitive ai-hwaccel pin 2.2.6 → 2.3.18 and
+# took on a `sakshi` requirement: `_mihi_gpu_ensure()` now clamps the sakshi log
+# level to SK_WARN around its one registry_detect_no_exec() call, because
+# ai-hwaccel 2.3.x logs "detect: profiles=N" at the default SK_INFO and would
+# otherwise scribble on stderr mid-TUI-frame. The two pins MUST move together —
+# 2.3.18 against mihi 1.2.1 compiles but leaks that stderr line. Verified at the
+# cut: `shu -p` renders the gpu line with stderr exactly 0 bytes.
+# The identity/static probe API chakshu reads is unchanged (frozen since mihi
+# 1.0.0; all 13 symbols re-verified arity-identical at this bump). 1.2.3 hardened
+# the shared /proc read path (looped reads, bounded EINTR retry, truncation now
+# fatal for meminfo/uptime/os-release) — chakshu's 8192-byte scratch buffers sit
+# well clear of every limit. 1.2.4 added an aarch64 device-tree arm to
+# mihi_cpu_model and an AGNOS sysinfo arm to mihi_mem_free, the latter fixing a
+# permanent -1 that `shu -p --agnos` had been subtracting in its used-mem line.
 [deps.mihi]
 git = "https://github.com/MacCracken/mihi.git"
-tag = "1.2.1"
+tag = "1.2.4"
 modules = ["dist/mihi.cyr"]
 
 # ai-hwaccel — transitive from mihi/gpu.cyr (references
-# registry_detect_no_exec / profile_* / FAMILY_CPU). Pin tracks
-# mihi's own [deps.ai-hwaccel] tag, NOT ai-hwaccel's latest release:
-# mihi 1.2.1 still pins 2.2.6, so chakshu inherits 2.2.6 to keep the
-# concatenated dist/mihi.cyr + dist/ai-hwaccel.cyr bundle ABI-consistent.
-# (ai-hwaccel has 2.3.x tags — up to 2.3.14 as of 2026-07-17; do NOT
-# adopt them ahead of mihi.) mihi only calls the no-exec API; chakshu
-# inherits the surface.
+# registry_detect_no_exec / profile_* / FAMILY_CPU). Pin tracks mihi's own
+# [deps.ai-hwaccel] tag, NOT ai-hwaccel's latest release. mihi only calls the
+# no-exec API; chakshu inherits the surface.
+#
+# Bumped 2.2.6 → 2.3.18 at chakshu v0.7.12 (2026-08-24). The RULE IS UNCHANGED,
+# NOT SUSPENDED: it was held at 2.2.6 for four cuts precisely because mihi still
+# pinned 2.2.6; mihi 1.2.4 now pins 2.3.18, so chakshu follows. That mihi's pin
+# and ai-hwaccel's latest coincide this cycle is a coincidence — keep tracking
+# mihi, not the tag list. The 2.2.6 → 2.3.18 span crosses four deliberate symbol
+# de-collisions (2.3.13 ERR_* → HWA_ERR_*; 2.3.14 registry_new → hw_registry_new;
+# 2.3.18 BACKEND_COUNT → AIHW_BACKEND_COUNT, enum Backend → AiHwBackend,
+# path_exists → aihw_path_exists). chakshu references NONE of them — it reaches
+# this surface only through mihi_gpu_*. All nine structs are byte-identical
+# between the tags, so the concatenated dist/mihi.cyr + dist/ai-hwaccel.cyr
+# bundle stays ABI-consistent. The real cost of the jump is the sakshi logging
+# dependency, satisfied both by the dist sidecars and by the explicit
+# [deps].stdlib entry added above.
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel.git"
-tag = "2.2.6"
+tag = "2.3.18"
 modules = ["dist/ai-hwaccel.cyr"]
 
 # niyama (re2 redaction) is an AI-only dep — it lives in ai/cyrius.cyml,

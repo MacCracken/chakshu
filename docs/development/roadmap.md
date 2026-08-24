@@ -1,6 +1,6 @@
 # chakshu — Roadmap
 
-> **Status**: M0–M2.5 closed; **M3 (AI integration) nearly done** — live `--explain` + streamed `?` overlay via hoosh shipped across v0.7.2–v0.7.4 (lean/AI binary split); v0.7.5 and v0.7.6 were interim toolchain/dep refreshes (Cyrius → 6.2.24, mihi → 1.1.1, darshana → 0.7.1, niyama 1.0.5). **One cut left to close M3: v0.7.7 (`--watch` + `--with-logs`).** Then M4 (polish/perf) and M5 (v1.0 ship). | **Last Updated**: 2026-06-19
+> **Status**: M0–M2.5 closed; **M3 (AI integration) nearly done** — live `--explain` + streamed `?` overlay via hoosh shipped across v0.7.2–v0.7.4 (lean/AI binary split); v0.7.5 and v0.7.6 were interim toolchain/dep refreshes (Cyrius → 6.2.24, mihi → 1.1.1, darshana → 0.7.1, niyama 1.0.5). **One cut left to close M3: v0.7.7 (`--watch` + `--with-logs`).** Then M4 (polish/perf) and M5 (v1.0 ship). | **Last Updated**: 2026-08-24
 >
 > The path from v0.1.0 (scaffold) to v1.0 (ships as the AGNOS default system monitor, replacing the third-party `htop`/`btop` Bazaar packages).
 
@@ -23,6 +23,7 @@
 - **v0.7.8 (2026-06-22)** — Cyrius 6.2.24 → 6.2.36; darshana 0.7.1 → 0.8.0 (agnos `tty_winsize` / winsize#60). See CHANGELOG `[0.7.8]`.
 - **v0.7.9 (2026-06-22) — agnosys retirement rewire.** cyrius retired the stale stdlib `agnosys` snapshot at 6.2.37; chakshu dropped `"agnosys"` from both manifests, added `"sys"`, bumped mihi 1.1.1 → 1.1.3 (the `sys_uname` / `sys_sysinfo` rewire) + cyrius → 6.2.37, brought `ai/` darshana → 0.8.0, and added a `cyrius lib sync` CI step. Host build clean. The `--watch` / `--with-logs` cut slides to **0.7.10**. See CHANGELOG `[0.7.9]`.
 - **v0.7.11 (2026-07-17)** — Cyrius 6.2.37 → 6.4.66 (both manifests, resolving the wrapper pin drift); mihi 1.1.3 → 1.2.1 (both); `ai/` darshana 0.8.0 → 0.9.0 (lockstep with root) and niyama 1.0.5 → 1.0.6. ai-hwaccel held at 2.2.6 (mihi 1.2.1 still pins it). Both builds + smoke green; lean `shu` shrank to ~0.48 MB. **Caveat:** `shu-ai` balloons ~2.27 → ~15.49 MB under the 6.4.66 codegen (13.48 MB static `.bss` from two oversized array locals promoted to shared globals in the sandhi/TLS chain — compiler, not deps; fixable only upstream). Flagged for M4. See CHANGELOG `[0.7.11]`.
+- **v0.7.12 (2026-08-24)** — Cyrius 6.4.66 → 6.5.35 (both manifests, resolving the wrapper pin drift again); darshana 0.9.0 → 1.0.0 (darshana's **v1.0 API freeze** — the 15 symbols chakshu uses are now contractually stable); mihi 1.2.1 → 1.2.4; **ai-hwaccel 2.2.6 → 2.3.18 — the four-cut hold ends**, because mihi 1.2.4 finally advanced its own transitive pin (the tracking rule is unchanged, not suspended; the two must move in lockstep or ai-hwaccel 2.3.x leaks `detect: profiles=N` to stderr mid-frame). `ai/` niyama 1.0.6 → 1.0.7 (pin-only). `sakshi` declared in the lean `[deps].stdlib` — byte-neutral, and it documents a genuinely reachable dep (`mihi_gpu_count()`). **No source changes needed for any of the five bumps.** Both builds + smoke + PTY + DCE parity green. **The 0.7.11 `shu-ai` size regression is FIXED** by the toolchain: ~15.49 → ~3.02 MB (`.bss` 13.48 MB → 871 KB), and the 0.7.11 root-cause note was **misattributed** — it was sigil's banked crypto globals (reclaimed by cyrius 6.5.22), not sandhi/TLS array locals. **New caveat:** the lean `shu` grew ~0.48 → ~0.86 MB, ~72% of it the cycc 6.5.16 change (emits every declared stdlib module; `CYRIUS_DCE=1` no longer shrinks anything) and ~28% the dep bumps. Flagged for M4. See CHANGELOG `[0.7.12]`.
 
 ---
 
@@ -48,7 +49,7 @@ The substantive case for first-party. `chakshu` becomes the panel where the AGNO
 
 - [x] hoosh HTTP client via sandhi — `--explain` POSTs `/v1/chat/completions`, prints the answer, falls back to the redacted context on failure. (design-spec §6.3 corrected: HTTP, not the stale Unix-socket framing.)
 - [x] `?` key — in-TUI explain **overlay** (`ai_tui_explain`); request→render for now
-- [x] **lean/AI binary split** — default `shu` (monitor, ~0.84 MB) vs `shu-ai` (+AI, ~2.57 MB); AI deps confined to `ai/cyrius.cyml`
+- [x] **lean/AI binary split** — default `shu` (monitor) vs `shu-ai` (+AI); AI deps confined to `ai/cyrius.cyml`. Sizes at the 0.7.3 cut were ~0.84 MB / ~2.57 MB; current figures live in [`state.md`](state.md).
 
 **SSE streaming + hoosh 2.3.5 — shipped v0.7.4:**
 
@@ -65,7 +66,7 @@ The substantive case for first-party. `chakshu` becomes the panel where the AGNO
 
 > **Runtime-libc caveat (0.7.4):** sandhi's HTTP client dlopens libc (`getaddrinfo`/libssl), so **`shu-ai` is not a pure no-libc binary** and its live path only runs on a libc host (CI/AGNOS). The lean `shu` (no sandhi) stays pure no-libc per CLAUDE.md. If this becomes a problem, the fallback is a chakshu-local raw-HTTP-over-TCP client (no sandhi, no dlopen).
 
-> **Size note:** the lean/AI split keeps the default `shu` at ~0.84 MB (under btop's install); the AI heft (~2.57 MB) is confined to the opt-in `shu-ai`. M4 size work targets the lean monitor only (design-spec §8 `<256 KB`, still ~3.3× over).
+> **Size note:** the lean/AI split keeps the default `shu` at ~0.86 MB (still under btop's ~1.7 MB install); the AI heft (~3.02 MB) is confined to the opt-in `shu-ai`. M4 size work targets the lean monitor only (design-spec §8 `<256 KB`, ~3.3× over as of v0.7.12). Note that since cycc 6.5.16 the compiler emits every *declared* stdlib module and `CYRIUS_DCE=1` no longer shrinks the output, so that work means trimming declared modules, not more DCE.
 
 ---
 
