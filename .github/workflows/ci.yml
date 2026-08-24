@@ -200,6 +200,20 @@ jobs:
             fi
           fi
 
+          # Signal-mask hygiene. darshana's `tty_open_signalfd` does a
+          # SIG_BLOCK before creating the fd, so a signalfd MUST be torn
+          # down with `tty_close_signalfd(fd, mask)` (closes AND unblocks),
+          # never a bare `file_close`. Closing alone strands HUP/INT/TERM
+          # and WINCH blocked for the process lifetime — and a blocked mask
+          # survives execve. Regressed through v0.7.12; fixed in 0.7.13.
+          # The unit suite pins darshana's contract; this pins the call site.
+          sfd_hits=$(grep -rnE 'file_close\(\s*sfd' src/ 2>/dev/null || true)
+          if [ -n "$sfd_hits" ]; then
+            echo "FAIL: signalfd closed with bare file_close — use tty_close_signalfd(fd, mask)"
+            echo "$sfd_hits"
+            FAIL=1
+          fi
+
           echo "security scan complete (fail: $FAIL)"
           exit $FAIL
 

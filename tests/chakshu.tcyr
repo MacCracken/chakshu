@@ -8,6 +8,31 @@
 # prompt / JSON marshalling) live in ai/tests/chakshu-ai.tcyr — they need
 # the AI dep chain that only the shu-ai build carries.
 include "src/proc.cyr"
+# darshana — for the signalfd teardown regression guard below. It is already a
+# [deps.darshana] module of this manifest, so no new dependency is introduced.
+include "lib/darshana.cyr"
+
+# Read /proc/self/status and report whether SigBlk is all-zero (no signal
+# blocked). Returns 1 = clear, 0 = something blocked, -1 = could not read.
+# Used by the signalfd teardown guard: tty_open_signalfd does a SIG_BLOCK, so
+# a teardown that only closes the fd strands the mask for the process lifetime.
+fn _test_sigblk_clear() {
+    var sbuf[8192];
+    var n = file_read_all("/proc/self/status", &sbuf, 8191);
+    if (n < 0) { return 0 - 1; }
+    store8(&sbuf + n, 0);
+    var off = strstr(&sbuf, "SigBlk:");
+    if (off < 0) { return 0 - 1; }
+    var i = off + 7;
+    var clear = 1;
+    while (load8(&sbuf + i) != 10) {
+        var c = load8(&sbuf + i);
+        # skip the tab/space padding between the key and the hex value
+        if (c != 9) { if (c != 32) { if (c != 48) { clear = 0; } } }
+        i = i + 1;
+    }
+    return clear;
+}
 
 fn main() {
     alloc_init();
@@ -36,6 +61,28 @@ fn main() {
     # Fixtures are real /proc shapes captured from a Linux box; null
     # terminators come for free with cstring literals so strstr/atoi
     # in the parsers have a valid buffer.
+
+    # ----- Signal-mask hygiene (regression guard for src/tui.cyr) ------
+    # tui_run opens two signalfds via darshana's tty_open_signalfd, which
+    # SIG_BLOCKs the mask before creating the fd. Through v0.7.12 the teardown
+    # closed them with a bare file_close(), which leaves HUP/INT/TERM (and
+    # WINCH) blocked for the rest of the process — latent while chakshu exits
+    # immediately afterwards, a real defect the moment tui_run returns to
+    # anything that keeps running, since a blocked mask also survives execve.
+    # These assertions pin darshana's block/unblock contract that the fixed
+    # teardown depends on. Observed masks: 0x08004003 held, 0x0 after close.
+    test_group("signalfd teardown — SIG_BLOCK must not leak");
+    assert_eq(_test_sigblk_clear(), 1, "SigBlk is clear before any signalfd");
+    var _sfd = tty_open_signalfd(TTY_SIGMASK_EXIT);
+    assert(_sfd >= 0, "tty_open_signalfd(TTY_SIGMASK_EXIT) returns an fd");
+    assert_eq(_test_sigblk_clear(), 0, "holding a signalfd blocks its signals");
+    assert_eq(tty_close_signalfd(_sfd, TTY_SIGMASK_EXIT), 0, "tty_close_signalfd succeeds");
+    assert_eq(_test_sigblk_clear(), 1, "tty_close_signalfd releases the mask");
+
+    var _sfd_w = tty_open_signalfd(TTY_SIGMASK_WINCH);
+    assert(_sfd_w >= 0, "tty_open_signalfd(TTY_SIGMASK_WINCH) returns an fd");
+    tty_close_signalfd(_sfd_w, TTY_SIGMASK_WINCH);
+    assert_eq(_test_sigblk_clear(), 1, "WINCH mask released too");
 
     test_group("proc.cyr — meminfo field extraction");
     var mi = "MemTotal:       62662196 kB\nMemFree:        58880840 kB\nMemAvailable:   60482036 kB\nBuffers:            2664 kB\n";

@@ -2,7 +2,52 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [Unreleased] — slated for 0.7.13 (P-1 audit / hardening sweep)
+
+v0.7.13 is scoped as a **P-1 audit, refactor, hardening, optimization and security
+sweep** with repairs. Items land here as they're fixed.
+
+### Fixed
+
+- **Signal-mask leak in the TUI teardown (`src/tui.cyr`).** `tui_run` opens two
+  signalfds through darshana's `tty_open_signalfd`, which does a **`SIG_BLOCK`
+  before creating the fd**. The teardown closed them with a bare `file_close()`,
+  which releases the descriptor but **not** the mask — leaving `SIGHUP`/`SIGINT`/
+  `SIGTERM` and `SIGWINCH` blocked for the rest of the process. Now torn down with
+  `tty_close_signalfd(fd, sigmask)`, darshana's teardown counterpart, which closes
+  **and** `SIG_UNBLOCK`s, passed the same mask the matching open was given. It
+  unblocks-what-was-blocked rather than save/restore, which is what this site needs:
+  chakshu holds two signalfds at once, and a `SIG_SETMASK` restore would have the
+  first close stomp the second one's block.
+
+  Measured, reading `SigBlk` from `/proc/self/status`:
+
+  | Stage | `SigBlk` |
+  |---|---|
+  | before any open | `0x0000000000000000` |
+  | both signalfds held | `0x0000000008004003` (HUP\|INT\|TERM\|WINCH) |
+  | **after bare `file_close`** (the pre-fix path) | `0x0000000008004003` — **leaked** |
+  | after `tty_close_signalfd` ×2 (the fix) | `0x0000000000000000` |
+
+  The leak was **latent, not live**: `tui_run` returns straight to `main`, which
+  exits, and the kernel discards the mask with the process. It becomes a real defect
+  the moment `tui_run` returns to anything that keeps running — `--watch` is the
+  obvious candidate — and a blocked mask also survives `execve`. Audited for other
+  exit paths: the two early `return EXIT_ERR`s both precede the signalfd opens, and
+  there is no direct `syscall(60)` anywhere in `src/`, so the single teardown site is
+  exhaustive. darshana 1.0.0's `tty_close_signalfd` docstring names chakshu's
+  two-signalfd pattern as the case it was written for.
+
+### Added
+
+- **Regression coverage for the above, at both levels.** `tests/chakshu.tcyr` gains a
+  `signalfd teardown — SIG_BLOCK must not leak` group (**57 → 64 assertions**) that
+  pins darshana's block/unblock contract against the live kernel: `SigBlk` clear
+  before the open, non-clear while an fd is held, clear again after
+  `tty_close_signalfd`, for both the EXIT and WINCH masks. Because that guards the
+  *mechanism* rather than the call site, `ci.yml`'s pattern scan also now fails on
+  `file_close(sfd…)` anywhere in `src/` — verified to fire on the pre-fix line and
+  to pass on the fixed source.
 
 ## [0.7.12] — 2026-08-24 — Interim refresh: Cyrius 6.5.35 + darshana 1.0.0 + mihi 1.2.4 + ai-hwaccel 2.3.18
 

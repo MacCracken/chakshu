@@ -1219,8 +1219,24 @@ fn tui_run(refresh_ms, sort_key, top_n, color_mode, focus_pid) {
     }
 
     _tui_teardown();
-    if (sfd_exit  >= 0) { file_close(sfd_exit); }
-    if (sfd_winch >= 0) { file_close(sfd_winch); }
+    # Close the signalfds through darshana's teardown counterpart, NOT a bare
+    # `file_close`. `tty_open_signalfd` does a SIG_BLOCK before creating the fd;
+    # closing the fd alone leaves HUP/INT/TERM (and WINCH) blocked for the rest
+    # of the process. `tty_close_signalfd(fd, sigmask)` closes AND SIG_UNBLOCKs,
+    # and must be passed the SAME mask the matching open was given.
+    #
+    # It unblocks-what-was-blocked rather than save/restore, which is exactly
+    # what this call site needs: we hold TWO signalfds at once, and a
+    # SIG_SETMASK-style restore would have the first close stomp the second
+    # one's block. darshana's docstring names this two-signalfd pattern
+    # explicitly — chakshu is the consumer it was written for.
+    #
+    # The leak is latent today (we return straight to main, which exits, and
+    # the kernel discards the mask with the process) — but it is a real defect
+    # the moment tui_run returns to anything that keeps running, and a blocked
+    # mask survives execve. Fixed here rather than left as a trap for `--watch`.
+    if (sfd_exit  >= 0) { tty_close_signalfd(sfd_exit,  TTY_SIGMASK_EXIT); }
+    if (sfd_winch >= 0) { tty_close_signalfd(sfd_winch, TTY_SIGMASK_WINCH); }
     if (epfd      >= 0) { file_close(epfd); }
     return EXIT_OK;
     #endif
