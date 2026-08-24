@@ -2,10 +2,145 @@
 
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — slated for 0.7.13 (P-1 audit / hardening sweep)
+## [Unreleased]
 
-v0.7.13 is scoped as a **P-1 audit, refactor, hardening, optimization and security
-sweep** with repairs. Items land here as they're fixed.
+## [0.7.13] — 2026-08-24 — P-1 sweep: audit, hardening, optimization, security
+
+A **P-1 audit, refactor, hardening, optimization and security sweep** with repairs —
+not a feature cut. Scope is the whole tree rather than a milestone slice. The audit
+covered seven dimensions (memory/bounds, error handling, security/privacy,
+signal+resource hygiene, binary size, performance, test coverage); every finding was
+adversarially re-verified against a real build before being acted on, and 10 of 58
+candidate findings were refuted and dropped. Tests: lean **64 → 77**, AI **13 → 21**,
+PTY **7 → 9**.
+
+### Security
+
+- **Untrusted `/proc` bytes reached the terminal and the LLM prompt unfiltered.**
+  `/proc/<pid>/cmdline` and `/proc/<pid>/stat`'s `comm` are fully attacker-controlled
+  (argv rewrite, `prctl(PR_SET_NAME)`), and this kernel does **not** escape `comm`
+  inside the parens. The only transform was NUL→space, so raw `0x1B`/`0x0A` flowed to
+  stdout, the alt-screen, and `src/ai.cyr`'s prompt. **Reproduced**: one unprivileged
+  process produced *two* output lines from `shu -p`, the second a syntactically perfect
+  forged table row (`999 R 100 99 fake-root-shell`), with live `^[[31m` escapes on the
+  wire — also a design-spec §2 violation ("plain mode … no terminfo escapes"). Now
+  scrubbed at the two choke points: `_proc_read_cmdline` (`src/processes.cyr`) and the
+  comm copy in `proc_pid_stat_parse` (`src/proc.cyr`). NUL still maps to space (it is
+  argv's separator, and reordering would collapse tokens and blind the redactor); every
+  other C0 byte and DEL becomes `?`; bytes ≥ 0x80 pass through so UTF-8 survives.
+- **The secret redactor missed the two most common real credential shapes.** The
+  pattern `[Pp]assword|[Tt]oken|[Ss]ecret|[Kk][Ee][Yy]|[Pp]asswd` case-folded only the
+  *leading* letter, so `PASSWORD=`, `TOKEN=`, `SECRET=`, `PASSWD=` and
+  `MYSQL_ROOT_PASSWORD=` shipped their values verbatim to hoosh. Separately, only
+  `key=value` was ever examined, so `psql --password hunter2` (value in the *next*
+  token), JWTs, `AKIA…` keys and `postgres://user:pass@host` all passed through whole.
+  Now `(?i)`-folded with a deliberately **wide** vocabulary (`password|passwd|secret|
+  token|key|auth|bearer|credential|api|session`), plus a cross-token lookback for
+  space-separated values and shape rules for JWT / AWS key-id / URL userinfo. The wide
+  vocabulary over-redacts some benign arguments (`monkey` matches `key`) — an accepted
+  trade: a redacted benign token costs prompt quality, a missed secret costs the secret.
+  URL userinfo redacts only the password, keeping scheme/user/host as useful context.
+- **Kill confirm was bypassable by typeahead.** A single `write(pty, "ky")` burst sent
+  SIGTERM with the prompt never drawn — `tui_run`'s drain loop dispatches every buffered
+  byte in one pass, so `k` armed CONFIRM and `y` answered it in the same tick. It also
+  fired from ordinary typing (`risky` in filter mode) and from pasted text. Entering
+  CONFIRM now flushes both the userspace readahead **and** the kernel tty queue
+  (`TCFLSH`/`TCIFLUSH` — flushing only userspace is insufficient), and a 250 ms dwell
+  treats anything arriving sooner as typeahead and cancels. Verified both directions:
+  the burst no longer kills, and human-paced `k` … `y` still does.
+
+### Fixed
+
+- **~44 KB/frame memory leak in the TUI (design-spec §8 breach).** `processes_sample1`
+  and `processes_sample2` each called `dir_list()` per frame, which `str_clone()`s every
+  `/proc` entry out of a `Vec` — and cyrius's allocator is a **bump allocator with no
+  free**. **Measured over 400 frames**: RSS climbed 4,556 → 12,748 kB, blowing the 8 MB
+  budget in ~90 s of ordinary use. Now uses `dir_list_into()` with buffers allocated
+  once, plus a hoisted `str_from("/proc")` (it allocated a 16-byte header per call).
+  **Measured after: flat at 4,900 kB across the same 400 frames.** On overflow it
+  degrades to a clamped copy rather than the empty table `dir_list_into`'s error return
+  would produce — a truncated view is never worse than a blank one. `processes_sample2`
+  also now calls `_proc_ensure_init()`, which it never did (it relied on sample1 first).
+- **The monitor omitted the busiest process on busy hosts.** The `/proc` walk breaks at
+  `PROC_MAX` *before* the sort runs, so above that ceiling the table was an arbitrary
+  1024-process prefix — the exact thing the tool exists to surface could be missing
+  (reproduced upstream on a 1197-proc box: a 103%-CPU burner absent from `-p --top 5`,
+  three of five rows being 0% kernel threads). `PROC_MAX` **1024 → 8192**, hard-coupled
+  to `_tui_filtered_idx`, which is indexed without a bounds check. This deliberately
+  forfeits a measured −57,344 B binary saving (shrinking that array instead); on AGNOS
+  servers >1024 processes is ordinary and correctness wins.
+- **Negative transfer rates.** `_snap_print_rate_bps` had no sign test, so a counter
+  going backwards — an interface or disk disappearing between the two samples — printed
+  `net: rx -8665120 B/s` on the `-p` contract line. Clamped at the single choke point
+  all eight rate values flow through.
+- **Silent sentinels rendered as confident facts.** `mihi_uptime_secs()` returning −1
+  rendered `up: 0d 00:00`; `mihi_cpu_count()` returning −1 rendered `(-1 cores)`. Both
+  now render `--d --:--` / `unknown cores` with no exit-code change — a bad field must
+  not discard an otherwise good snapshot.
+- **Truncated `/proc/diskstats` reported stale totals as current.** An early `return 0`
+  on a mid-line truncation skipped both `store64`s, so the caller kept its previous
+  out-param values *and* got a success code. Now `break`s and stores the partial totals,
+  matching what `proc_netdev_agg` already did.
+- **Focus panel could render the previous frame's data as current.** `status_buf` was
+  NUL-terminated only when the read succeeded, but the three `proc_meminfo_field` parses
+  ran unconditionally over that reused stack buffer. Now init-then-guard, mirroring the
+  shape already shipping in `src/ai.cyr`.
+- **`proc_pid_stat_parse` left `out_rec` uninitialised on its three early returns**, so
+  a caller ignoring the rc would `strlen()` past the 48-byte record and write raw stack
+  bytes to the terminal. Not reachable through today's procfs — hardening.
+- **Three stderr diagnostics silently lost their newline** (hand-counted lengths of
+  42/47/45 against actual 43/48/46) — a design-spec §9 violation, and the same trap
+  `cli.cyr` already warns has "bitten us twice". Now `eprintln()`, which uses `strlen`.
+- **`shu -p --pid N` silently discarded `--pid`** while a *bad* pid still exited 1 via
+  the parse-time probe — the flag was half-honoured. Now rejected with exit 2.
+
+### Performance
+
+- **Sort rewritten to shift-hole insertion.** The previous form swapped adjacent records
+  with **three** `memcpy(48)` calls per step, and `lib/string.cyr`'s memcpy is a byte
+  loop — 144 bytes moved one at a time per shift. Lifting the record into a hole once
+  costs one memcpy per step (~2.85× faster, measured upstream). Output is byte-identical
+  and stability is preserved by the same strict `> 0` test. This matters far more now
+  that `PROC_MAX` is 8192, where the old form cost roughly 1.5 s on `--sort mem`.
+
+### Added — tests
+
+- **Sort-comparator units** (`tests/chakshu.tcyr`). Sort *direction* had zero coverage:
+  mutation-testing showed that inverting the CPU and MEM comparators left smoke, the
+  unit suite and the PTY suite **all green** while the busiest process vanished. Confirmed
+  during this cut — `scripts/smoke.sh` still passes on the inverted mutant; the new units
+  fail it.
+- **Control-byte comm assertions**, pinning that no C0/DEL byte survives the parser. The
+  existing comm assertions were printable-only. Verified non-vacuous: reverting the scrub
+  produces 4 failures.
+- **Seven redaction assertions** (`ai/tests/chakshu-ai.tcyr`) covering uppercase keys,
+  compound env keys, space-separated values, JWT/AWS/URL-userinfo shapes, plus two
+  over-fire pins so the new lookback cannot swallow a following benign token. All seven
+  **failed before** the fix.
+- **PTY scenarios 8 and 9** — the `ky` typeahead burst must not kill, and human-paced
+  `k`/`y` must. Scenario 8 fails against the pre-fix binary and passes against the fixed
+  one; scenario 9 guards against "fixing" the bypass by breaking the real kill. Both gate
+  on the alt-screen escape rather than a sleep, so they do not race startup.
+- **Deleted a vacuous test.** `tests/chakshu.tcyr`'s "version string shape" group declared
+  its own `var v = "chakshu 0.3.0"` and asserted the prefix and length *of that literal* —
+  it passed unchanged when the literal was replaced with `"chakshu 99.99.99-BOGUS"`, and
+  could never see `CHAKSHU_VERSION` (the suite includes only `proc.cyr` + `darshana.cyr`).
+  The real cross-file invariant is already enforced by `ci.yml`'s version-consistency step.
+
+### Known / carried forward
+
+- **Lean `shu` is 861,448 B** against design-spec §8's `< 256 KB` (~3.4× over). The
+  measured size plan lands at 424,784 B (−50.4%) but its single largest item — dropping
+  `bayan`, −353,624 B — is **upstream-blocked**: `cyrius deps` re-vendors it from
+  ai-hwaccel's `dist/*.deps` sidecar regardless of this manifest, and ai-hwaccel would
+  need to move `profile_from_json*` behind a profile first. Even the full sweep leaves
+  the lean monitor ~1.66× over, so §8's target needs revising or taking upstream.
+- Not yet applied from the sweep: `R7(b,c)` (truncation detection + heap scratch),
+  `R10` (line-anchored `/proc/status` field parsing — `prctl(PR_SET_NAME,"Uid:0")` can
+  currently spoof the focus panel *and* the AI prompt into reporting uid 0), `R14`/`R15`
+  (signal disposition in the `?` overlay and on degraded launch), `R16` (`mihi_mem_free`
+  sentinel), `R19`/`R20` (CI gates), `R21` (7-digit-PID row width). Each is specified with
+  a verified fix in the sweep plan.
 
 ### Fixed
 

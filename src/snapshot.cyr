@@ -32,6 +32,14 @@ fn _snap_print_pad2(n) {
 # will show one decimal at M2). Matches the design-spec §4 mockup
 # style ("↓ 2.4M/s") modulo the decimal.
 fn _snap_print_rate_bps(bps) {
+    # R13 (v0.7.13): clamp negatives. Rates are a delta between two samples of a
+    # monotonic counter, but the counter set is NOT stable across the window — an
+    # interface or disk disappearing between samples makes the second total smaller
+    # and the delta negative. Without this, `bps < 1024` catches the negative and
+    # print_num emits a literal minus: "net: rx -8665120 B/s" on the -p contract
+    # line. Single choke point: all eight *_bps values flow through here, so this
+    # covers both plain mode and the TUI.
+    if (bps < 0) { bps = 0; }
     if (bps < 1024) {
         print_num(bps);
         syscall(1, 1, " B/s", 4);
@@ -56,6 +64,13 @@ fn _snap_print_rate_bps(bps) {
 # 400 days gets "400d HH:MM", which is the right call — truncating
 # would lie about the box's age).
 fn snapshot_print_uptime(secs) {
+    # R17 (v0.7.13): honour the -1 sentinel this function's own contract already
+    # implies. mihi_uptime_secs() returns -1 when /proc/uptime is unreadable, and
+    # the arithmetic below then renders it as a confident "up: 0d 00:00" with exit
+    # 0 and empty stderr — a plausible-looking lie. Handled here rather than at the
+    # three call sites so plain mode and both TUI frames are fixed at once. No
+    # eprint and no exit-code change: a bad uptime must not discard a good snapshot.
+    if (secs < 0) { syscall(1, 1, "--d --:--", 9); return 0; }
     var days = secs / 86400;
     var rem  = secs - days * 86400;
     var hrs  = rem / 3600;
@@ -132,8 +147,16 @@ fn snapshot_print(sort_key, top_n) {
         syscall(1, 1, cpu_model, strlen(cpu_model));
     }
     syscall(1, 1, " (", 2);
-    print_num(mihi_cpu_count());
-    syscall(1, 1, " cores)\n", 8);
+    # R18 (v0.7.13): mihi_cpu_count() returns -1 on I/O failure and 0 on a parse
+    # miss; either printed verbatim yields "proc: <model> (-1 cores)" in the
+    # "sacred" -p output. `> 0` covers both sentinels.
+    var ncpu = mihi_cpu_count();
+    if (ncpu > 0) {
+        print_num(ncpu);
+        syscall(1, 1, " cores)\n", 8);
+    } else {
+        syscall(1, 1, "unknown cores)\n", 15);
+    }
 
     # Line 3.5: GPU / accelerators (only if present) ------------------
     # chakshu's first GPU surface. mihi probes ai-hwaccel under the
@@ -214,9 +237,13 @@ fn snapshot_print(sort_key, top_n) {
     var s2n = proc_read("/proc/stat",      &sb1, 8192);
     var d2n = proc_read("/proc/diskstats", &db1, 8192);
     var n2n = proc_read("/proc/net/dev",   &nb1, 8192);
-    if (s2n < 0) { eprint("chakshu: cannot read /proc/stat (resample)\n", 42);      return EXIT_ERR; }
-    if (d2n < 0) { eprint("chakshu: cannot read /proc/diskstats (resample)\n", 47); return EXIT_ERR; }
-    if (n2n < 0) { eprint("chakshu: cannot read /proc/net/dev (resample)\n", 45);   return EXIT_ERR; }
+    # R22 (v0.7.13): these three hand-counted lengths were each one short (42/47/45
+    # vs 43/48/46), silently truncating the trailing newline off the diagnostic —
+    # a design-spec §9 violation, and the same hand-counting trap cli.cyr already
+    # warns has "bitten us twice". eprintln() computes the length with strlen().
+    if (s2n < 0) { eprintln("chakshu: cannot read /proc/stat (resample)");      return EXIT_ERR; }
+    if (d2n < 0) { eprintln("chakshu: cannot read /proc/diskstats (resample)"); return EXIT_ERR; }
+    if (n2n < 0) { eprintln("chakshu: cannot read /proc/net/dev (resample)");   return EXIT_ERR; }
 
     var cpu_active2 = 0;
     var cpu_total2  = 0;

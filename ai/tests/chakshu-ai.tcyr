@@ -53,6 +53,47 @@ fn main() {
     ai_redact_cmdline(c6, strlen(c6), &rbuf, 256);
     assert_eq(streq(&rbuf, "--port=8080 --host=localhost"), 1, "benign key=value tokens untouched");
 
+    # ---- R1/R2 (v0.7.13 P-1 sweep) — real credential shapes that used to
+    # ship VERBATIM to hoosh. Each of these failed before the sweep.
+
+    # R1: the old pattern case-folded only the LEADING letter, so every
+    # SCREAMING_CASE environment-style key leaked its value.
+    var u1 = "PASSWORD=hunter2 TOKEN=abc SECRET=s PASSWD=p";
+    ai_redact_cmdline(u1, strlen(u1), &rbuf, 256);
+    assert_eq(streq(&rbuf, "PASSWORD=*** TOKEN=*** SECRET=*** PASSWD=***"), 1, "uppercase secret keys redacted");
+
+    var u2 = "docker run -e MYSQL_ROOT_PASSWORD=s3cr3t nginx";
+    ai_redact_cmdline(u2, strlen(u2), &rbuf, 256);
+    assert_eq(streq(&rbuf, "docker run -e MYSQL_ROOT_PASSWORD=*** nginx"), 1, "compound uppercase env key redacted");
+
+    # R2a: space-separated value — the secret is the NEXT token, not after '='.
+    var u3 = "psql --password hunter2 --host db";
+    ai_redact_cmdline(u3, strlen(u3), &rbuf, 256);
+    assert_eq(streq(&rbuf, "psql --password *** --host db"), 1, "space-separated secret value redacted");
+
+    # R2b: shape rules — these carry no key at all.
+    var u4 = "curl -H eyJhbGciOiJIUzI1NiJ9.payload.sig";
+    ai_redact_cmdline(u4, strlen(u4), &rbuf, 256);
+    assert_eq(streq(&rbuf, "curl -H ***"), 1, "JWT redacted by shape");
+
+    var u5 = "aws --key AKIAIOSFODNN7EXAMPLE";
+    ai_redact_cmdline(u5, strlen(u5), &rbuf, 256);
+    assert_eq(streq(&rbuf, "aws --key ***"), 1, "AWS access key id redacted");
+
+    var u6 = "psql postgres://bob:hunter2@db.internal/app";
+    ai_redact_cmdline(u6, strlen(u6), &rbuf, 256);
+    assert_eq(streq(&rbuf, "psql postgres://bob:***@db.internal/app"), 1, "URL userinfo password redacted, host kept");
+
+    # R2 over-fire pin: a secret key WITH '=' must NOT arm the lookback and
+    # swallow the following benign token.
+    var u7 = "--password=hunter2 --port=8080";
+    ai_redact_cmdline(u7, strlen(u7), &rbuf, 256);
+    assert_eq(streq(&rbuf, "--password=*** --port=8080"), 1, "lookback does not over-fire after key=value");
+
+    var u8 = "myapp --keyring-path /etc/app --port 8080";
+    ai_redact_cmdline(u8, strlen(u8), &rbuf, 256);
+    assert_eq(streq(&rbuf, "myapp --keyring-path *** --port 8080"), 1, "lookback fires once, next flag pair intact");
+
     test_group("ai.cyr — prompt assembly");
     var pbuf[2048];
     var pl = ai_build_prompt(&pbuf, 2048, 1234, "nginx", 83, 1, 33, 4096, "--token=***", "load 0.1 0.2 0.3  mem 100/200 MiB");

@@ -22,6 +22,10 @@ SHA256SUMS.*
 *.core
 .claude/
 
+# Python bytecode from the PTY / hoosh-stub test harnesses
+__pycache__/
+*.pyc
+
 # IDE / OS
 .idea/
 .vscode/

@@ -243,7 +243,12 @@ fn proc_diskstats_agg(buf, n, out_sec_read, out_sec_writ) {
         _proc_next_uint(buf, &cursor);
         # device name
         var name_off = _proc_word_start(buf, &cursor);
-        if (cursor >= n) { return 0; }
+        # R7a (v0.7.13): `break`, not `return 0`. A truncated read (proc_read caps
+        # at the buffer size) lands mid-line; returning here skipped BOTH store64s
+        # below, so the caller kept whatever was already in its out-params and got
+        # a success code — stale totals reported as current. Breaking stores the
+        # partial totals, which is what proc_netdev_agg already does.
+        if (cursor >= n) { break; }
         _proc_skip_word(buf, &cursor);
         # 7 numeric fields up to and including sectors_written
         _proc_next_uint(buf, &cursor);                       # reads
@@ -352,6 +357,17 @@ fn proc_pid_path(pid_str, suffix, out_buf) {
 #
 # Returns 0 on success; non-zero on malformed input.
 fn proc_pid_stat_parse(buf, n, out_rec) {
+    # R23 (v0.7.13): zero the record up front. Three early `return 1` paths below
+    # precede every store, so on a malformed record out_rec keeps caller stack
+    # garbage; a caller that ignores the rc then runs strlen() over the comm field
+    # and walks past the 48-byte record, writing raw stack bytes to the terminal.
+    # Not reachable through today's procfs (the kernel emits the record whole and
+    # parenthesised) — this is hardening, and it makes the failure mode inert
+    # rather than relying on every caller to check.
+    store64(out_rec + 0,  0);
+    store64(out_rec + 8,  0);
+    store64(out_rec + 16, 0);
+    store8(out_rec + 24,  0);
     # Locate first '(' and last ')' — robust against comm containing
     # nested parens (rare but possible).
     var first_paren = 0 - 1;
@@ -399,9 +415,17 @@ fn proc_pid_stat_parse(buf, n, out_rec) {
     # Copy comm into out_rec+24, cap at 15 bytes + null.
     var copy_len = comm_len;
     if (copy_len > 15) { copy_len = 15; }
+    # Scrub control bytes on the way in. comm is attacker-controlled via
+    # prctl(PR_SET_NAME) and this kernel does NOT escape it inside /proc/<pid>/stat's
+    # parens, so an unfiltered copy leaks raw ESC/newline to every consumer at once
+    # (plain render, TUI table + focus, and src/ai.cyr's prompt). Unlike cmdline
+    # there is no separator semantics here, so all C0 and DEL become '?'.
     var k = 0;
     while (k < copy_len) {
-        store8(out_rec + 24 + k, load8(buf + comm_off + k));
+        var cc = load8(buf + comm_off + k);
+        if (cc < 32) { cc = 63; }
+        elif (cc == 127) { cc = 63; }
+        store8(out_rec + 24 + k, cc);
         k = k + 1;
     }
     while (k < 16) {

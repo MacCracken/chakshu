@@ -55,18 +55,88 @@ fn _ai_app_n(out, pos, cap, num) {
 # --- secret redaction (niyama re2) ------------------------------------
 
 # Lazily-compiled re2 NFA flagging a secret-looking key. Matches anywhere
-# in the key token (the part before '='): password / token / secret / key
-# / passwd, case-insensitive on the leading letter and on KEY. Compiled
-# once on first use. _tried guards against recompiling after a failure.
+# in the key token. Compiled once on first use; _tried guards against
+# recompiling after a failure.
+#
+# R1 (v0.7.13 P-1 sweep): the old pattern was
+# "[Pp]assword|[Tt]oken|[Ss]ecret|[Kk][Ee][Yy]|[Pp]asswd" — it case-folded only
+# the LEADING letter, so every SCREAMING_CASE environment-style key
+# (PASSWORD=, TOKEN=, SECRET=, PASSWD=, MYSQL_ROOT_PASSWORD=) shipped its value
+# verbatim to hoosh. `(?i)` folds the whole alternation.
+#
+# The vocabulary is deliberately WIDE (maintainer's call at the sweep): auth /
+# bearer / credential / api / session join the original five. This over-redacts
+# some benign arguments — "monkey" matches `key`, "rapid" matches `api` — and
+# that is the accepted trade: a redacted benign token costs prompt quality, a
+# missed secret costs the secret. Substring matching is intentional, so
+# MYSQL_ROOT_PASSWORD and --keyring-path both hit.
 var _ai_secret_nfa       = 0;
 var _ai_secret_nfa_tried = 0;
 
 fn _ai_secret_pattern_nfa() {
     if (_ai_secret_nfa_tried == 0) {
         _ai_secret_nfa_tried = 1;
-        _ai_secret_nfa = niyama_re2_compile("[Pp]assword|[Tt]oken|[Ss]ecret|[Kk][Ee][Yy]|[Pp]asswd");
+        _ai_secret_nfa = niyama_re2_compile("(?i)password|passwd|secret|token|key|auth|bearer|credential|api|session");
     }
     return _ai_secret_nfa;
+}
+
+# --- R2 shape detectors: credentials that carry no key at all ---------
+# The key=value scan cannot see these, so they used to pass through whole.
+
+# Does buf[off,end) begin with the cstring literal `lit`?
+fn _ai_tok_starts_with(buf, off, end, lit) {
+    var n = strlen(lit);
+    if (end - off < n) { return 0; }
+    var i = 0;
+    while (i < n) {
+        if (load8(buf + off + i) != load8(lit + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Token is a bare credential by SHAPE (no key to match on):
+#   eyJ...  a JWT (base64url of '{"' — every JWT header starts this way)
+#   AKIA/ASIA...  an AWS access key id
+fn _ai_tok_is_secret_shape(buf, off, end) {
+    if (_ai_tok_starts_with(buf, off, end, "eyJ")  == 1) { return 1; }
+    if (_ai_tok_starts_with(buf, off, end, "AKIA") == 1) { return 1; }
+    if (_ai_tok_starts_with(buf, off, end, "ASIA") == 1) { return 1; }
+    return 0;
+}
+
+# For a URL token carrying userinfo (scheme://user:pass@host), return the
+# offset of the ':' that starts the password. -1 if absent. Only the password
+# is redacted — the scheme, user and host stay, because they are exactly the
+# context that makes the AI answer useful.
+fn _ai_tok_userinfo_colon(buf, off, end) {
+    # locate "://"
+    var sep = 0 - 1;
+    var i = off;
+    while (i + 2 < end) {
+        if (load8(buf + i) == 58) {
+            if (load8(buf + i + 1) == 47) {
+                if (load8(buf + i + 2) == 47) { sep = i; break; }
+            }
+        }
+        i = i + 1;
+    }
+    if (sep < 0) { return 0 - 1; }
+    # scan the authority for ':' before '@'; '/' ends it first
+    var colon = 0 - 1;
+    var k = sep + 3;
+    while (k < end) {
+        var c = load8(buf + k);
+        if (c == 47) { return 0 - 1; }
+        if (c == 58) { if (colon < 0) { colon = k; } }
+        if (c == 64) {
+            if (colon >= 0) { return colon; }
+            return 0 - 1;
+        }
+        k = k + 1;
+    }
+    return 0 - 1;
 }
 
 # Is the key token buf[key_off, key_end) secret-looking? Copies the key
@@ -100,6 +170,11 @@ fn _ai_key_is_secret(buf, key_off, key_end) {
 fn ai_redact_cmdline(in_buf, in_len, out, cap) {
     var op = 0;
     var i = 0;
+    # R2 (v0.7.13): cross-token lookback. Declared OUTSIDE the loop so a bare
+    # secret-looking FLAG (`--password`, `--key`) can arm redaction of the token
+    # that follows it. Without this, `psql --password hunter2` shipped the
+    # password verbatim — only `key=value` was ever examined.
+    var carry = 0;
     while (i < in_len) {
         var tok_start = i;
         # token spans [tok_start, j) until next space or end
@@ -115,29 +190,103 @@ fn ai_redact_cmdline(in_buf, in_len, out, cap) {
             if (load8(in_buf + t) == 61) { eq = t; break; }
             t = t + 1;
         }
-        var redact = 0;
-        if (eq >= 0) {
-            if (_ai_key_is_secret(in_buf, tok_start, eq) == 1) { redact = 1; }
+
+        var handled = 0;
+
+        # (1) The previous token was a bare secret-looking flag, so THIS token is
+        # its value. Only fires for a token without '=' — `--password=x --port=y`
+        # must not swallow `--port=y`.
+        if (carry == 1) {
+            carry = 0;
+            if (eq < 0) {
+                var s1 = 0;
+                while (s1 < 3) {
+                    if (op < cap - 1) { store8(out + op, 42); op = op + 1; }
+                    s1 = s1 + 1;
+                }
+                handled = 1;
+            }
         }
-        if (redact == 1) {
-            # copy key + '=' verbatim, then "***"
-            var k = tok_start;
-            while (k <= eq) {
-                if (op < cap - 1) { store8(out + op, load8(in_buf + k)); op = op + 1; }
-                k = k + 1;
+
+        # (2) key=value with a secret-looking key, or a value that is a bare
+        # credential by shape (e.g. --data=eyJ...).
+        if (handled == 0) {
+            if (eq >= 0) {
+                var hit = 0;
+                if (_ai_key_is_secret(in_buf, tok_start, eq) == 1) { hit = 1; }
+                if (_ai_tok_is_secret_shape(in_buf, eq + 1, j) == 1) { hit = 1; }
+                if (hit == 1) {
+                    var k = tok_start;
+                    while (k <= eq) {
+                        if (op < cap - 1) { store8(out + op, load8(in_buf + k)); op = op + 1; }
+                        k = k + 1;
+                    }
+                    var s2 = 0;
+                    while (s2 < 3) {
+                        if (op < cap - 1) { store8(out + op, 42); op = op + 1; }
+                        s2 = s2 + 1;
+                    }
+                    handled = 1;
+                }
             }
-            var s = 0;
-            while (s < 3) {
-                if (op < cap - 1) { store8(out + op, 42); op = op + 1; }  # '*'
-                s = s + 1;
+        }
+
+        # (3) URL userinfo: scheme://user:pass@host — redact only the password,
+        # keeping scheme/user/host, which are the useful context.
+        if (handled == 0) {
+            var uc = _ai_tok_userinfo_colon(in_buf, tok_start, j);
+            if (uc >= 0) {
+                var a = tok_start;
+                while (a <= uc) {
+                    if (op < cap - 1) { store8(out + op, load8(in_buf + a)); op = op + 1; }
+                    a = a + 1;
+                }
+                var s3 = 0;
+                while (s3 < 3) {
+                    if (op < cap - 1) { store8(out + op, 42); op = op + 1; }
+                    s3 = s3 + 1;
+                }
+                # resume at the '@'
+                var b = uc;
+                while (b < j) {
+                    if (load8(in_buf + b) == 64) { break; }
+                    b = b + 1;
+                }
+                while (b < j) {
+                    if (op < cap - 1) { store8(out + op, load8(in_buf + b)); op = op + 1; }
+                    b = b + 1;
+                }
+                handled = 1;
             }
-        } else {
+        }
+
+        # (4) A bare credential by shape, with no key anywhere.
+        if (handled == 0) {
+            if (eq < 0) {
+                if (_ai_tok_is_secret_shape(in_buf, tok_start, j) == 1) {
+                    var s4 = 0;
+                    while (s4 < 3) {
+                        if (op < cap - 1) { store8(out + op, 42); op = op + 1; }
+                        s4 = s4 + 1;
+                    }
+                    handled = 1;
+                }
+            }
+        }
+
+        # (5) Nothing matched — copy verbatim. If this token is itself a bare
+        # secret-looking flag, arm the lookback for the next one.
+        if (handled == 0) {
+            if (eq < 0) {
+                if (_ai_key_is_secret(in_buf, tok_start, j) == 1) { carry = 1; }
+            }
             var c = tok_start;
             while (c < j) {
                 if (op < cap - 1) { store8(out + op, load8(in_buf + c)); op = op + 1; }
                 c = c + 1;
             }
         }
+
         # re-emit the single token separator (space), then advance
         if (j < in_len) {
             if (op < cap - 1) { store8(out + op, 32); op = op + 1; }

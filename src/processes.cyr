@@ -22,7 +22,19 @@
 # read cmdline for the post-sort top-N rather than every pid.
 
 var PROC_REC_SIZE      = 48;
-var PROC_MAX           = 1024;
+# R5 (v0.7.13 P-1 sweep): raised 1024 -> 8192. The walk below breaks at
+# PROC_MAX *before* the sort runs, so on a host with more than PROC_MAX
+# processes the busiest one was simply absent from the table — the monitor
+# silently omitted exactly what it exists to show (reproduced on a 1197-proc
+# box: a 103%-CPU burner missing from `-p --top 5`, three of five rows being
+# 0% kernel threads). 8192 is a HARD ceiling, coupled to _tui_filtered_idx in
+# src/tui.cyr, which is a module-scope array of exactly 8192 u64 slots and is
+# indexed without a bounds check. Raise both together or neither.
+var PROC_MAX           = 8192;
+# Name arena for the /proc directory scan (R4). 16 bytes/entry average is
+# generous: pid names are <= 7 chars, and the longest non-pid entry in /proc
+# ("thread-self") is 11.
+var PROC_NAMES_CAP     = 131072;
 var PROC_DEFAULT_TOPN  = 10;
 
 # Sort-key constants for processes_sample2 / _proc_cmp.
@@ -37,9 +49,13 @@ var SORT_NAME = 3;   # comm asc (lexicographic)
 var PROC_CMDLINE_MAX = 256;
 
 # Lazy module globals — alloc'd on first sample, reused across calls.
-var _proc_recs = 0;
-var _proc_n    = 0;
-var _proc_map  = 0;
+var _proc_recs  = 0;
+var _proc_n     = 0;
+var _proc_map   = 0;
+# R4 (v0.7.13): preallocated once, reused every frame. See _proc_scan_pids.
+var _proc_names = 0;
+var _proc_offs  = 0;
+var _proc_dir   = 0;
 
 fn _proc_ensure_init() {
     if (_proc_recs == 0) {
@@ -48,18 +64,67 @@ fn _proc_ensure_init() {
     if (_proc_map == 0) {
         _proc_map = map_u64_new();
     }
+    if (_proc_names == 0) {
+        _proc_names = alloc(PROC_NAMES_CAP);
+    }
+    if (_proc_offs == 0) {
+        _proc_offs = alloc(PROC_MAX * 8);
+    }
+    if (_proc_dir == 0) {
+        # str_from() allocates a 16-byte Str header per call; hoisted so the
+        # two per-frame calls stop leaking one each.
+        _proc_dir = str_from("/proc");
+    }
     return 0;
+}
+
+# Scan /proc into the preallocated name arena. Returns the entry count.
+#
+# R4 (v0.7.13): this replaces two per-frame `dir_list()` calls. dir_list
+# str_clone()s every entry out of a Vec, and cyrius's allocator is a bump
+# allocator with no free — so the TUI leaked ~44 KB per frame at 1 Hz, taking
+# RSS from 4.5 MB to 12.7 MB in 200 s and breaching design-spec Section 8's
+# 8 MB budget in about 90 seconds of ordinary use. dir_list_into() writes into
+# caller-owned memory and allocates nothing.
+fn _proc_scan_pids() {
+    _proc_ensure_init();
+    var scratch[4096];
+    var rc = dir_list_into(_proc_dir, &scratch, 4096,
+                           _proc_names, PROC_NAMES_CAP, _proc_offs, PROC_MAX);
+    if (rc >= 0) { return rc; }
+    # Clamp fallback. dir_list_into bails on the FIRST overflow and discards
+    # its running count, so returning rc here would render an EMPTY process
+    # table — strictly worse than the truncated-but-populated table we have
+    # today. Degrade to the allocating dir_list and copy in what fits.
+    # Deliberately near-unreachable: PROC_MAX 8192 and a 128 KB arena sit far
+    # above any real /proc, so the leaky path is a safety net, not a mode.
+    var entries = dir_list(_proc_dir);
+    var count = 0;
+    var npos  = 0;
+    var i = 0;
+    while (i < vec_len(entries)) {
+        if (count >= PROC_MAX) { break; }
+        var nm   = str_data(vec_get(entries, i));
+        var nlen = strlen(nm);
+        if (npos + nlen + 1 > PROC_NAMES_CAP) { break; }
+        store64(_proc_offs + count * 8, npos);
+        memcpy(_proc_names + npos, nm, nlen);
+        store8(_proc_names + npos + nlen, 0);
+        npos  = npos + nlen + 1;
+        count = count + 1;
+        i = i + 1;
+    }
+    return count;
 }
 
 # Sample 1 — populate _proc_map[pid] = utime+stime.
 fn processes_sample1() {
     _proc_ensure_init();
     map_u64_clear(_proc_map);
-    var entries = dir_list(str_from("/proc"));
+    var scanned = _proc_scan_pids();
     var i = 0;
-    while (i < vec_len(entries)) {
-        var nstr = vec_get(entries, i);
-        var name = str_data(nstr);
+    while (i < scanned) {
+        var name = _proc_names + load64(_proc_offs + i * 8);
         if (proc_is_pid_name(name) == 1) {
             var pid = atoi(name);
             var path[64];
@@ -112,12 +177,13 @@ fn _proc_cmp(a, b, sort_key) {
 # re-walking /proc.
 fn processes_sample2(total_delta, ncores, sort_key) {
     _proc_n = 0;
-    var entries = dir_list(str_from("/proc"));
+    # R4: _proc_scan_pids() also calls _proc_ensure_init(), which sample2
+    # previously never did — it relied on sample1 having run first.
+    var scanned = _proc_scan_pids();
     var i = 0;
-    while (i < vec_len(entries)) {
+    while (i < scanned) {
         if (_proc_n >= PROC_MAX) { break; }
-        var nstr = vec_get(entries, i);
-        var name = str_data(nstr);
+        var name = _proc_names + load64(_proc_offs + i * 8);
         if (proc_is_pid_name(name) == 1) {
             var pid = atoi(name);
             var path[64];
@@ -151,26 +217,33 @@ fn processes_sample2(total_delta, ncores, sort_key) {
         i = i + 1;
     }
 
-    # Insertion sort under the chosen comparator. ~1024 records max →
-    # 1M cmps worst case; in practice ~300 procs, mostly already in
-    # the right order. Partial heapselect for the displayed top_n
-    # would help if perf tightens — not needed for the M1 budget.
+    # Insertion sort under the chosen comparator, shift-hole form.
+    #
+    # R6 (v0.7.13): the previous version swapped adjacent records with THREE
+    # memcpy(48) calls per shift step, and lib/string.cyr's memcpy is a byte
+    # loop — so every step moved 144 bytes one at a time. Lifting the record
+    # into a hole once and shifting predecessors up costs one memcpy per step
+    # plus two for the lift/drop: ~2.85x faster, measured. This matters far
+    # more now that R5 raised PROC_MAX to 8192, where the old form cost
+    # roughly 1.5 s on `--sort mem`.
+    #
+    # Output is byte-identical and stability is preserved: the strict `> 0`
+    # test means equal records never shift past one another.
     var s = 1;
     while (s < _proc_n) {
+        var tmp[48];
+        memcpy(&tmp, _proc_recs + s * PROC_REC_SIZE, PROC_REC_SIZE);
         var j = s;
         while (j > 0) {
-            var a = _proc_recs + j * PROC_REC_SIZE;
-            var b = _proc_recs + (j - 1) * PROC_REC_SIZE;
-            if (_proc_cmp(a, b, sort_key) > 0) {
-                var tmp[48];
-                memcpy(&tmp, b,    PROC_REC_SIZE);
-                memcpy(b,    a,    PROC_REC_SIZE);
-                memcpy(a,    &tmp, PROC_REC_SIZE);
+            var prev = _proc_recs + (j - 1) * PROC_REC_SIZE;
+            if (_proc_cmp(&tmp, prev, sort_key) > 0) {
+                memcpy(_proc_recs + j * PROC_REC_SIZE, prev, PROC_REC_SIZE);
                 j = j - 1;
             } else {
                 break;
             }
         }
+        memcpy(_proc_recs + j * PROC_REC_SIZE, &tmp, PROC_REC_SIZE);
         s = s + 1;
     }
     return 0;
@@ -208,9 +281,19 @@ fn _proc_read_cmdline(pid_str, out_buf, max_len) {
     proc_pid_path(pid_str, "/cmdline", &path);
     var n = file_read_all(&path, out_buf, max_len - 1);
     if (n <= 0) { return 0; }
+    # Scrub control bytes. /proc/<pid>/cmdline is FULLY attacker-controlled —
+    # any unprivileged process can rewrite its own argv — so a raw copy lets it
+    # inject ANSI escapes into the terminal and forge extra table rows with an
+    # embedded newline (design-spec §2: plain mode emits no terminfo escapes).
+    # NUL first: it is argv's separator and must become a space, not '?', or the
+    # tokens collapse and the AI redaction pass stops seeing argument boundaries.
+    # Every other C0 byte and DEL becomes '?'. Bytes >= 0x80 pass through (UTF-8).
     var i = 0;
     while (i < n) {
-        if (load8(out_buf + i) == 0) { store8(out_buf + i, 32); }
+        var c = load8(out_buf + i);
+        if (c == 0) { store8(out_buf + i, 32); }
+        elif (c < 32) { store8(out_buf + i, 63); }
+        elif (c == 127) { store8(out_buf + i, 63); }
         i = i + 1;
     }
     while (n > 0) {

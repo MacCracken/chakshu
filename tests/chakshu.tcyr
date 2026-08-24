@@ -8,6 +8,10 @@
 # prompt / JSON marshalling) live in ai/tests/chakshu-ai.tcyr — they need
 # the AI dep chain that only the shu-ai build carries.
 include "src/proc.cyr"
+# v0.7.13 P-1 sweep: processes.cyr joins the suite for the sort-comparator
+# units below. Its module globals stay unallocated (nothing here calls
+# _proc_ensure_init), so including it costs the suite nothing at runtime.
+include "src/processes.cyr"
 # darshana — for the signalfd teardown regression guard below. It is already a
 # [deps.darshana] module of this manifest, so no new dependency is introduced.
 include "lib/darshana.cyr"
@@ -49,13 +53,15 @@ fn main() {
     assert_eq(strlen("chakshu"), 7, "strlen of 'chakshu' is 7");
     assert_eq(strlen("shu"), 3, "strlen of binary 'shu' is 3");
 
-    # Version-string shape. Keep the literal here in sync with
-    # CHAKSHU_VERSION in src/main.cyr and with VERSION. A future CI
-    # check will enforce equality across the three.
-    test_group("version string shape");
-    var v = "chakshu 0.3.0";
-    assert(strlen(v) > 8, "version string is longer than 8 chars");
-    assert_eq(memeq(v, "chakshu ", 8), 1, "version string starts with 'chakshu '");
+    # NOTE (v0.7.13 P-1 sweep): a "version string shape" group used to sit here.
+    # It was vacuous — it declared its own `var v = "chakshu 0.3.0"` and then
+    # asserted the prefix and length OF THAT LITERAL, so it passed unchanged when
+    # the literal was replaced with "chakshu 99.99.99-BOGUS". It could never see
+    # CHAKSHU_VERSION at all: this suite includes only proc.cyr + darshana.cyr, and
+    # the constant lives in src/cli.cyr. Deleted rather than repaired — the real
+    # invariant (VERSION == CHANGELOG == cyrius.cyml == CHAKSHU_VERSION) is already
+    # enforced by .github/workflows/ci.yml's "Verify version consistency" step,
+    # which is where a cross-file check belongs.
 
     # ----- M1 Slice A — /proc parsers ---------------------------------
     # Fixtures are real /proc shapes captured from a Linux box; null
@@ -192,6 +198,70 @@ fn main() {
     assert_eq(load64(&srec2 + 8),  11, "ticks = 5+6");
     assert_eq(load64(&srec2 + 16), 99, "rss = 99");
     assert_eq(memeq(&srec2 + 24, "foo (bar) baz", 13), 1, "comm preserves internal parens");
+
+    # R3 regression (v0.7.13 P-1 sweep) — comm is attacker-controlled via
+    # prctl(PR_SET_NAME) and this kernel does NOT escape it inside /proc/<pid>/stat's
+    # parens. Before the scrub, raw ESC/newline flowed from here to stdout, the
+    # alt-screen, and the AI prompt: a process could forge a whole extra table row
+    # with an embedded \n and repaint the monitor with ANSI. Every C0 byte and DEL
+    # must arrive as '?' (63); bytes >= 0x80 are left alone so UTF-8 survives.
+    # The assertions above are printable-only and cannot catch this.
+    var stat_line3 = "100 (\x1b[31mEVIL\nX\x7f) S 1 1 1 0 -1 0 0 0 0 0 5 6 0 0 20 0 1 0 100 1024 99 0\n";
+    var srec3[48];
+    assert_eq(proc_pid_stat_parse(stat_line3, strlen(stat_line3), &srec3), 0, "control-byte comm parses");
+    assert_eq(load8(&srec3 + 24 + 0), 63, "ESC in comm scrubbed to '?'");
+    assert_eq(load8(&srec3 + 24 + 1), 91, "'[' after ESC preserved");
+    assert_eq(load8(&srec3 + 24 + 9), 63, "newline in comm scrubbed to '?'");
+    assert_eq(load8(&srec3 + 24 + 11), 63, "DEL in comm scrubbed to '?'");
+    var esc_free = 1;
+    var ci = 0;
+    while (ci < 16) {
+        var cb = load8(&srec3 + 24 + ci);
+        if (cb != 0) { if (cb < 32) { esc_free = 0; } }
+        if (cb == 127) { esc_free = 0; }
+        ci = ci + 1;
+    }
+    assert_eq(esc_free, 1, "no C0/DEL byte survives anywhere in the comm field");
+
+    # ----- sort comparators (v0.7.13 P-1 sweep) -----------------------
+    # Sort DIRECTION had zero coverage. Mutation-tested during the sweep:
+    # inverting the CPU and MEM comparators left smoke, the unit suite and the
+    # PTY suite all green while the busiest process silently vanished from the
+    # table — the exact failure the monitor exists to prevent. `_proc_cmp(a,b,k)`
+    # returns positive when `a` sorts BEFORE `b`. Record layout:
+    #   +0 pid  +8 cpu_pct  +16 rss  +24 state  +32 comm[16]
+    test_group("processes.cyr — sort comparator direction");
+    var ra[48];
+    var rb[48];
+    var z = 0;
+    while (z < 48) { store8(&ra + z, 0); store8(&rb + z, 0); z = z + 1; }
+
+    # CPU and MEM are DESCENDING: the bigger number sorts first.
+    store64(&ra + 8, 90); store64(&rb + 8, 10);
+    assert(_proc_cmp(&ra, &rb, SORT_CPU) > 0, "SORT_CPU puts higher cpu% first");
+    assert(_proc_cmp(&rb, &ra, SORT_CPU) < 0, "SORT_CPU is antisymmetric");
+    store64(&ra + 16, 4096); store64(&rb + 16, 8);
+    assert(_proc_cmp(&ra, &rb, SORT_MEM) > 0, "SORT_MEM puts larger rss first");
+
+    # PID is ASCENDING: the smaller pid sorts first.
+    store64(&ra + 0, 2); store64(&rb + 0, 9000);
+    assert(_proc_cmp(&ra, &rb, SORT_PID) > 0, "SORT_PID puts lower pid first");
+    assert(_proc_cmp(&rb, &ra, SORT_PID) < 0, "SORT_PID is antisymmetric");
+
+    # Equal keys compare 0 — this is what makes the insertion sort stable.
+    var re1[48];
+    var re2[48];
+    var y = 0;
+    while (y < 48) { store8(&re1 + y, 0); store8(&re2 + y, 0); y = y + 1; }
+    store64(&re1 + 8, 42); store64(&re2 + 8, 42);
+    assert_eq(_proc_cmp(&re1, &re2, SORT_CPU), 0, "equal cpu% compares 0 (sort stays stable)");
+
+    # NAME is ASCENDING lexicographic over comm.
+    memcpy(&ra + 32, "alpha", 6);
+    memcpy(&rb + 32, "zulu", 5);
+    assert(_proc_cmp(&ra, &rb, SORT_NAME) > 0, "SORT_NAME puts 'alpha' before 'zulu'");
+    assert(_proc_cmp(&rb, &ra, SORT_NAME) < 0, "SORT_NAME is antisymmetric");
+    assert_eq(_proc_cmp_comm(&ra + 32, &ra + 32), 0, "identical comm compares 0");
 
     test_group("proc.cyr — /proc/net/dev aggregation + lo exclusion");
     # 2 header lines, then lo (excluded) + eth0 (included).

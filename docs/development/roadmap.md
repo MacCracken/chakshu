@@ -25,43 +25,59 @@
 - **v0.7.11 (2026-07-17)** — Cyrius 6.2.37 → 6.4.66 (both manifests, resolving the wrapper pin drift); mihi 1.1.3 → 1.2.1 (both); `ai/` darshana 0.8.0 → 0.9.0 (lockstep with root) and niyama 1.0.5 → 1.0.6. ai-hwaccel held at 2.2.6 (mihi 1.2.1 still pins it). Both builds + smoke green; lean `shu` shrank to ~0.48 MB. **Caveat:** `shu-ai` balloons ~2.27 → ~15.49 MB under the 6.4.66 codegen (13.48 MB static `.bss` from two oversized array locals promoted to shared globals in the sandhi/TLS chain — compiler, not deps; fixable only upstream). Flagged for M4. See CHANGELOG `[0.7.11]`.
 - **v0.7.12 (2026-08-24)** — Cyrius 6.4.66 → 6.5.35 (both manifests, resolving the wrapper pin drift again); darshana 0.9.0 → 1.0.0 (darshana's **v1.0 API freeze** — the 15 symbols chakshu uses are now contractually stable); mihi 1.2.1 → 1.2.4; **ai-hwaccel 2.2.6 → 2.3.18 — the four-cut hold ends**, because mihi 1.2.4 finally advanced its own transitive pin (the tracking rule is unchanged, not suspended; the two must move in lockstep or ai-hwaccel 2.3.x leaks `detect: profiles=N` to stderr mid-frame). `ai/` niyama 1.0.6 → 1.0.7 (pin-only). `sakshi` declared in the lean `[deps].stdlib` — byte-neutral, and it documents a genuinely reachable dep (`mihi_gpu_count()`). **No source changes needed for any of the five bumps.** Both builds + smoke + PTY + DCE parity green. **The 0.7.11 `shu-ai` size regression is FIXED** by the toolchain: ~15.49 → ~3.02 MB (`.bss` 13.48 MB → 871 KB), and the 0.7.11 root-cause note was **misattributed** — it was sigil's banked crypto globals (reclaimed by cyrius 6.5.22), not sandhi/TLS array locals. **New caveat:** the lean `shu` grew ~0.48 → ~0.86 MB, ~72% of it the cycc 6.5.16 change (emits every declared stdlib module; `CYRIUS_DCE=1` no longer shrinks anything) and ~28% the dep bumps. Flagged for M4. See CHANGELOG `[0.7.12]`.
 
-## v0.7.13 — P-1 audit / hardening sweep (open)
+## v0.7.13 — P-1 audit / hardening sweep (landed 2026-08-24)
 
 A **P-1 audit, refactor, hardening, optimization and security sweep** with repairs —
-not a feature cut. Scope is the whole tree rather than a milestone slice; items move
-to CHANGELOG `[Unreleased]` as they land.
+whole-tree scope rather than a milestone slice. Seven audit dimensions; every finding
+adversarially re-verified against a real build before being acted on, and 10 of 58
+candidate findings refuted and dropped. See CHANGELOG `[0.7.13]`.
 
-**Landed so far:**
+**Landed:**
 
-- [x] **Signal-mask leak in the TUI teardown** — `src/tui.cyr` closed its two
-  signalfds with a bare `file_close()`, leaving HUP/INT/TERM and WINCH blocked
-  (`SigBlk` measured `0x08004003` after teardown). Now uses darshana's
-  `tty_close_signalfd(fd, mask)`, which closes *and* unblocks. Guarded at two levels:
-  a live-kernel contract test in `tests/chakshu.tcyr` (57 → 64 assertions) and a
-  `ci.yml` pattern scan that fails on `file_close(sfd…)` in `src/`.
+- [x] **Signal-mask leak in the TUI teardown** — bare `file_close()` on the two
+  signalfds left HUP/INT/TERM and WINCH blocked (`SigBlk` measured `0x08004003`).
+  Now `tty_close_signalfd(fd, mask)`. Guarded by a live-kernel contract test and a
+  `ci.yml` pattern scan.
+- [x] **Terminal / prompt injection via untrusted `/proc` bytes** — an unprivileged
+  process could forge table rows and emit ANSI into the monitor watching it, in plain
+  mode. Scrubbed at the `cmdline` and `comm` choke points.
+- [x] **Secret-redaction misses** — `PASSWORD=` and every space-separated, JWT, AWS
+  key-id and URL-userinfo credential shipped verbatim to hoosh. Case-folded, widened
+  vocabulary, cross-token lookback, shape rules.
+- [x] **Kill-confirm typeahead bypass** — a `ky` burst killed with no prompt drawn.
+  Kernel + userspace input flush on arming, plus a 250 ms dwell.
+- [x] **~44 KB/frame TUI leak** — breached the §8 8 MB RSS budget in ~90 s. Measured
+  4,556 → 12,748 kB over 400 frames before; flat at 4,900 kB after.
+- [x] **`PROC_MAX` hid the busiest process** on >1024-proc hosts (the walk broke before
+  the sort). Raised to 8192, forfeiting a −57 KB binary saving.
+- [x] Shift-hole sort rewrite; negative rate clamp; uptime / cpu-count sentinels;
+  truncated-diskstats stale totals; focus-panel stale frame; `out_rec` init; three
+  newline-truncated diagnostics; `-p --pid` rejection.
+- [x] **Coverage**: lean 64→77, AI 13→21, PTY 7→9 — every addition mutation-checked.
+  Deleted a proven-vacuous version-string test.
 
-**Candidate scope for the rest of the sweep** (not yet triaged — the audit comes first):
+**Deferred out of this cut** (each specified with a verified fix in the sweep plan):
 
-- [ ] **Lean binary size** — 857 136 B against design-spec §8's `< 256 KB` (~3.3×
-  over). Since cycc 6.5.16 the compiler emits every *declared* stdlib module and
-  `CYRIUS_DCE=1` no longer shrinks output, so this means auditing `[deps].stdlib` for
-  entries that are parse-time-only and can be dropped — not more DCE. Note the
-  `warning: large static data (145 000 bytes)` the lean build now emits.
-- [ ] **Unchecked probe returns** — `mihi_uptime_secs()` flows into
-  `snapshot_print_uptime()` with no `-1` check (`src/snapshot.cyr`, `src/tui.cyr` ×2).
-  Unreachable in practice against a ~20-byte `/proc/uptime` with an 8192-byte buffer,
-  but the same audit should sweep every mihi/`proc_*` return for unchecked sentinels.
-- [ ] **Buffer + bounds audit** across `src/proc.cyr` / `src/processes.cyr` parsers —
-  every `/proc` read is attacker-adjacent input in the sense that a hostile process
-  controls its own `comm`/`cmdline`.
-- [ ] **AI privacy re-audit** (`src/ai.cyr`) — re-verify the redaction path against
-  CLAUDE.md's "no /home, no env, no unredacted cmdline" invariant now that niyama is
-  also available as a stdlib module.
-- [ ] **`shu-ai` `.bss`** — 870 992 B with two `oversized array local` notes still
-  firing from sigil's argon2/hash-file scratch (~614 KB). Upstream-shaped, but worth
-  confirming neither is on a reachable chakshu path.
-- [ ] **TUI render-path coverage** — still no PTY-level assertions beyond the 7 smoke
-  gates; the render loop is the least-tested surface in the tree.
+- [ ] **`R10` — line-anchored `/proc/<pid>/status` parsing.** `proc_meminfo_field` uses
+  an unanchored `strstr`, so `prctl(PR_SET_NAME, "Uid:0")` spoofs the focus panel **and
+  the AI prompt** into reporting an unprivileged process as uid 0. Security-adjacent;
+  needs both call sites repointed together.
+- [ ] **`R7(b,c)`** — distinguish a truncated `/proc` read from a complete one, and move
+  the scratch buffers to the heap. The naive form makes `shu -p` refuse to run on a
+  big-core host, so it needs the degraded-but-marked treatment.
+- [ ] **`R14`/`R15`** — signal disposition: the `?` overlay parks in a blocking read with
+  signals blocked (`kill` is inert until a keystroke), and signalfds opened before a
+  failed `epoll_create` are never unblocked.
+- [ ] **`R16`** — `mihi_mem_free()` −1 renders `mem: 61192 MiB used / 61192 MiB total`.
+  Needs the fatal-vs-degraded decision.
+- [ ] **`R19`/`R20`** — CI: the AI-privacy grep is wrapped in `if [ -d src/ai ]` and has
+  **never run** (the AI landed as the file `src/ai.cyr`); the large-buffer gate compares
+  element counts against a byte threshold and prints `NR` instead of `FNR`.
+- [ ] **`R21`** — `avail = _tui_cols - 21` assumes a 6-digit PID; 7-digit PIDs overflow
+  the row by one column.
+- [ ] **Binary size** — 861 448 B against §8's 256 KB (~3.4×). The measured plan reaches
+  424 784 B but its biggest item is upstream-blocked on ai-hwaccel's `bayan` dependency,
+  and even the full sweep leaves ~1.66× over. Either revise §8 or take it upstream.
 
 ---
 

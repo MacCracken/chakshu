@@ -145,6 +145,70 @@ def expect_rc(label, rc, want, failures):
         failures.append(label)
 
 
+def _kill_scenario(shu_path, burst):
+    """Drive `shu --pid <victim>` and answer the kill confirm.
+
+    burst=True  sends "ky" as ONE write (typeahead — must be refused).
+    burst=False sends "k", waits past the dwell, then "y" (must kill).
+
+    Returns True if the victim survived. Waits for the alt-screen escape
+    before sending anything, so the result reflects the confirm gate rather
+    than a race against startup.
+    """
+    import signal
+    import subprocess
+
+    victim = subprocess.Popen(["/usr/bin/sleep", "30"])
+    try:
+        time.sleep(0.3)
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.execv(shu_path, [shu_path, "--pid", str(victim.pid)])
+            os._exit(1)
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        buf = b""
+        deadline = time.time() + 5.0
+        while b"\x1b[?1049h" not in buf and time.time() < deadline:
+            try:
+                buf += os.read(fd, 65536)
+            except (BlockingIOError, OSError):
+                time.sleep(0.05)
+        time.sleep(0.4)
+        try:
+            if burst:
+                os.write(fd, b"ky")
+            else:
+                os.write(fd, b"k")
+                time.sleep(0.6)
+                os.write(fd, b"y")
+        except OSError:
+            pass
+        time.sleep(1.2)
+        try:
+            os.write(fd, b"q")
+        except OSError:
+            pass
+        time.sleep(0.3)
+        try:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+        except (ProcessLookupError, ChildProcessError, OSError):
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        return victim.poll() is None
+    finally:
+        try:
+            victim.kill()
+            victim.wait()
+        except Exception:
+            pass
+
+
 def main():
     shu = sys.argv[1] if len(sys.argv) > 1 else SHU_DEFAULT
     if not os.path.isfile(shu) or not os.access(shu, os.X_OK):
@@ -216,9 +280,33 @@ def main():
     expect_in("'cmdline:' label in focus view", b"cmdline:", out, failures)
     expect_in("focus-mode status hint", b"focus mode", out, failures)
 
+    # ---------------- 8/9: kill-confirm typeahead gate (R9) ----------------
+    # v0.7.13 P-1 sweep. A single "ky" burst used to send SIGTERM with the
+    # confirm prompt never drawn: tui_run's drain loop dispatches every
+    # buffered byte in one pass, so 'k' armed CONFIRM and 'y' answered it in
+    # the same tick. It also fired from ordinary typing ("risky" in filter
+    # mode) and from pasted text. Reproduced against the pre-fix binary; both
+    # halves are asserted here because a gate that blocks typeahead by
+    # breaking the real kill would be worse than the bug.
+    print("[8] kill confirm: 'ky' burst must NOT kill")
+    survived = _kill_scenario(shu, burst=True)
+    if not survived:
+        fail("'ky' burst killed the target (confirm gate bypassed)", "")
+        failures.append("'ky' burst killed the target (confirm gate bypassed)")
+    else:
+        passed("'ky' burst cancelled, target survived")
+
+    print("[9] kill confirm: human-paced k,y DOES kill")
+    survived = _kill_scenario(shu, burst=False)
+    if survived:
+        fail("human-paced k,y did not kill the target", "")
+        failures.append("human-paced k,y did not kill the target")
+    else:
+        passed("human-paced k,y killed the target")
+
     # ---------------- summary ----------------
     print()
-    total = 7
+    total = 9
     if failures:
         print(f"PTY smoke: FAIL ({len(failures)} of {total} tests)")
         for f in failures:

@@ -270,6 +270,49 @@ var TUI_MODE_CONFIRM_KILL = 2;
 var TUI_KILL_SIGNUM = 15;
 var _tui_kill_pid   = 0;
 
+# R9 (v0.7.13 P-1 sweep): confirm-gate dwell. A single burst of "ky" used to
+# send SIGTERM without the prompt ever being drawn — the drain loop at the top
+# of tui_run dispatches every buffered byte in one pass, so 'k' armed CONFIRM
+# and 'y' confirmed it in the same tick. It also fired from ordinary typing:
+# `risky` in filter mode, or a pasted path containing "ky". Keys arriving
+# within this window of the prompt being armed are treated as CANCEL, which is
+# the fail-safe direction — no human reads a freshly drawn prompt and answers
+# in under 250 ms, but typeahead always does.
+var TUI_CONFIRM_DWELL_MS = 250;
+var _tui_confirm_at      = 0;
+
+# R8 (v0.7.13): transient status-line message, used to surface a kill that the
+# kernel refused. It must NOT go to stderr — the TUI owns an alt-screen frame
+# and a stray stderr write corrupts it. 0 = no message.
+var _tui_msg       = 0;
+var _tui_msg_until = 0;
+
+# TCFLSH ioctl, queue selector TCIFLUSH (0) — discard unread input already
+# sitting in the KERNEL tty queue. Flushing only the userspace readahead
+# buffer is not enough: a burst can still be waiting in the line discipline.
+var TUI_TCFLSH   = 0x540B;
+var TUI_TCIFLUSH = 0;
+
+# Arm the kill confirmation. Single entry point so both the focus-mode and
+# table-mode 'k' handlers get the same typeahead protection.
+fn _tui_enter_confirm_kill(pid) {
+    _tui_kill_pid = pid;
+    _tui_mode     = TUI_MODE_CONFIRM_KILL;
+    # Drop anything already typed, in both buffers.
+    _tui_input_pos = _tui_input_n;
+    syscall(SYS_IOCTL, 0, TUI_TCFLSH, TUI_TCIFLUSH);
+    _tui_confirm_at = clock_now_ms();
+    tui_render_frame();
+    return 0;
+}
+
+# Set the transient status message (a cstring literal), shown for ~3 s.
+fn _tui_set_msg(m) {
+    _tui_msg       = m;
+    _tui_msg_until = clock_now_ms() + 3000;
+    return 0;
+}
+
 # Filter buffer: caps at 64 bytes (comm is TASK_COMM_LEN=16, so 64 is
 # overkill but cheap insurance in case future filtering targets the
 # full cmdline). Reset on Esc; mutated by typed printables and
@@ -285,8 +328,19 @@ var _tui_filter_n  = 0;
 # space. With an empty filter, _tui_filtered_idx[i] == i and
 # _tui_filtered_n == _proc_n (the trivial pass-through).
 #
-# Sized for 1024 u64 entries = 8 KB — matches the PROC_MAX cap on
-# proc_recs. Heap-equivalent footprint, fits comfortably.
+# Sized for 8192 u64 entries = 65 536 B, matching PROC_MAX in
+# src/processes.cyr exactly. This array is indexed by the filter walk WITHOUT
+# a bounds check, so the two are hard-coupled: raising PROC_MAX past 8192
+# without growing this array is an out-of-bounds write.
+#
+# The comment here previously read "Sized for 1024 u64 entries = 8 KB", which
+# was wrong on both counts — at module scope Cyrius allocates 8 bytes per
+# element, so this has always been 8192 slots / 64 KB. Corrected in the v0.7.13
+# P-1 sweep, where PROC_MAX rose 1024 -> 8192 and made the sizing genuinely
+# correct rather than accidentally oversized. (Shrinking this to [1024] would
+# save 57 344 B of .bss and silence the compiler's large-static-data warning;
+# that was weighed against R5 at the sweep and correctness won — chakshu
+# targets AGNOS servers, where >1024 processes is ordinary.)
 var _tui_filtered_idx[8192];
 var _tui_filtered_n = 0;
 
@@ -518,10 +572,24 @@ fn tui_render_focus_frame() {
     proc_pid_path(&pid_str, "/status", &status_path);
     var status_buf[8192];
     var stn = file_read_all(&status_path, &status_buf, 8191);
-    if (stn > 0) { store8(&status_buf + stn, 0); }
-    var ppid_val    = proc_meminfo_field(&status_buf, "PPid:");
-    var uid_val     = proc_meminfo_field(&status_buf, "Uid:");
-    var threads_val = proc_meminfo_field(&status_buf, "Threads:");
+    # R12 (v0.7.13): the three parses used to run unconditionally while the NUL
+    # terminator was only written when stn > 0. status_buf is a stack local reused
+    # every frame, so on a failed read the parser walked the PREVIOUS frame's bytes
+    # and the panel re-rendered stale ppid/uid/threads as if current. Mirrors the
+    # init-then-guard shape already shipping in src/ai.cyr; 0 is what
+    # proc_meminfo_field already returns for a missing key, so the render is
+    # unchanged and no new sentinel leaks into the display.
+    var ppid_val    = 0;
+    var uid_val     = 0;
+    var threads_val = 0;
+    if (stn > 0) {
+        store8(&status_buf + stn, 0);
+        ppid_val    = proc_meminfo_field(&status_buf, "PPid:");
+        uid_val     = proc_meminfo_field(&status_buf, "Uid:");
+        threads_val = proc_meminfo_field(&status_buf, "Threads:");
+    } else {
+        store8(&status_buf, 0);
+    }
 
     # ----- mem% for the focused pid -----
     var mi_buf[8192];
@@ -952,7 +1020,20 @@ fn _tui_render_status() {
         # ↑↓ are 3-byte UTF-8 each (E2 86 91 / E2 86 93). The literal
         # below uses the byte escapes directly so the source isn't
         # sensitive to editor encoding.
+        # R8: a transient message (e.g. a refused kill) displaces the key hints
+        # until it expires, so the feedback is impossible to miss.
+        var shown = 0;
+        if (_tui_msg != 0) {
+            if (clock_now_ms() < _tui_msg_until) {
+                pos = pos + _tui_status_append(&sbuf, pos, max, _tui_msg);
+                shown = 1;
+            } else {
+                _tui_msg = 0;
+            }
+        }
+        if (shown == 0) {
         pos = pos + _tui_status_append(&sbuf, pos, max, "[\xe2\x86\x91\xe2\x86\x93] move  [s] sort  [f] filter  [k] kill  [?] explain  [q] quit");
+        }
         if (_tui_filter_n > 0) {
             pos = pos + _tui_status_append(&sbuf, pos, max, "  filter: ");
             pos = pos + _tui_status_append_bytes(&sbuf, pos, max, &_tui_filter_buf, _tui_filter_n);
@@ -998,10 +1079,24 @@ fn _tui_dispatch_key(k) {
         # 'y'/'Y' confirms; anything else cancels back to Normal.
         # q intentionally cancels-only here so an accidental q during
         # confirm doesn't quit the whole app.
-        if (k == 121)  { sys_kill(_tui_kill_pid, TUI_KILL_SIGNUM); _tui_mode = TUI_MODE_NORMAL; tui_render_frame(); }
-        elif (k == 89) { sys_kill(_tui_kill_pid, TUI_KILL_SIGNUM); _tui_mode = TUI_MODE_NORMAL; tui_render_frame(); }
-        elif (k < 0)   { return 1; }
-        else { _tui_mode = TUI_MODE_NORMAL; tui_render_frame(); }
+        if (k < 0) { return 1; }
+        # R9: a key that arrives before the dwell elapses is typeahead, not an
+        # answer — the user cannot have seen the prompt yet. Cancel.
+        var confirmed = 0;
+        if (clock_now_ms() - _tui_confirm_at >= TUI_CONFIRM_DWELL_MS) {
+            if (k == 121) { confirmed = 1; }
+            if (k == 89)  { confirmed = 1; }
+        }
+        if (confirmed == 1) {
+            # R8: the return was discarded, so a refused kill (EPERM on a
+            # process we do not own, ESRCH on one that already exited) looked
+            # exactly like a successful one — the prompt closed and the row
+            # stayed. Report it in the status line.
+            var krc = sys_kill(_tui_kill_pid, TUI_KILL_SIGNUM);
+            if (krc < 0) { _tui_set_msg("kill refused (not permitted or no such process)"); }
+        }
+        _tui_mode = TUI_MODE_NORMAL;
+        tui_render_frame();
         return 0;
     }
     # Normal mode. In focus mode (--pid set) most table keybinds are
@@ -1012,17 +1107,14 @@ fn _tui_dispatch_key(k) {
     elif (k == 107)      {                                                                  # 'k'
         if (_tui_focus_pid != 0) {
             # Focus mode — kill target is the focused pid.
-            _tui_kill_pid = _tui_focus_pid;
-            _tui_mode = TUI_MODE_CONFIRM_KILL;
-            tui_render_frame();
+            _tui_enter_confirm_kill(_tui_focus_pid);
         } else {
             # Table mode — kill target is the selected row.
             if (_tui_filtered_n > 0) {
                 var sel_filt = _tui_selected_idx;
                 if (sel_filt >= _tui_filtered_n) { sel_filt = _tui_filtered_n - 1; }
                 var abs_idx = load64(&_tui_filtered_idx + sel_filt * 8);
-                _tui_kill_pid = load64(_proc_recs + abs_idx * PROC_REC_SIZE + 0);
-                _tui_mode = TUI_MODE_CONFIRM_KILL;
+                _tui_enter_confirm_kill(load64(_proc_recs + abs_idx * PROC_REC_SIZE + 0));
                 tui_render_frame();
             }
         }

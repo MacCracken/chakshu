@@ -7,7 +7,7 @@
 # logic lives here once. `ai_explain` resolves to whichever is included.
 
 # Keep CHAKSHU_VERSION in sync with the VERSION file.
-var CHAKSHU_VERSION = "chakshu 0.7.12";
+var CHAKSHU_VERSION = "chakshu 0.7.13";
 
 # Exit codes per design-spec §9
 var EXIT_OK    = 0;
@@ -258,7 +258,16 @@ fn chakshu_main() {
     # Dispatch. Mode precedence: help > version > -p > default-help.
     if (mode_help    == 1) { return print_help(); }
     if (mode_version == 1) { return print_version(); }
-    if (mode_p       == 1) { return snapshot_print(sort_key, top_n); }
+    # R24 (v0.7.13): --pid is TUI-only, but `-p --pid N` used to discard it
+    # silently — while a *bad* pid still exited 1 via the parse-time probe, so the
+    # flag was half-honoured. Reject the combination explicitly instead.
+    if (mode_p == 1) {
+        if (focus_pid != 0) {
+            eprintln("chakshu: --pid cannot be combined with -p (focus mode is TUI-only)");
+            return EXIT_USAGE;
+        }
+        return snapshot_print(sort_key, top_n);
+    }
 
     # Default mode — launch the TUI. tui_run handles the not-a-TTY
     # case (stdin redirected) by exiting EXIT_ERR with a stderr
