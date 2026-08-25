@@ -100,9 +100,46 @@ fn _ai_tok_starts_with(buf, off, end, lit) {
 #   eyJ...  a JWT (base64url of '{"' — every JWT header starts this way)
 #   AKIA/ASIA...  an AWS access key id
 fn _ai_tok_is_secret_shape(buf, off, end) {
-    if (_ai_tok_starts_with(buf, off, end, "eyJ")  == 1) { return 1; }
-    if (_ai_tok_starts_with(buf, off, end, "AKIA") == 1) { return 1; }
-    if (_ai_tok_starts_with(buf, off, end, "ASIA") == 1) { return 1; }
+    if (_ai_tok_starts_with(buf, off, end, "eyJ")  == 1) { return 1; }   # JWT
+    if (_ai_tok_starts_with(buf, off, end, "AKIA") == 1) { return 1; }   # AWS long-term
+    if (_ai_tok_starts_with(buf, off, end, "ASIA") == 1) { return 1; }   # AWS STS
+
+    # v0.9.4 (audit A2): PROVIDER-PREFIXED TOKENS. The vocabulary above knew only
+    # three shapes, all of them years old, so every modern provider token walked
+    # straight through unless a trigger word happened to sit beside it — and these
+    # are precisely the credentials that leak in logs, because they are emitted as
+    # bare values with no key.
+    if (_ai_tok_starts_with(buf, off, end, "ghp_")     == 1) { return 1; }   # GitHub PAT
+    if (_ai_tok_starts_with(buf, off, end, "gho_")     == 1) { return 1; }   # GitHub OAuth
+    if (_ai_tok_starts_with(buf, off, end, "ghu_")     == 1) { return 1; }   # GitHub user-to-server
+    if (_ai_tok_starts_with(buf, off, end, "ghs_")     == 1) { return 1; }   # GitHub server-to-server
+    if (_ai_tok_starts_with(buf, off, end, "ghr_")     == 1) { return 1; }   # GitHub refresh
+    if (_ai_tok_starts_with(buf, off, end, "github_pat_") == 1) { return 1; }
+    if (_ai_tok_starts_with(buf, off, end, "glpat-")   == 1) { return 1; }   # GitLab PAT
+    if (_ai_tok_starts_with(buf, off, end, "xoxb-")    == 1) { return 1; }   # Slack bot
+    if (_ai_tok_starts_with(buf, off, end, "xoxp-")    == 1) { return 1; }   # Slack user
+    if (_ai_tok_starts_with(buf, off, end, "xoxa-")    == 1) { return 1; }   # Slack app
+    if (_ai_tok_starts_with(buf, off, end, "xoxr-")    == 1) { return 1; }   # Slack refresh
+    if (_ai_tok_starts_with(buf, off, end, "xoxs-")    == 1) { return 1; }   # Slack legacy
+    if (_ai_tok_starts_with(buf, off, end, "sk_live_") == 1) { return 1; }   # Stripe secret
+    if (_ai_tok_starts_with(buf, off, end, "rk_live_") == 1) { return 1; }   # Stripe restricted
+    if (_ai_tok_starts_with(buf, off, end, "sk-proj-") == 1) { return 1; }   # OpenAI project
+    if (_ai_tok_starts_with(buf, off, end, "sk-ant-")  == 1) { return 1; }   # Anthropic
+    if (_ai_tok_starts_with(buf, off, end, "npm_")     == 1) { return 1; }   # npm
+    if (_ai_tok_starts_with(buf, off, end, "dop_v1_")  == 1) { return 1; }   # DigitalOcean
+    if (_ai_tok_starts_with(buf, off, end, "hf_")      == 1) { return 1; }   # HuggingFace
+    if (_ai_tok_starts_with(buf, off, end, "-----BEGIN") == 1) { return 1; } # PEM block
+
+    # ⛔ NO LENGTH-OR-ENTROPY RULE, DELIBERATELY. "Any 32+ char alphanumeric token
+    # is a secret" was considered and rejected: it blanks git SHAs (40 hex), UUIDs,
+    # content hashes, base64 payloads and long file paths — all of which are the
+    # ORDINARY CONTENT of the logs this feature exists to show the model. The
+    # v0.9.4 F2 work already demonstrated this failure mode in miniature, when
+    # adding general filler words to the lookback blanked "deploy". A redactor that
+    # destroys the context is not safer, it is just useless in a quieter way.
+    # Prefixes are exact and produce no false positives; unkeyed high-entropy
+    # secrets with no recognisable prefix remain a known gap, recorded in
+    # docs/audit/.
     return 0;
 }
 
@@ -167,6 +204,52 @@ fn _ai_key_is_secret(buf, key_off, key_end) {
 # verbatim. Output is null-terminated. Returns output length (excl null).
 #
 # in_buf must be null-terminated; in_len is its length (excl null).
+# v0.9.4 (audit F2): the auth-SCHEME words that conventionally sit between a
+# trigger word and the credential it introduces. `Authorization: Bearer <token>`
+# is the single most common credential line in any real log, and the R2 lookback
+# carried exactly ONE token — so "Authorization:" armed the carry, "Bearer" spent
+# it, and the token shipped verbatim. A scheme word is never itself the secret, so
+# when the carry lands on one we RE-ARM instead of consuming.
+#
+# ⚠ SCHEME WORDS ONLY — deliberately NOT general filler ("is", "the", "for").
+# Those were tried and reverted: each one costs a carry hop, so they blanked
+# ordinary context words ("deploy") while still not covering a long
+# trigger-to-secret chain. The lookback is a ONE-HOP heuristic and this keeps it
+# honest about that. See docs/audit/ for the shapes it does not cover.
+fn _ai_tok_is_auth_scheme(buf, start, end) {
+    var n = end - start;
+    if (n < 3) { return 0; }
+    if (n > 9) { return 0; }
+    var w[10];
+    var i = 0;
+    while (i < n) {
+        var c = load8(buf + start + i);
+        if (c >= 65) { if (c <= 90) { c = c + 32; } }   # lowercase
+        store8(&w + i, c);
+        i = i + 1;
+    }
+    store8(&w + n, 0);
+    if (streq(&w, "bearer") == 1) { return 1; }
+    if (streq(&w, "basic")  == 1) { return 1; }
+    if (streq(&w, "token")  == 1) { return 1; }
+    if (streq(&w, "digest") == 1) { return 1; }
+    if (streq(&w, "jwt")    == 1) { return 1; }
+    if (streq(&w, "apikey") == 1) { return 1; }
+    return 0;
+}
+
+# v0.9.4 (audit F5): opt-in carry ACROSS calls. The log path redacts one line per
+# call, and `carry` was a function local — so a credential whose trigger word sat
+# on the PREVIOUS line got no protection at all ("password for the deploy account
+# is:" / "<secret>" is a real logging shape, as is a PEM header above its body).
+# Off by default: cmdline redaction is one-shot per process and must not inherit
+# state from an unrelated earlier call.
+var _ai_carry_across = 0;
+var _ai_carry_state  = 0;
+
+fn ai_redact_carry_begin() { _ai_carry_across = 1; _ai_carry_state = 0; return 0; }
+fn ai_redact_carry_end()   { _ai_carry_across = 0; _ai_carry_state = 0; return 0; }
+
 fn ai_redact_cmdline(in_buf, in_len, out, cap) {
     var op = 0;
     var i = 0;
@@ -175,6 +258,7 @@ fn ai_redact_cmdline(in_buf, in_len, out, cap) {
     # that follows it. Without this, `psql --password hunter2` shipped the
     # password verbatim — only `key=value` was ever examined.
     var carry = 0;
+    if (_ai_carry_across == 1) { carry = _ai_carry_state; }
     while (i < in_len) {
         var tok_start = i;
         # token spans [tok_start, j) until next space or end
@@ -198,11 +282,109 @@ fn ai_redact_cmdline(in_buf, in_len, out, cap) {
         # must not swallow `--port=y`.
         if (carry == 1) {
             carry = 0;
-            if (eq < 0) {
+            # F2: a scheme/filler word is never the secret — keep it, and re-arm so
+            # the NEXT token is still covered. Bounded to one hop by the fact that
+            # the re-armed carry is consumed normally on the following iteration.
+            if (_ai_tok_is_auth_scheme(in_buf, tok_start, j) == 1) {
+                carry = 1;
+            }
+            # F2b: `Basic dXNlcjpwYXNzd29yZA==` — the only '=' is base64 padding at
+            # the very end, so this is a VALUE, not a key=value pair, and the
+            # eq<0 test below would wave it through. Treat a trailing-'=' token as
+            # unkeyed. (`--port=8080` is unaffected: its '=' is not at the end.)
+            elif (eq >= j - 2) {
+                var sb = 0;
+                while (sb < 3) {
+                    if (op < cap - 1) { store8(out + op, 42); op = op + 1; }
+                    sb = sb + 1;
+                }
+                handled = 1;
+            }
+            elif (eq < 0) {
                 var s1 = 0;
                 while (s1 < 3) {
                     if (op < cap - 1) { store8(out + op, 42); op = op + 1; }
                     s1 = s1 + 1;
+                }
+                handled = 1;
+            }
+        }
+
+        # (1b) v0.9.4 (audit A3/A6): SUB-DELIMITED TOKENS. The '=' locator above
+        # stops at the FIRST '=', and rule (2) keys the whole decision on the text
+        # before it. A token carrying several assignments therefore gets exactly one
+        # key inspected — the leftmost — so
+        #     Server=db1;Password=hunter2345;Db=app
+        # was waved through in full, because "Server" is not a secret-looking key.
+        # That is the standard ODBC / JDBC / .NET connection-string shape and it is
+        # what a database driver logs on a failed connect.
+        #
+        # Fix: re-split on ';' ',' '&' and apply the key test PER FRAGMENT, keeping
+        # the delimiters so the line still reads as a connection string. Only tokens
+        # that actually contain a sub-delimiter take this path, so ordinary
+        # `--flag=value` arguments are untouched.
+        if (handled == 0) {
+            var hassub = 0;
+            var sd = tok_start;
+            while (sd < j) {
+                var sc2 = load8(in_buf + sd);
+                if (sc2 == 59) { hassub = 1; }
+                if (sc2 == 44) { hassub = 1; }
+                if (sc2 == 38) { hassub = 1; }
+                sd = sd + 1;
+            }
+            if (hassub == 1) {
+                var fs = tok_start;
+                while (fs < j) {
+                    # fragment spans [fs, fe)
+                    var fe = fs;
+                    while (fe < j) {
+                        var fc = load8(in_buf + fe);
+                        if (fc == 59) { break; }
+                        if (fc == 44) { break; }
+                        if (fc == 38) { break; }
+                        fe = fe + 1;
+                    }
+                    # locate '=' inside the fragment only
+                    var feq = 0 - 1;
+                    var ft = fs;
+                    while (ft < fe) {
+                        if (load8(in_buf + ft) == 61) { feq = ft; break; }
+                        ft = ft + 1;
+                    }
+                    var fhit = 0;
+                    if (feq >= 0) {
+                        if (_ai_key_is_secret(in_buf, fs, feq) == 1) { fhit = 1; }
+                        if (_ai_tok_is_secret_shape(in_buf, feq + 1, fe) == 1) { fhit = 1; }
+                    }
+                    else {
+                        if (_ai_tok_is_secret_shape(in_buf, fs, fe) == 1) { fhit = 1; }
+                    }
+                    if (fhit == 1) {
+                        var fk = fs;
+                        if (feq >= 0) {
+                            while (fk <= feq) {
+                                if (op < cap - 1) { store8(out + op, load8(in_buf + fk)); op = op + 1; }
+                                fk = fk + 1;
+                            }
+                        }
+                        var fstar = 0;
+                        while (fstar < 3) {
+                            if (op < cap - 1) { store8(out + op, 42); op = op + 1; }
+                            fstar = fstar + 1;
+                        }
+                    } else {
+                        var fc2 = fs;
+                        while (fc2 < fe) {
+                            if (op < cap - 1) { store8(out + op, load8(in_buf + fc2)); op = op + 1; }
+                            fc2 = fc2 + 1;
+                        }
+                    }
+                    # keep the delimiter that ended this fragment
+                    if (fe < j) {
+                        if (op < cap - 1) { store8(out + op, load8(in_buf + fe)); op = op + 1; }
+                    }
+                    fs = fe + 1;
                 }
                 handled = 1;
             }
@@ -295,6 +477,8 @@ fn ai_redact_cmdline(in_buf, in_len, out, cap) {
             i = j;
         }
     }
+    # F5: hand the armed state to the next line when the caller opted in.
+    if (_ai_carry_across == 1) { _ai_carry_state = carry; }
     store8(out + op, 0);
     return op;
 }
@@ -378,6 +562,108 @@ fn _ai_log_path(out, cap) {
     return _ai_env_or(out, cap, "CHAKSHU_LOG_PATH", "/var/log/aegis/aegis.log");
 }
 
+# True when `path` begins with `pfx`.
+fn _ai_eputs(msg) {
+    syscall(1, 2, msg, strlen(msg));
+    return 0;
+}
+
+fn _ai_path_has_prefix(path, pfx) {
+    var i = 0;
+    while (load8(pfx + i) != 0) {
+        if (load8(path + i) != load8(pfx + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# v0.9.4 (audit F1/F7): validate the resolved log path BEFORE a byte is read.
+#
+# ⛔ F1 WAS A DIRECT BREACH OF THE ONE BINDING PRIVACY RULE. CLAUDE.md says AI
+# prompts carry no /home contents and no env vars. `$CHAKSHU_LOG_PATH` was passed
+# to file_read_all with zero validation, so pointing it at /proc/self/environ put
+# the process's entire environment — every token and credential in it — into the
+# prompt that goes on the wire to hoosh. Reproduced before the fix:
+#   env -i SECRET=x CHAKSHU_LOG_PATH=/proc/self/environ \
+#     shu-ai --with-logs --explain 1   # -> SECRET=x appears under "recent log:"
+# The env var is a legitimate configuration knob, so it is validated rather than
+# removed: a log file is a REGULAR FILE and is not in a pseudo-filesystem.
+#
+# ⛔ THE REGULAR-FILE CHECK ALSO CLOSES F7. file_read_all opens with neither
+# O_NONBLOCK nor a type check, so a FIFO with no writer blocks forever inside the
+# prompt build. On `--explain` that is a benign hang; on the TUI `?` path it is
+# the R14 failure mode — hung in raw mode and the alt screen with signals blocked,
+# needing another terminal to recover.
+fn _ai_log_path_ok_resolved(rp) {
+    if (_ai_path_has_prefix(rp, "/proc/") == 1) { return 0; }
+    if (_ai_path_has_prefix(rp, "/sys/")  == 1) { return 0; }
+    if (_ai_path_has_prefix(rp, "/dev/")  == 1) { return 0; }
+    if (_ai_path_has_prefix(rp, "/home/") == 1) { return 0; }
+    return 1;
+}
+
+# Open the log path for reading, or -1 if it must not be read.
+#
+# ⛔ v0.9.4 (audit A1/A9) — THE v0.9.4 FIX FOR F1 WAS INCOMPLETE AND THIS REPLACES IT.
+# That version tested string PREFIXES on the raw `$CHAKSHU_LOG_PATH`, which three
+# things defeat trivially: a SYMLINK (`ln -s /proc/self/environ /tmp/x`), a doubled
+# slash (`//proc/self/environ`), and a relative path (`../../proc/self/environ`).
+# Each still reached the file, so every environment variable in the process still
+# went into the prompt on the wire to hoosh — the exact CLAUDE.md breach F1 was
+# filed for, just one indirection away.
+#
+# ⚠ A TYPE CHECK ALONE IS NOT ENOUGH, which is the trap here: `/proc/self/environ`
+# reports **S_IFREG**. So "regular file" does not exclude procfs and the denylist
+# cannot be dropped — it has to be applied to the RESOLVED path instead.
+#
+# The shape that actually holds:
+#   1. open with O_NOFOLLOW so the final component cannot be a symlink at all;
+#   2. fstat THAT FD — not a second path lookup — so there is no TOCTOU window
+#      between the check and the read (audit A9);
+#   3. resolve what we actually opened via /proc/self/fd/<fd>, and apply the
+#      denylist to the canonical answer, which defeats `//`, `..` and relative
+#      forms together;
+#   4. read from the same fd.
+# O_NONBLOCK keeps a FIFO from blocking in open(2) even though S_ISREG rejects it
+# afterwards — the block would happen before the check could run.
+fn _ai_log_open(path) {
+    var fd = file_open(path, O_RDONLY | O_NONBLOCK | 131072, 0);   # 131072 = O_NOFOLLOW
+    if (fd < 0) { return 0 - 1; }
+
+    var st[144];
+    if (syscall(SYS_FSTAT, fd, &st) < 0) { file_close(fd); return 0 - 1; }
+    var mode = load32(&st + STAT_MODE);
+    if (mode & 0xF000 == 0x8000) { }
+    else { file_close(fd); return 0 - 1; }
+
+    # Canonicalise via the fd we hold, then denylist the answer.
+    var fdp[64];
+    var rp[512];
+    _ai_fd_path(fd, &fdp, 64);
+    var rn = sys_readlink(&fdp, &rp, 511);
+    if (rn > 0) {
+        store8(&rp + rn, 0);
+        if (_ai_log_path_ok_resolved(&rp) == 0) { file_close(fd); return 0 - 1; }
+    }
+    return fd;
+}
+
+# Build "/proc/self/fd/<n>" without a formatter.
+fn _ai_fd_path(fd, out, cap) {
+    var pre = "/proc/self/fd/";
+    var i = 0;
+    while (load8(pre + i) != 0) { store8(out + i, load8(pre + i)); i = i + 1; }
+    var d[24];
+    var dn = 0;
+    var v = fd;
+    if (v == 0) { store8(&d, 48); dn = 1; }
+    while (v > 0) { store8(&d + dn, 48 + v % 10); dn = dn + 1; v = v / 10; }
+    var k = dn;
+    while (k > 0) { k = k - 1; store8(out + i, load8(&d + k)); i = i + 1; }
+    store8(out + i, 0);
+    return i;
+}
+
 # Append the opt-in sections. Returns the new position; a no-op (and zero cost)
 # when --with-logs was not passed.
 fn _ai_append_log_context(out, pos, cap) {
@@ -405,8 +691,18 @@ fn _ai_append_log_context(out, pos, cap) {
     # --- recent system log lines (sakshi text format) ---
     var lpath[512];
     _ai_log_path(&lpath, 512);
+    # Refuse rather than silently falling back: a user who set CHAKSHU_LOG_PATH
+    # deliberately should be told their log context was dropped, not quietly given
+    # a different file's contents.
+    var lfd = _ai_log_open(&lpath);
+    if (lfd < 0) {
+        _ai_eputs("chakshu: refusing log path — not a regular file, a symlink, or\n");
+        _ai_eputs("chakshu: under /proc, /sys, /dev or /home. Log context omitted.\n");
+        return pos;
+    }
     var lbuf[8192];
-    var ln = file_read_all(&lpath, &lbuf, 8191);
+    var ln = file_read(lfd, &lbuf, 8191);
+    file_close(lfd);
     if (ln <= 0) { return pos; }
     store8(&lbuf + ln, 0);
 
@@ -425,6 +721,8 @@ fn _ai_append_log_context(out, pos, cap) {
     }
 
     pos = _ai_app(out, pos, cap, "\nrecent log:\n");
+    # F5: a credential's trigger word is often on the line ABOVE the value.
+    ai_redact_carry_begin();
     var lineb[256];
     var red2[256];
     while (k < ln) {
@@ -436,9 +734,19 @@ fn _ai_append_log_context(out, pos, cap) {
         var len = e - k;
         if (len > 255) { len = 255; }
         if (len > 0) {
+            # v0.9.4 (audit F3): scrub control bytes, exactly as R3 did for
+            # cmdline at src/processes.cyr:381-382. R3 established in v0.7.13 that
+            # untrusted bytes reaching the terminal are a P1 here; v0.8.1 then added
+            # a BRAND-NEW untrusted source — an arbitrary file chakshu does not own —
+            # and gave it no equivalent filter. A log line carrying OSC/CSI reached
+            # stdout raw, and on the `?` overlay path it reaches a terminal already
+            # in raw mode on the alt screen. Same map, same reason: C0 and DEL -> '?'.
             var c = 0;
             while (c < len) {
-                store8(&lineb + c, load8(&lbuf + k + c));
+                var lb = load8(&lbuf + k + c);
+                if (lb < 32) { lb = 63; }
+                elif (lb == 127) { lb = 63; }
+                store8(&lineb + c, lb);
                 c = c + 1;
             }
             store8(&lineb + len, 0);
@@ -449,6 +757,7 @@ fn _ai_append_log_context(out, pos, cap) {
         }
         k = e + 1;
     }
+    ai_redact_carry_end();
     return pos;
 }
 

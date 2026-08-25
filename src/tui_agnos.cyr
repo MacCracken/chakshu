@@ -25,12 +25,28 @@
 # code with bit 7 set (0x80). Releases are discarded here — chakshu is a
 # key-press UI, and treating a release as a press would double every keystroke.
 
+# v0.9.4 (audit AG-7): the whole body is AGNOS-only. src/main.cyr includes this
+# file unconditionally, so without this guard every LEAN LINUX build emitted
+# `warning: undefined function 'sys_kbscan'` — sys_kbscan is an agnos syscall
+# with no Linux peer. A permanent expected warning is worse than none: it
+# trains the reader to skim the warning block, which is where the NEXT real
+# one will appear.
+#ifdef CYRIUS_TARGET_AGNOS
+
 var _AG_SC_RELEASE = 128;      # 0x80 — set on break codes
 
 # Shift state, tracked across drains: Set-1 reports shift as its own
 # make/break pair rather than modifying the letter's code, so a filter-mode
 # capital letter needs this. Left shift 0x2A, right shift 0x36.
 var _ag_shift = 0;
+
+# v0.9.4 (audit AG2): the 0xE0 extended prefix is MODULE scope for the same reason
+# _ag_shift is. It was a function-local of _ag_drain, reinitialised every call —
+# but kbscan batches arbitrarily, so a drain can END on the prefix. That prefix was
+# then lost and the next drain decoded its companion byte through the BASE table.
+# Reproduced with a 1-byte-per-call harness: `E0 10` (media prev-track) decoded as
+# 113 = 'q' and QUIT THE TUI. A media key must not quit a monitor.
+var _ag_ext = 0;
 
 # Translate one Set-1 MAKE code to a chakshu key, or -1 if it is a key chakshu
 # has no use for. Only the keys the TUI actually dispatches on are mapped, plus
@@ -117,16 +133,20 @@ fn _ag_sc_ext_to_key(sc) {
 # Decoded-key ring, filled by _ag_drain and consumed by _ag_next_key. A drain
 # can yield several keys at once (the kernel batches), and the dispatcher wants
 # them one at a time.
-var AG_KEYQ_MAX = 32;
-var _ag_keyq[32];
+# v0.9.4 (audit AG-5): 64, matching the 64-byte scancode buffer _ag_drain reads.
+# At 32 a full batch silently dropped its newest keys — and the newest key is the
+# one the user just pressed, so a fast paste or a key-repeat burst lost exactly the
+# input that mattered most.
+var AG_KEYQ_MAX = 64;
+var _ag_keyq[64];       # module scope: 64 * 8 = 512 bytes
 var _ag_keyq_n = 0;
 var _ag_keyq_pos = 0;
 
 fn _ag_keyq_push(k) {
-    if (_ag_keyq_n >= AG_KEYQ_MAX) { return 0; }
+    if (_ag_keyq_n >= AG_KEYQ_MAX) { return 0; }   # refused — queue full
     store64(&_ag_keyq + _ag_keyq_n * 8, k);
     _ag_keyq_n = _ag_keyq_n + 1;
-    return 0;
+    return 1;                                      # stored
 }
 
 # Drain the kernel scancode ring and decode into the key queue. Returns the
@@ -135,14 +155,21 @@ fn _ag_drain() {
     var sc[64];
     var n = sys_kbscan(&sc, 64);
     if (n <= 0) { return 0; }
+    # v0.9.4 (audit AG1): CLAMP THE KERNEL'S COUNT. `sc` is a function-local, so it
+    # is 64 BYTES, and 64 is what we asked for — but only the low side was checked.
+    # Cyrius has no bounds checking, so an n > 64 (a buggy or hostile kernel) turned
+    # every byte in [64, n) into a read past the end of the frame, decoding stack
+    # residue into keystrokes. Reproduced with a harness returning 200: three
+    # phantom keys queued from memory beyond the buffer. Trusting a length returned
+    # by the other side of a syscall boundary is the whole bug class.
+    if (n > 64) { n = 64; }
 
     var got = 0;
-    var ext = 0;
     var i = 0;
     while (i < n) {
         var b = load8(&sc + i);
 
-        if (b == 224) { ext = 1; i = i + 1; continue; }     # 0xE0 prefix
+        if (b == 224) { _ag_ext = 1; i = i + 1; continue; }   # 0xE0 prefix — survives the batch
 
         # Break codes carry bit 7. Shift needs its release tracked; everything
         # else is discarded, or every keypress would register twice.
@@ -150,23 +177,31 @@ fn _ag_drain() {
             var made = b - _AG_SC_RELEASE;
             if (made == 42) { _ag_shift = 0; }
             if (made == 54) { _ag_shift = 0; }
-            ext = 0;
+            _ag_ext = 0;
             i = i + 1;
             continue;
         }
 
-        if (b == 42) { _ag_shift = 1; i = i + 1; continue; }   # LShift make
-        if (b == 54) { _ag_shift = 1; i = i + 1; continue; }   # RShift make
+        # v0.9.4 (audit AG3): clear _ag_ext here too. `E0 2A` is the PS/2 "fake
+        # shift" the keyboard injects around some extended keys; it left ext armed,
+        # so the next byte decoded through the EXTENDED table. Measured: `E0 2A 10`
+        # swallowed the 'q' entirely and left shift latched on.
+        if (b == 42) { _ag_shift = 1; _ag_ext = 0; i = i + 1; continue; }   # LShift make
+        if (b == 54) { _ag_shift = 1; _ag_ext = 0; i = i + 1; continue; }   # RShift make
 
         var k = 0 - 1;
-        if (ext == 1) { k = _ag_sc_ext_to_key(b); }
-        else          { k = _ag_sc_to_key(b); }
-        ext = 0;
+        if (_ag_ext == 1) { k = _ag_sc_ext_to_key(b); }
+        else              { k = _ag_sc_to_key(b); }
+        _ag_ext = 0;
 
         # '/' with shift is '?', which is the explain binding.
         if (k == 47) { if (_ag_shift == 1) { k = 63; } }
 
-        if (k >= 0) { _ag_keyq_push(k); got = got + 1; }
+        # v0.9.4 (audit AG5): count what was STORED. _ag_keyq_push returns 0 both
+        # when it stored and when it refused a full queue, and the result was
+        # discarded — so a >32-key batch silently dropped the overflow while the
+        # return value claimed every key landed.
+        if (k >= 0) { if (_ag_keyq_push(k) == 1) { got = got + 1; } }
         i = i + 1;
     }
     return got;
@@ -186,7 +221,22 @@ fn _ag_next_key() {
     return k;
 }
 
+# v0.9.4 (audit AG4): reset the decoder's sticky state. _ag_shift was cleared ONLY
+# by physically receiving 0xAA/0xB6, with no timeout and no re-init — so one break
+# byte lost to a full kernel ring latched shift permanently, turning every 'q' into
+# 'Q' and leaving the TUI UNQUITTABLE on AGNOS. tui_run's AGNOS branch reseeds every
+# other _tui_* global at entry and never touched these; it now calls this.
+fn ag_input_reset() {
+    _ag_shift    = 0;
+    _ag_ext      = 0;
+    _ag_keyq_n   = 0;
+    _ag_keyq_pos = 0;
+    return 0;
+}
+
 fn _ag_key_pending() {
     if (_ag_keyq_pos < _ag_keyq_n) { return 1; }
     return 0;
 }
+
+#endif

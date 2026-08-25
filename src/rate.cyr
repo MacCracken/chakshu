@@ -1,0 +1,79 @@
+# rate.cyr — `--rate` parsing, split out at v0.9.4 so it can be unit-tested.
+#
+# WHY ITS OWN FILE. tests/chakshu.tcyr deliberately does NOT include src/cli.cyr —
+# that file owns chakshu_main() and the whole dispatch surface, and pulling it into
+# a unit-test binary drags in an entry point and the AI stub. So anything in cli.cyr
+# is reachable only through the PTY/smoke suites, which test behaviour end-to-end
+# and cannot cheaply enumerate two dozen malformed inputs.
+#
+# A hand-rolled numeric parser is exactly the code that wants the cheap enumeration:
+# atoi would silently return 0 for "abc", "", "." and "-1" alike, and 1000/0 is the
+# kind of thing that ships. So the parser lives here, cli.cyr calls it, and the test
+# suite includes this file directly. Same split, same reason, as watch.cyr vs
+# watch_render.cyr at v0.8.0.
+
+# Parse a --rate argument into integer MILLIHERTZ, or -1 if it is not a
+# well-formed rate. v0.9.4.
+#
+# ⭐ WHY MILLIHERTZ AND NOT A FLOAT. The old comment here said fractional Hz
+# "needs atof which the stdlib doesn't expose yet", and that framing is what kept
+# the feature unbuilt for nine releases — the spec promised 0.2-10 the whole time
+# while the binary refused anything below 1. No float is required: a rate is a
+# decimal with at most three fraction digits, so parsing it as thousandths gives
+# exact integer arithmetic all the way to the millisecond period.
+#
+# ⚠ THE RANGE IS NOT ARBITRARY. htop's default refresh is 1.5 s and btop's is
+# 2000 ms; integer Hz could express NEITHER, so a monitor whose stated goal is
+# replacing them could not be set to either one's default. 0.2 Hz = one frame per
+# 5 s is the floor, 10 Hz the ceiling — above that a frame cannot fit its own
+# 100 ms sample window.
+#
+# Accepts: "2", "0.2", "1.5", "1.50". Rejects: "", ".", "1.", "1.2.3", "-1",
+# "1e3", "abc", and anything with a non-digit outside the single '.'.
+fn parse_rate_mhz(s) {
+    var i = 0;
+    var whole = 0;
+    var digits = 0;
+    while (load8(s + i) != 0) {
+        var c = load8(s + i);
+        if (c == 46) { break; }
+        if (c < 48) { return 0 - 1; }
+        if (c > 57) { return 0 - 1; }
+        whole = whole * 10 + (c - 48);
+        if (whole > 1000000) { return 0 - 1; }      # absurd input, stop early
+        digits = digits + 1;
+        i = i + 1;
+    }
+    if (digits == 0) { return 0 - 1; }              # "" or ".5" — require a leading digit
+
+    var frac = 0;
+    var fdig = 0;
+    if (load8(s + i) == 46) {
+        i = i + 1;
+        while (load8(s + i) != 0) {
+            var f = load8(s + i);
+            if (f < 48) { return 0 - 1; }
+            if (f > 57) { return 0 - 1; }
+            if (fdig < 3) { frac = frac * 10 + (f - 48); fdig = fdig + 1; }
+            # A 4th+ fraction digit is below millihertz resolution. Ignore rather
+            # than reject: "1.0001" is a legitimate way to write 1.
+            i = i + 1;
+        }
+        if (fdig == 0) { return 0 - 1; }            # "1." — a bare trailing dot
+    }
+    # Scale the fraction to exactly three places: .5 -> 500, .05 -> 50, .005 -> 5.
+    while (fdig < 3) { frac = frac * 10; fdig = fdig + 1; }
+    return whole * 1000 + frac;
+}
+
+# Convert --rate millihertz to a frame period in milliseconds. Used by
+# tui_run dispatch above. Out-of-line so the validation lives next
+# to the conversion (and so future fractional-Hz parsing has one
+# place to land).
+fn _mhz_to_ms(mhz) {
+    if (mhz < 1) { return 1000; }
+    # period_ms = 1000 / (mhz/1000) = 1000000 / mhz. Integer division truncates,
+    # which errs toward a SLIGHTLY faster frame than asked for — never slower, so
+    # a "1 Hz" monitor never drifts to 1.1 s frames.
+    return 1000000 / mhz;
+}

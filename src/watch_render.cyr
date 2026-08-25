@@ -39,6 +39,18 @@ fn watch_dump(path) {
     if (n == 0) {
         syscall(1, 1, "  (no events)\n", 14);
     }
+    # v0.9.4 (audit W1): a record too long for one read window cannot be
+    # reassembled and is skipped — SAY SO. Reporting "(no events)" while having
+    # discarded a Critical event is the failure that made W1 severe: silence in a
+    # security monitor reads as "nothing happened", which is a lie in the quiet
+    # direction. "Nothing happened" and "I could not read what happened" are
+    # different facts and must look different.
+    var wdrop = watch_dropped();
+    if (wdrop > 0) {
+        syscall(1, 1, "  ! ", 4);
+        print_num(wdrop);
+        syscall(1, 1, " record(s) skipped: longer than the 4 KiB read window\n", 54);
+    }
     var i = 0;
     while (i < n) {
         var lbl = watch_threat_label(watch_threat_at(i));
@@ -72,7 +84,7 @@ fn watch_render_frame() {
 
     tty_move(2, 1);
     if (watch_is_open() == 0) {
-        syscall(1, 1, "stream unavailable — is aegis running with AEGIS_EVENT_LOG set?", 62);
+        syscall(1, 1, "stream unavailable — is aegis running with AEGIS_EVENT_LOG set?", 65);
         tty_clear_to_eol();
     } else {
         var n = watch_count();
@@ -84,6 +96,15 @@ fn watch_render_frame() {
             syscall(1, 1, " of ", 4);
             print_num(_watch_n);
             syscall(1, 1, ")", 1);
+        }
+        # Same rule as the dump path: never let a skipped record be invisible.
+        var wd = watch_dropped();
+        if (wd > 0) {
+            _tui_color_red();
+            syscall(1, 1, "  !", 3);
+            print_num(wd);
+            syscall(1, 1, " skipped", 8);
+            _tui_color_reset();
         }
         tty_clear_to_eol();
     }
@@ -113,7 +134,24 @@ fn watch_render_frame() {
         var tn = strlen(t);
         var cap = _tui_cols - 6;
         if (cap < 0) { cap = 0; }
-        if (tn > cap) { tn = cap; }
+        if (tn > cap) {
+            tn = cap;
+            # v0.9.4 (audit W6): back the cut up to a UTF-8 lead byte. Clipping by
+            # BYTES mid-codepoint emits an orphaned continuation byte (0b10xxxxxx),
+            # which terminals render as a replacement glyph or, worse, swallow the
+            # next real character while resynchronising. Event descriptions carry
+            # attacker-influenced text (file paths, rule names), so this is reachable
+            # from outside — and the row after a mangled one is the one that pays.
+            #
+            # ⚠ Bytes, still — not display COLUMNS. A CJK glyph is 3 bytes and 2
+            # columns wide, so a row of CJK still under-fills the line. A real width
+            # table is the complete fix and the lean build deliberately does not link
+            # one; this closes the corruption without pretending to solve width.
+            while (tn > 0) {
+                if (load8(t + tn) & 192 == 128) { tn = tn - 1; }
+                else { break; }
+            }
+        }
         if (tn > 0) { syscall(1, 1, t, tn); }
         tty_clear_to_eol();
         i = i + 1;

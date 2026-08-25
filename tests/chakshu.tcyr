@@ -8,6 +8,7 @@
 # prompt / JSON marshalling) live in ai/tests/chakshu-ai.tcyr — they need
 # the AI dep chain that only the shu-ai build carries.
 include "src/proc.cyr"
+include "src/rate.cyr"
 # v0.7.13 P-1 sweep: processes.cyr joins the suite for the sort-comparator
 # units below. Its module globals stay unallocated (nothing here calls
 # _proc_ensure_init), so including it costs the suite nothing at runtime.
@@ -413,6 +414,41 @@ fn main() {
     proc_netdev_agg(net_fix2, strlen(net_fix2), &nrx2, &ntx2);
     assert_eq(nrx2, 400, "two non-lo interfaces sum rx");
     assert_eq(ntx2, 600, "two non-lo interfaces sum tx");
+
+    test_group("cli.cyr — fractional --rate parsing (v0.9.4)");
+    # Millihertz, so no float is involved anywhere. The whole point is that
+    # design-spec §7 promised 0.2-10 for nine releases while the binary refused
+    # anything below 1, on the stated grounds that fractional Hz "needs atof".
+    assert_eq(parse_rate_mhz("1"),      1000, "integer 1 Hz -> 1000 mHz");
+    assert_eq(parse_rate_mhz("10"),    10000, "integer 10 Hz -> 10000 mHz");
+    assert_eq(parse_rate_mhz("0.2"),     200, "0.2 Hz -> 200 mHz (the floor)");
+    assert_eq(parse_rate_mhz("0.5"),     500, "0.5 Hz -> 500 mHz (btop's 2s default)");
+    assert_eq(parse_rate_mhz("1.5"),    1500, "1.5 Hz -> 1500 mHz");
+    assert_eq(parse_rate_mhz("1.50"),   1500, "trailing zero does not change the value");
+    assert_eq(parse_rate_mhz("0.667"),   667, "three fraction digits are exact");
+    assert_eq(parse_rate_mhz("1.0001"), 1000, "a 4th fraction digit is below resolution, ignored");
+    assert_eq(parse_rate_mhz("2"),      2000, "integer 2 Hz");
+
+    # Malformed input must be REJECTED, not coerced. atoi would silently return 0
+    # for every one of these, which is how a bad rate would have become 1000/0.
+    assert_eq(parse_rate_mhz("abc"), 0 - 1, "non-numeric rejected");
+    assert_eq(parse_rate_mhz(""),    0 - 1, "empty rejected");
+    assert_eq(parse_rate_mhz("."),   0 - 1, "bare dot rejected");
+    assert_eq(parse_rate_mhz("1."),  0 - 1, "trailing dot rejected");
+    assert_eq(parse_rate_mhz(".5"),  0 - 1, "leading dot rejected (require a whole digit)");
+    assert_eq(parse_rate_mhz("-1"),  0 - 1, "negative rejected");
+    assert_eq(parse_rate_mhz("1e3"), 0 - 1, "exponent notation rejected");
+    assert_eq(parse_rate_mhz("1.2.3"), 0 - 1, "two dots rejected");
+
+    test_group("cli.cyr — millihertz to frame period");
+    assert_eq(_mhz_to_ms(1000),  1000, "1 Hz -> 1000 ms");
+    assert_eq(_mhz_to_ms(10000),  100, "10 Hz -> 100 ms (equals the sample window)");
+    assert_eq(_mhz_to_ms(200),   5000, "0.2 Hz -> 5000 ms");
+    assert_eq(_mhz_to_ms(500),   2000, "0.5 Hz -> 2000 ms — btop's default is expressible");
+    assert_eq(_mhz_to_ms(667),   1499, "0.667 Hz -> 1499 ms — htop's 1.5s, truncating toward faster");
+    # Truncation must never yield a SLOWER frame than asked for, or a monitor set
+    # to 1 Hz would drift to 1.1 s frames.
+    assert_eq(_mhz_to_ms(3000),   333, "3 Hz -> 333 ms (truncates down, never up)");
 
     return assert_summary();
 }

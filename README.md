@@ -20,21 +20,49 @@ The Sanskrit name **चक्षु** *chakṣu* means *the eye* / *the faculty 
 
 ## Status
 
-**v0.7.8 — M3 (AI integration) nearly complete.** What works today:
+**v0.9.4 — monitor complete and audited; v1.0 is gated on the criteria in
+[docs/development/roadmap.md](docs/development/roadmap.md), not on features.** What works today:
 
-- **M1 — plain snapshot** (`shu -p`): host / uptime / load / mem / cpu / disk / net + sortable top-N process table.
-- **M2 — full TUI** (`shu`): alt-screen, 1 Hz refresh, ↑↓ select, `s` sort, `f` filter, `k` kill-with-confirm, `--pid N` focus, 16-colour theme.
-- **M3 — AI integration** (in the `shu-ai` build): `--explain <pid>` and the `?` key send a **privacy-redacted** process context to the AGNOS LLM gateway (`hoosh`) and stream the answer back.
+- **Plain snapshot** (`shu -p`) — host / uptime / load / mem / cpu / disk / net, GPU telemetry, and a
+  sortable top-N process table. One frame to stdout, pipe-safe.
+- **Full TUI** (`shu`) — alt-screen, configurable refresh, `↑↓` select, `s` sort, `f` filter,
+  `k` kill-with-confirm, `--pid N` focus, severity-banded colour, `--theme dark|light|auto`.
+- **GPU telemetry** (v0.9.1) — live busy% / VRAM / temperature from DRM sysfs, matched to devices by
+  PCI id.
+- **Swap, cached and buffers** (v0.9.4) — on both `-p` and the TUI. Cached matters: Linux page cache
+  is reclaimable, so "used" alone overstates memory pressure badly.
+- **Anomaly stream** (`shu --watch`, v0.8.0) — tails aegis's append-only NDJSON event log. **In the
+  lean build**, so it works on a no-libc AGNOS box.
+- **AI integration** (`shu-ai` only) — `--explain <pid>` and the `?` key send a *privacy-redacted*
+  process context to the AGNOS LLM gateway (`hoosh`) and stream the answer back. `--with-logs`
+  (v0.8.1) optionally folds log + anomaly context in.
+- **AGNOS** (v0.9.3) — both `-p` and the **TUI** run on AGNOS, via a poll loop over `kbscan` #42 and
+  `winsize` #60 in place of the Linux termios/SIGWINCH/epoll trio. See the caveats below.
 
-**Two binaries** (see [the split](#install)): the default **`shu`** is the lean monitor (~0.86 MB, no AI deps, no libc); **`shu-ai`** adds the AI panel (~3.0 MB; pulls `sandhi`/`niyama`).
+**Two binaries.** The default **`shu`** is the lean monitor (**640 KB**, no AI deps, no libc, no
+network); **`shu-ai`** adds the AI panel (**3.26 MB**; pulls `sandhi` / `niyama`).
 
-Remaining before v1.0: M3 close (`--watch`, `--with-logs` — v0.7.9), then M4 polish/perf and M5 ship. See [docs/development/roadmap.md](docs/development/roadmap.md).
+### Running on AGNOS — read this first
 
-> The AI live path needs a running `hoosh` gateway and has only been exercised in CI / on a real box — not yet field-verified. `htop` / `btop` remain the AGNOS Bazaar defaults until chakshu ships at v1.0:
-> ```sh
-> ark bazaar install htop
-> ark bazaar install btop
-> ```
+chakshu builds and runs on AGNOS, but the platform constrains what a monitor can show:
+
+- **The process table is empty.** AGNOS exposes no procfs and no process-enumeration syscall, so the
+  table renders its header and no rows. This is an upstream kernel gap, not a chakshu one, and there
+  is no workaround from this repo.
+- **Load, CPU, disk and network read `n/a`** for the same reason. Host, kernel, memory and GPU
+  identity do work.
+- **`shu-ai` does not run on AGNOS at all** — `sandhi` dlopens libc for DNS/TLS, and AGNOS has no
+  libc host. The lean `shu` is the AGNOS build.
+- **Requires AGNOS ≥ 1.56.46.** Earlier kernels gave a ring-3 process only 12 KB of usable stack out
+  of a mapped 2 MB page, so `shu -p` was page-fault-killed (`run: exit 142`). Fixed upstream in that
+  cycle.
+
+`htop` / `btop` remain available in the AGNOS Bazaar and are not going away:
+
+```sh
+ark bazaar install htop
+ark bazaar install btop
+```
 
 ---
 
@@ -62,21 +90,29 @@ CYRIUS_ALLOW_PARENT_INCLUDES=1 cyrius build main.cyr build/shu-ai
 ./build/shu-ai
 ```
 
-Why two binaries? The Cyrius toolchain links every declared stdlib module into the binary (dead code is NOP'd, not dropped — and since cycc 6.5.16 it emits every *declared* module rather than pruning to what `main` reaches, so `CYRIUS_DCE=1` no longer shrinks the output at all). The AI dep chain (`sandhi`'s TLS/HTTP stack + `niyama`'s regex/unicode tables) would bloat every build to ~3.0 MB. Confining those deps to `ai/cyrius.cyml` keeps the default `shu` at ~0.86 MB — still smaller than btop's install and fully self-contained (no libc / ncurses). `shu-ai` is the opt-in heavy build; note that `sandhi` dlopens libc for DNS/TLS, so **`shu-ai` (unlike `shu`) is not a pure no-libc binary** and its live path only runs on a host with libc.
+Why two binaries? The Cyrius toolchain links every declared stdlib module into the binary (dead code is NOP'd, not dropped — and since cycc 6.5.16 it emits every *declared* module rather than pruning to what `main` reaches, so `CYRIUS_DCE=1` no longer shrinks the output at all). The AI dep chain (`sandhi`'s TLS/HTTP stack + `niyama`'s regex/unicode tables) would bloat every build to ~3.2 MB. Confining those deps to `ai/cyrius.cyml` keeps the default `shu` at ~640 KB — still smaller than btop's install and fully self-contained (no libc / ncurses). `shu-ai` is the opt-in heavy build; note that `sandhi` dlopens libc for DNS/TLS, so **`shu-ai` (unlike `shu`) is not a pure no-libc binary** and its live path only runs on a host with libc.
 
 ---
 
 ## Quick start
 
 ```sh
-shu                  # full TUI: processes + cpu + mem + disk + net
-shu -p               # plain snapshot, one frame to stdout (pipeable)
-shu --pid 1234       # focus a single process
+shu                       # full TUI: processes + cpu + mem + disk + net + gpu
+shu -p                    # plain snapshot, one frame to stdout (pipeable)
+shu --pid 1234            # focus a single process
+shu --sort mem --top 25   # sort by memory, show 25 rows
+shu --rate 0.5            # refresh every 2s (btop's default; 0.2-10, fractional OK)
+shu --theme light         # re-tint for a light terminal background
+shu --color never         # no colour (auto honours $NO_COLOR / $TERM / isatty)
+shu --watch               # anomaly stream — tails aegis's NDJSON event log
 
-# AI (the shu-ai build only):
-shu-ai --explain 1234   # ask hoosh "why is process 1234 doing what it's doing?"
-shu-ai --watch          # tail-mode: anomalies flagged via aegis/phylax (v0.7.9)
+# AI — the shu-ai build only:
+shu-ai --explain 1234              # ask hoosh to explain what PID 1234 is doing
+shu-ai --with-logs --explain 1234  # ...and fold in recent log + anomaly context
 ```
+
+`--watch` is in the **lean** build deliberately, so an AGNOS box with no libc can still read the
+anomaly stream. Only `--explain`, `--with-logs` and the `?` overlay need `shu-ai`.
 
 The AI build talks to the `hoosh` gateway over HTTP. Configure via env:
 
@@ -92,12 +128,14 @@ Inside the TUI:
 
 | Key | Action |
 |-----|--------|
-| `q` / `Esc` | Quit |
+| `q` | Quit |
 | `↑` `↓` | Move selection |
 | `k` | Kill selected process (with confirm) |
-| `f` | Filter |
-| `s` | Sort |
-| `?` | AI explanation of the selected row, streamed in an overlay (`shu-ai`; Esc/q cancels) |
+| `f` | Filter — type to narrow, `Enter` applies, `Esc` clears |
+| `s` | Cycle sort key |
+| `?` | AI explanation of the selected row, streamed in an overlay (`shu-ai`; `Esc`/`q` cancels) |
+
+`Esc` clears the filter and cancels the AI overlay — it does **not** quit. `q` quits.
 
 ---
 

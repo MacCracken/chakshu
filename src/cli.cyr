@@ -7,7 +7,7 @@
 # logic lives here once. `ai_explain` resolves to whichever is included.
 
 # Keep CHAKSHU_VERSION in sync with the VERSION file.
-var CHAKSHU_VERSION = "chakshu 0.9.3";
+var CHAKSHU_VERSION = "chakshu 0.9.4";
 
 # Exit codes per design-spec §9
 var EXIT_OK    = 0;
@@ -33,7 +33,9 @@ fn print_help() {
     println("  -p                        Plain snapshot mode (single frame to stdout)");
     println("  --sort cpu|mem|pid|name   Process-table sort key (default cpu)");
     println("  --top N                   Process-table row count (default 10)");
-    println("  --rate <HZ>               TUI refresh rate (integer 1-10, default 1; fractional Hz later)");
+    println("  --rate <HZ>               TUI refresh rate, 0.2-10, default 1. Fractional");
+    println("                            accepted: 0.5 = 2s (btop's default), 0.667 = 1.5s");
+    println("                            (htop's default).");
     println("  --color <when>            auto | always | never (default auto; TUI only)");
     println("                            auto honours $NO_COLOR, $TERM and whether");
     println("                            stdout is a terminal.");
@@ -76,12 +78,6 @@ fn eprintln(s) {
     return 0;
 }
 
-fn print_unimplemented(flag) {
-    eprint_cstr("chakshu: ");
-    eprint_cstr(flag);
-    eprintln(" not implemented yet — see docs/development/roadmap.md");
-    return EXIT_ERR;
-}
 
 fn print_unknown_flag(flag) {
     eprint_cstr("chakshu: unknown flag: ");
@@ -96,12 +92,13 @@ fn chakshu_main() {
     var n = argc();
 
     # v0.8.1: --with-logs is resolved in a PRE-SCAN, before the main arg loop.
-    # It has to be: `--explain` returns from inside that loop, so a modifier
-    # applied at dispatch time would never reach it — `shu-ai --explain 1
-    # --with-logs` would silently drop the flag. Pre-scanning also makes the
-    # modifier order-independent, so `--with-logs --explain 1` and
-    # `--explain 1 --with-logs` behave identically. (This is the same
-    # early-return trap that made `-p --watch` drop the -p before v0.8.0.)
+    # ⚠ The ORIGINAL reason no longer applies — `--explain` accumulated into a
+    # mode at v0.9.4 and no longer returns from inside the loop, so a modifier
+    # applied at dispatch time WOULD now reach it. The pre-scan stays because of
+    # its second property, which is the one that actually matters: it makes the
+    # modifier ORDER-INDEPENDENT, so `--with-logs --explain 1` and
+    # `--explain 1 --with-logs` behave identically without --with-logs having to
+    # be parsed before every mode it can modify.
     var wl = 0;
     var wi = 1;
     while (wi < n) {
@@ -129,10 +126,12 @@ fn chakshu_main() {
     var mode_p       = 0;
     var mode_watch   = 0;
     var watch_path   = 0;
+    var mode_explain = 0;
+    var explain_pid  = 0;
 
     var sort_key    = SORT_CPU;
     var top_n       = PROC_DEFAULT_TOPN;
-    var tui_rate_hz = 1;                # default 1 Hz (1000 ms refresh)
+    var tui_rate_mhz = 1000;            # default 1 Hz = 1000 mHz (1000 ms refresh)
     # color_mode: 0 = never, 1 = auto (TUI: on; plain: off), 2 = always
     # (TUI: on; plain: on — but plain mode currently ignores color
     # entirely per design-spec §2.2 deterministic-bytes rule).
@@ -174,23 +173,27 @@ fn chakshu_main() {
             continue;
         }
 
-        # --rate <Hz> (default 1; integer 1-10 for Slice C — fractional
-        # Hz like 0.2 needs atof which the stdlib doesn't expose yet).
+        # --rate <Hz> — fractional accepted since v0.9.4 (0.2-10), which is what
+        # design-spec §7 promised from the start. See parse_rate_mhz.
         if (streq(a, "--rate") == 1) {
             if (i + 1 >= n) {
-                eprintln("chakshu: --rate requires Hz (integer 1-10)");
+                eprintln("chakshu: --rate requires Hz (0.2-10, e.g. 1, 1.5, 0.5)");
                 return EXIT_USAGE;
             }
-            var rv = atoi(argv(i + 1));
-            if (rv < 1) {
-                eprintln("chakshu: --rate: Hz must be >= 1 (fractional Hz lands later)");
+            var rv = parse_rate_mhz(argv(i + 1));
+            if (rv < 0) {
+                eprintln("chakshu: --rate: not a number (expected e.g. 1, 1.5, 0.5)");
                 return EXIT_USAGE;
             }
-            if (rv > 10) {
+            if (rv < 200) {
+                eprintln("chakshu: --rate: Hz must be >= 0.2 (one frame per 5s is the floor)");
+                return EXIT_USAGE;
+            }
+            if (rv > 10000) {
                 eprintln("chakshu: --rate: Hz must be <= 10 (above this each frame can't fit its 100ms sample window)");
                 return EXIT_USAGE;
             }
-            tui_rate_hz = rv;
+            tui_rate_mhz = rv;
             i = i + 2;
             continue;
         }
@@ -215,7 +218,7 @@ fn chakshu_main() {
         # --color auto|always|never (default auto). Plain mode ignores
         # this entirely (deterministic bytes per design-spec §2.2);
         # TUI mode uses it to gate ANSI color escapes. "auto" currently
-        # behaves as "always" in TUI mode — $TERM detection is M3 polish.
+        # honours NO_COLOR / TERM / isatty(stdout) since v0.9.2 (PTY scenario 14).
         # --theme dark|light|auto (v0.9.2). Default dark: it is what shipped,
         # and re-tinting an existing user's monitor on upgrade would be worse
         # than making them ask for light.
@@ -302,7 +305,19 @@ fn chakshu_main() {
                 eprintln("chakshu: --explain: PID must be >= 1");
                 return EXIT_USAGE;
             }
-            return ai_explain(ev);
+            # v0.9.4: ACCUMULATE, do not return from inside the loop. The early
+            # return here was the last surviving instance of the trap the block
+            # at the top of this function documents — it made `--explain` the one
+            # path that never validated the rest of the command line, so
+            # `shu-ai --explain 1 --bogusflag` ran the AI call and exited 0 while
+            # every other mode rejected the flag with EXIT_USAGE. Freezing a CLI
+            # that validates on every path except one is a defect, not a quirk.
+            # Fixed the same way `--watch` was at v0.8.0 and `--with-logs` was
+            # worked around at v0.8.1 — those two are now the rule, not exceptions.
+            mode_explain = 1;
+            explain_pid  = ev;
+            i = i + 2;
+            continue;
         }
 
         # v0.8.0: --watch is a real mode. It ACCUMULATES like -p rather than
@@ -334,6 +349,13 @@ fn chakshu_main() {
     if (mode_help    == 1) { return print_help(); }
     if (mode_version == 1) { return print_version(); }
 
+    # --explain is a terminal one-shot, dispatched here rather than from the
+    # parse loop so the whole command line is validated first. NOTE the
+    # precedence change this implies and it is deliberate: `--explain 1 --help`
+    # now prints help instead of calling hoosh. --help/--version winning over
+    # every other mode is the conventional shape and matches -p and --watch.
+    if (mode_explain == 1) { return ai_explain(explain_pid); }
+
     # R24 (v0.7.13): --pid is TUI-only, but `-p --pid N` used to discard it
     # silently — while a *bad* pid still exited 1 via the parse-time probe, so the
     # flag was half-honoured. Reject the combination explicitly instead.
@@ -351,7 +373,7 @@ fn chakshu_main() {
             return EXIT_USAGE;
         }
         tui_set_theme(theme_mode);
-        return watch_run(_hz_to_ms(tui_rate_hz), color_mode, watch_path);
+        return watch_run(_mhz_to_ms(tui_rate_mhz), color_mode, watch_path);
     }
 
     if (mode_p == 1) {
@@ -366,13 +388,7 @@ fn chakshu_main() {
     # case (stdin redirected) by exiting EXIT_ERR with a stderr
     # message pointing at `-p`.
     tui_set_theme(theme_mode);
-    return tui_run(_hz_to_ms(tui_rate_hz), sort_key, top_n, color_mode, focus_pid);
+    return tui_run(_mhz_to_ms(tui_rate_mhz), sort_key, top_n, color_mode, focus_pid);
 }
 
-# Convert --rate Hz to epoll_wait timeout in milliseconds. Used by
-# tui_run dispatch above. Out-of-line so the validation lives next
-# to the conversion (and so future fractional-Hz parsing has one
-# place to land).
-fn _hz_to_ms(hz) {
-    return 1000 / hz;
-}
+

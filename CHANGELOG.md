@@ -4,6 +4,111 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.4] — 2026-08-25 — v1.0 readiness: security audit, fractional `--rate`, and the docs told the truth again
+
+### Security — audit PASS, 14 confirmed findings fixed
+
+Full report: [`docs/audit/2026-08-25-audit.md`](docs/audit/2026-08-25-audit.md). Four surfaces that
+shipped after the v0.7.13 sweep and had never been audited. 38 findings raised, **14 confirmed**, 24
+refuted by an independent adversarial pass. GPU telemetry came back clean.
+
+Two HIGH findings are worth stating in full:
+
+- **`--watch` silently dropped security events.** Partial records were carried in a 512-byte buffer
+  against a 4096-byte read window, so a record straddling a read boundary was not truncated — it was
+  **erased**. No counter, no stderr, exit 0. **Measured: 71 of 300 records lost (23.7%)** on a
+  realistic mixed-size stream. The CHANGELOG asserted the opposite ("Partial records are carried, not
+  dropped") and has been corrected. Silence in a security monitor reads as "nothing happened", which
+  is a lie in the quiet direction. Carry raised to 4096 B; records too long for any window are now
+  skipped **and counted**, with the count shown in both the dump and the panel.
+- **`$CHAKSHU_LOG_PATH` put the process environment on the wire.** `CHAKSHU_LOG_PATH=/proc/self/environ`
+  folded every environment variable into the prompt sent to hoosh — a direct breach of CLAUDE.md's
+  binding rule. A first fix using a string-prefix denylist was **itself insufficient**: a symlink, a
+  doubled slash and a relative path each defeated it. ⚠ A type check does not help either —
+  `/proc/self/environ` reports `S_IFREG`. Now: `O_NOFOLLOW` open, `fstat` on that fd (closing the
+  TOCTOU window too), resolve via `/proc/self/fd/<n>`, denylist the canonical answer.
+
+Also fixed: `rename()` log rotation froze the stream forever while the panel reported healthy;
+`watch_open` blocked forever on a FIFO; the redaction vocabulary knew only `eyJ`/`AKIA`/`ASIA` so
+every modern provider token (`ghp_`, `xoxb-`, `sk_live_`, `glpat-`, …) walked through; only the first
+`=` in a token was examined, so `Server=db1;Password=…` leaked; UTF-8 clipped mid-codepoint; the
+AGNOS `0xE0` prefix was lost at drain boundaries, so **a media key could quit the TUI**; `_ag_shift`
+latched with no resync, making the AGNOS TUI **unquittable** after one lost break byte; and
+`_ag_drain` trusted the kernel's returned count with no upper clamp, decoding stack residue into
+keystrokes.
+
+### Added — `--rate` accepts fractional Hz (0.2–10), as design-spec §7 always promised
+
+The spec promised `0.2–10` for nine releases while the binary refused anything below 1, on the stated
+grounds that fractional Hz "needs atof". No float is required: a rate is a decimal with at most three
+fraction digits, so it parses as integer **millihertz** with exact arithmetic to the millisecond.
+
+⚠ This is not cosmetic. htop's default refresh is 1.5 s and btop's is 2000 ms; integer Hz could
+express **neither**, so a monitor whose stated goal is replacing them could not be set to either
+one's default. Now `--rate 0.5` = 2 s and `--rate 0.667` ≈ 1.5 s. Parser split into `src/rate.cyr`
+so it is unit-testable — `tests/chakshu.tcyr` gained 23 assertions covering both accepted and
+malformed input, because `atoi` silently returns 0 for `"abc"`, `""`, `"."` and `"-1"` alike.
+
+### Added — swap, cached and buffers (design-spec §1, in scope since M0, never implemented)
+
+`-p` gains a `buff / cache` line and a `swap:` line; the TUI folds all three onto the existing memory
+row so the process table loses no space. A machine with no swap reports `none configured` rather than
+`0 MiB / 0 MiB`, which reads like a failed probe.
+
+⚠ Cached matters more than it looks: Linux page cache is reclaimable, so "used" alone overstates
+pressure badly — a box at 55 GiB used with 50 GiB cached is not under memory pressure at all.
+
+### Added — `tests/literal_len_check.py`, the gate the P-1 sweep specified and nobody built
+
+Cyrius's write path is `syscall(1, fd, "text", N)` with `N` typed by a human and unchecked by the
+compiler: too small truncates, too large reads past the literal into `.rodata`. The build is green
+either way. `src/cli.cyr` says the class "has already bitten us twice"; the sweep found five more and
+named this gate its highest-value item. It found three still shipping on its first run — including a
+65-byte error declared as 62, cutting the stream-unavailable message off mid-word in the exact path a
+user hits when their event log is missing. Wired into CI.
+
+### Added — an AGNOS compile gate in CI, and `--explain` now validates its command line
+
+The `--agnos` build was the **only unguarded build in the project**, and it is the one the v1.0
+milestone is named after. Nothing under `.github/workflows/` had ever invoked it, so every Linux gate
+could stay green while the AGNOS binary failed to compile — and it has: the v0.7.13 `SYS_IOCTL`
+addition broke it outright and nothing noticed until v0.9.3 went looking.
+
+Separately, `--explain` returned from inside the argument loop, so it was the one path that never
+validated the rest of the command line: `shu-ai --explain 1 --bogusflag` ran the AI call and exited 0
+while every other mode rejected the flag. Freezing a CLI that validates everywhere except one path is
+a defect, not a quirk.
+
+### Added — `docs/benchmarks.md` and `docs/audit/`, closing two v1.0 criteria
+
+Benchmarks captured with a stated method and a committed harness (`tests/bench_tui.py`), including
+what is deliberately **not** benchmarked. Two §8 rows turned out not to be checkable as written: the
+1 Hz CPU budget is met only by rounding (**0.500%** against `< 0.5%`) and has no stated process
+count, and "first TUI frame < 50 ms" has no work-vs-wall definition.
+
+### Fixed — documentation that was wrong, not merely stale
+
+`README.md` was six releases behind and wrong in ways that would mislead a first user: wrong version,
+wrong binary sizes, `shu-ai --watch` when `--watch` is deliberately in the **lean** build so it works
+on a no-libc AGNOS box, and a key table claiming `Esc` quits — it clears the filter. `state.md`
+contradicted itself, the roadmap and the manifest in six places. `design-spec.md` §7 omitted three
+flags, misstated `--rate`, and still called `--with-logs` "pending"; §9 promised a double-fault
+termios recovery path that does not exist; §12 listed GPU monitoring as deferred after it shipped.
+
+⛔ §1 now annotates the **six features listed as in scope that were never implemented and never
+descoped** — per-core CPU, swap, cached/buffers, per-device disk, per-interface network, and
+sort-by-user. Two of the six ship in this release.
+
+### Added — a v1.0 criteria checklist in the roadmap
+
+chakshu had none. `first-party-documentation.md` requires every repo to publish its own, and the
+absence is exactly why the gaps above were invisible from inside the repo: the 1.0.0 section tracked
+five *distribution* acts and not one quality gate.
+
+⛔ The roadmap also now records that **the 1.0.0 milestone's premise does not currently hold** — see
+that file for the decision.
+
+
 ## [0.9.3] — 2026-08-24 — AGNOS parity: the TUI runs there now
 
 The roadmap recorded `shu -p` as "the working AGNOS path". It was not. On a real
@@ -582,7 +687,7 @@ scans the lean manifest for transport modules is untouched.
 - **Truncation and rotation are handled.** If the file is shorter than the last
   offset the producer rotated or restarted it, so the reader resets to the beginning
   rather than splicing the tail of an old record onto the head of a new one.
-- **Partial records are carried, not dropped.** A `read(2)` can land mid-record even
+- **Partial records are carried, not dropped.** ⚠ *Corrected at v0.9.4: this was not true as written. The carry buffer was 512 B against a 4096 B read window, so a record straddling a read boundary was ERASED — not truncated — with no counter and no stderr. Measured 23.7% loss on a mixed-size stream. Fixed in v0.9.4; see that entry.* A `read(2)` can land mid-record even
   though aegis writes atomically, so the unconsumed remainder is prepended to the
   next read.
 

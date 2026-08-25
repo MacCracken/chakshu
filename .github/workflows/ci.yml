@@ -68,6 +68,31 @@ jobs:
         # produced an actual Linux executable, not a partial output.
         run: xxd -l 4 build/shu | grep -q "7f45 4c46"
 
+      - name: Build AGNOS target
+        # ⛔ ADDED v0.9.4 — THIS WAS THE ONLY UNGUARDED BUILD IN THE PROJECT, and
+        # it is the one the v1.0 milestone is named after ("ship as the AGNOS
+        # default monitor"). Nothing under .github/workflows/ had ever invoked
+        # `--agnos`, so every Linux gate could stay green while the AGNOS binary
+        # failed to compile — and it HAS: the v0.7.13 sweep's SYS_IOCTL addition
+        # broke the AGNOS build outright and nothing noticed until v0.9.3 went
+        # looking. AGNOS has no ioctl, no termios, no epoll and no procfs, so the
+        # two targets genuinely diverge in source (src/tui_agnos.cyr, and the
+        # `#ifndef CYRIUS_TARGET_AGNOS` gates in src/tui.cyr).
+        #
+        # ⚠ SCOPE, STATED HONESTLY: this is a COMPILE gate, not a behaviour gate.
+        # The full behavioural suite is tests/agnos_qemu.py (17 checks), which
+        # boots a real AGNOS kernel under QEMU and needs qemu + OVMF + mtools +
+        # sibling agnos/agnoshi/gnoboot checkouts — none of which a hosted runner
+        # has. It is run by hand before a release that touches the AGNOS path.
+        # A compile gate still catches the entire class that has actually bitten
+        # us, which is a source change that does not exist on the other target.
+        run: cyrius build --agnos src/main.cyr build/shu-agnos
+
+      - name: Verify AGNOS ELF
+        run: |
+          xxd -l 4 build/shu-agnos | grep -q "7f45 4c46"
+          ls -l build/shu-agnos
+
       - name: Format check
         # Added at v0.8.0. chakshu had no fmt gate while its siblings did, and
         # real drift accumulated unnoticed in src/processes.cyr and src/tui.cyr
@@ -126,6 +151,18 @@ jobs:
         # error-exit-code matrix. Bash (not /bin/sh dash) — the script
         # uses process substitution.
         run: bash scripts/smoke.sh build/shu
+
+      - name: Literal-length check
+        # ⛔ THE HIGHEST BUG-FINDING-POWER GATE THE P-1 SWEEP SPECIFIED, and it was
+        # never built until v0.9.4. Cyrius's write path is `syscall(1, fd, "text", N)`
+        # with N typed by a human and unchecked by the compiler: too small truncates,
+        # too large reads past the literal into whatever follows it in .rodata. The
+        # build is green either way. src/cli.cyr's own comment says the class "has
+        # already bitten us twice"; the sweep found five more, and the v0.9.4 audit
+        # found three still shipping — including a 65-byte string declared as 62 that
+        # cut the stream-unavailable error off mid-word, in the exact path a user hits
+        # when their event log is missing.
+        run: python3 tests/literal_len_check.py
 
       - name: PTY integration smoke (M2 TUI surface)
         # tests/integration_smoke.py spawns shu under a real PTY (so

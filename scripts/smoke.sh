@@ -32,6 +32,19 @@ v_long=$("$BIN" --version) || fail "--version exited non-zero"
 v_short=$("$BIN" -V) || fail "-V exited non-zero"
 [ "$v_long" = "$v_short" ]  || fail "-V disagrees with --version"
 
+# v0.9.4: --version must match the VERSION file. Every other gate here runs the
+# BINARY, so a stale build — one compiled before the last source change — passes
+# all of them. CI's "Verify version consistency" job compares VERSION against
+# CHANGELOG / cyrius.cyml / src/cli.cyr, i.e. four FILES; nothing compared the
+# file to the ARTIFACT. This is the gate that catches "you forgot to rebuild".
+# Skipped when run from outside the repo (release.yml runs this against a
+# downloaded binary with no source tree beside it).
+if [ -f VERSION ]; then
+    want="chakshu $(tr -d '[:space:]' < VERSION)"
+    [ "$v_long" = "$want" ] || fail "--version is '$v_long', VERSION file says '$want' (stale build?)"
+    pass "--version matches the VERSION file"
+fi
+
 case "$v_long" in
     "chakshu "*) pass "version starts with 'chakshu '" ;;
     *) fail "--version output does not start with 'chakshu ': $v_long" ;;
@@ -267,6 +280,30 @@ set -e
 [ "$rc" -eq 2 ]                                || fail "--sort foo exit was $rc, want 2"
 grep -q "unknown key" "$TMPDIR/err"            || fail "--sort foo stderr missing 'unknown key'"
 pass "--sort foo → exit 2"
+
+# ============================================================
+# Argument validation (design-spec §11 names these as smoke gates)
+# ============================================================
+echo "[args] rejection paths"
+
+# design-spec.md:267 requires a gate for "exits non-zero on --pid 0". The
+# behaviour has always been right; nothing asserted it, which is the same
+# exists-on-paper-cannot-fail shape the P-1 sweep kept finding.
+set +e
+"$BIN" --pid 0 >/dev/null 2>&1; rc_pid0=$?
+"$BIN" --rate 0 >/dev/null 2>&1; rc_rate0=$?
+"$BIN" --rate 99 >/dev/null 2>&1; rc_rate99=$?
+"$BIN" --color bogus >/dev/null 2>&1; rc_color=$?
+"$BIN" --theme bogus >/dev/null 2>&1; rc_theme=$?
+"$BIN" --bogusflag >/dev/null 2>&1; rc_unknown=$?
+set -e
+[ "$rc_pid0"   -ne 0 ] || fail "--pid 0 exited 0, want non-zero"
+[ "$rc_rate0"  -ne 0 ] || fail "--rate 0 exited 0, want non-zero"
+[ "$rc_rate99" -ne 0 ] || fail "--rate 99 exited 0, want non-zero"
+[ "$rc_color"  -ne 0 ] || fail "--color bogus exited 0, want non-zero"
+[ "$rc_theme"  -ne 0 ] || fail "--theme bogus exited 0, want non-zero"
+[ "$rc_unknown" -ne 0 ] || fail "--bogusflag exited 0, want non-zero"
+pass "invalid --pid/--rate/--color/--theme and unknown flags all rejected"
 
 # ============================================================
 # M1 — pipe sanity (design-spec §2.2: -p is sacred for pipes)

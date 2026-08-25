@@ -120,6 +120,30 @@ fn watch_json_field(buf, key, out, cap) {
             p = p + 1;
         }
     }
+    # v0.9.4 (audit W6): if the value was TRUNCATED to fit `cap`, back the cut up
+    # to a UTF-8 character boundary. This is the single place worth fixing — every
+    # extracted field (description, event_type, timestamp, threat_level) lands here,
+    # and `description` is 96 bytes against text that is routinely longer, so it is
+    # the cut that actually fires. The ring's 160-byte record and the render-side
+    # width clip are downstream of it.
+    #
+    # Cutting mid-codepoint leaves a partial sequence, which a terminal draws as a
+    # replacement glyph or, worse, swallows the following character while
+    # resynchronising. Event text comes from another process and carries
+    # attacker-influenced content (file paths, rule names), so the byte offset of the
+    # cut is not ours to choose.
+    #
+    # Only when TRUNCATED: a value that ended at its closing quote is complete by
+    # construction and must not be shortened.
+    if (n >= cap - 1) {
+        while (n > 0) {
+            if (load8(out + n - 1) & 192 == 128) { n = n - 1; }
+            else { break; }
+        }
+        if (n > 0) {
+            if (load8(out + n - 1) >= 192) { n = n - 1; }
+        }
+    }
     store8(out + n, 0);
     return n;
 }
@@ -129,7 +153,25 @@ fn watch_json_field(buf, key, out, cap) {
 fn _watch_push(rank, text) {
     var slot = &_watch_lines + _watch_head * WATCH_REC;
     var n = strlen(text);
-    if (n > WATCH_REC - 1) { n = WATCH_REC - 1; }
+    if (n > WATCH_REC - 1) {
+        n = WATCH_REC - 1;
+        # v0.9.4 (audit W6): back the cut up to a UTF-8 lead byte. This is the
+        # truncation that actually bites — the ring stores fixed 160-byte records,
+        # so it clips EVERY long description, and the render-side clip almost never
+        # fires. Cutting mid-codepoint leaves an orphaned continuation byte
+        # (0b10xxxxxx), which a terminal renders as a replacement glyph or, worse,
+        # swallows the following character while resynchronising.
+        # Event text is written by another process and carries attacker-influenced
+        # content (file paths, rule names), so the byte offset of the cut is not
+        # under our control.
+        # ⚠ Bytes, not display COLUMNS — a CJK glyph is 3 bytes and 2 columns, so a
+        # CJK row still under-fills. A width table is the complete fix and the lean
+        # build deliberately does not link one.
+        while (n > 0) {
+            if (load8(text + n) & 192 == 128) { n = n - 1; }
+            else { break; }
+        }
+    }
     var i = 0;
     while (i < n) {
         # Scrub control bytes on the way in. These records are written by
@@ -210,6 +252,26 @@ fn watch_ingest_line(line) {
             pos = pos + 1;
             di = di + 1;
         }
+        # v0.9.4 (audit W6): THIS is the clip that actually fires. The ring record
+        # is a fixed 160 bytes, so every long description is cut here — long before
+        # _watch_push or the render-side clip ever sees it. Cutting mid-codepoint
+        # leaves a partial UTF-8 sequence, which a terminal draws as a replacement
+        # glyph or, worse, swallows the next character while resynchronising.
+        # Event text is written by another process and carries attacker-influenced
+        # content (file paths, rule names), so the byte offset of the cut is not
+        # ours to choose.
+        #
+        # Back up over any trailing continuation bytes (0b10xxxxxx), then drop the
+        # lead byte they belonged to — what remains ends on a complete sequence.
+        if (di < dn) {
+            while (pos > 0) {
+                if (load8(&text + pos - 1) & 192 == 128) { pos = pos - 1; }
+                else { break; }
+            }
+            if (pos > 0) {
+                if (load8(&text + pos - 1) >= 192) { pos = pos - 1; }
+            }
+        }
     }
     store8(&text + pos, 0);
 
@@ -285,8 +347,24 @@ var WATCH_SEEK_END = 2;
 
 var _watch_fd     = 0 - 1;
 var _watch_off    = 0;
-var _watch_pend[64];         # 512 bytes: partial trailing record between reads
+# v0.9.4 (audit W1): 4096 BYTES, was 512. Module scope, so [512] = 512*8.
+# The carry must be at least as large as the read window or a record straddling a
+# read boundary cannot be reassembled — and the old code did not truncate such a
+# record, it ERASED it: `_watch_off` had already advanced past the bytes, so the
+# event never entered the ring, `_watch_n` never incremented, and nothing was
+# printed. A security monitor silently dropping Critical events is the worst
+# possible failure direction. Measured before the fix: 23.7% loss on a realistic
+# mixed-size stream (300 records, 71 lost).
+var _watch_pend[512];        # 4096 bytes: partial trailing record between reads
 var _watch_pend_n = 0;
+# Records too long to EVER fit one read window cannot be carried by any buffer.
+# They are skipped rather than spliced — but counted and surfaced, because
+# "nothing happened" and "I could not read what happened" are different facts.
+var _watch_dropped = 0;
+var _watch_resync  = 0;      # 1 = discarding bytes until the next newline
+# The path actually opened, kept so rotation can be detected by re-stat.
+var _watch_open_path[64];    # 512 bytes
+var _watch_open_size = 0;    # size of the file we opened, at open time
 var _watch_path_arg = 0;    # `--watch <path>` argument, 0 when unset
 
 # Default sink path. Overridable with `--watch <path>` or CHAKSHU_WATCH_PATH,
@@ -300,14 +378,38 @@ fn watch_default_path() { return "/var/log/aegis/events.jsonl"; }
 # caller: an absent producer should render an empty stream, not an error.
 fn watch_open(path) {
     watch_close();
+    # v0.9.4 (audit W3): REGULAR FILES ONLY. file_open has neither O_NONBLOCK nor a
+    # type check, so a FIFO with no writer blocks forever inside open(2) — the panel
+    # never draws and, from the TUI, the terminal is already in raw mode on the alt
+    # screen with signals blocked. src/ai.cyr closed exactly this for the sibling
+    # log path (audit F7); the event-log path had the same hole.
+    var wst[144];
+    if (xstat(path, &wst) < 0) { return 0 - 1; }
+    var wmode = load32(&wst + STAT_MODE);
+    if (wmode & 0xF000 == 0x8000) { }
+    else { return 0 - 1; }
+
     var fd = file_open(path, O_RDONLY, 0);
     if (fd < 0) { return fd; }
     _watch_fd = fd;
     _watch_off = 0;
     _watch_pend_n = 0;
+    _watch_resync = 0;
+    # Remember the path so watch_poll can notice a rotation (W2).
+    var pi = 0;
+    while (pi < 511) {
+        var pc = load8(path + pi);
+        store8(&_watch_open_path + pi, pc);
+        if (pc == 0) { pi = 511; }
+        else { pi = pi + 1; }
+    }
+    store8(&_watch_open_path + 511, 0);
+    _watch_open_size = load64(&wst + STAT_SIZE);
     watch_poll();
     return 0;
 }
+
+fn watch_dropped() { return _watch_dropped; }
 
 fn watch_close() {
     if (_watch_fd >= 0) { file_close(_watch_fd); _watch_fd = 0 - 1; }
@@ -335,7 +437,38 @@ fn watch_poll() {
     if (end < _watch_off) {
         _watch_off = 0;
         _watch_pend_n = 0;
+        _watch_resync = 0;
     }
+
+    # v0.9.4 (audit W2): ROTATION BY rename() FREEZES THE STREAM, and the old code
+    # could not see it. Truncation is caught above because our offset outruns the
+    # file — but `mv events.jsonl events.jsonl.1` leaves our fd on the RENAMED inode,
+    # which simply stops growing. `end == _watch_off` forever, watch_poll returns 0
+    # forever, and the panel keeps reporting a healthy event count while every new
+    # security event lands in a file nobody is reading. That is logrotate's default
+    # mode, so it is the common case, not an exotic one.
+    #
+    # ⚠ NO INODE COMPARISON AVAILABLE. The stdlib exposes STAT_MODE and STAT_SIZE
+    # only — there is no portable STAT_INO/STAT_DEV — so identity is approximated by
+    # SIZE: if the path now names a file whose size differs from the descriptor we
+    # hold, the path has been re-pointed. A fresh log that happens to be byte-identical
+    # in length to the one we hold is missed, and self-corrects on the next append.
+    # Stated rather than hidden; an inode check is the complete fix when the constants
+    # land.
+    if (load8(&_watch_open_path) != 0) {
+        var rst[144];
+        if (xstat(&_watch_open_path, &rst) >= 0) {
+            var psz = load64(&rst + STAT_SIZE);
+            if (psz != end) {
+                if (psz != _watch_open_size) {
+                    # The path is a different file now — reopen and re-scan it.
+                    var again = watch_open(&_watch_open_path);
+                    if (again == 0) { return 0; }
+                }
+            }
+        }
+    }
+
     if (end == _watch_off) { return 0; }
 
     var got = 0;
@@ -356,15 +489,50 @@ fn watch_poll() {
         var total = _watch_pend_n + n;
         store8(&buf + total, 0);
 
+        # Discarding the tail of an over-long record: drop everything up to and
+        # including the next newline, then resume normally. Splicing the tail onto
+        # the next record's head would emit a garbage event, which is the failure
+        # the truncation reset above already exists to prevent.
+        if (_watch_resync == 1) {
+            var rs = 0;
+            var rfound = 0;
+            while (rs < total) {
+                if (load8(&buf + rs) == 10) { rfound = 1; rs = rs + 1; break; }
+                rs = rs + 1;
+            }
+            if (rfound == 0) { _watch_pend_n = 0; continue; }
+            _watch_resync = 0;
+            var rm = 0;
+            while (rs + rm < total) {
+                store8(&buf + rm, load8(&buf + rs + rm));
+                rm = rm + 1;
+            }
+            total = rm;
+            store8(&buf + total, 0);
+        }
+
         var before = _watch_n;
         var used = watch_ingest_buf(&buf, total);
         got = got + (_watch_n - before);
 
-        # Keep the unconsumed remainder for next time. A remainder that cannot
-        # fit the carry buffer is a record longer than 512 bytes; drop it rather
-        # than grow without bound — the display truncates at 160 bytes anyway.
+        # v0.9.4 (audit W1): carry the WHOLE remainder. _watch_pend is now 4096 B,
+        # >= the read window, so any record that straddles a boundary is reassembled
+        # instead of erased. The old clamp was not gratuitous — it was the only bound
+        # on the copy below — so it is raised, never removed.
         var rem = total - used;
-        if (rem > 512) { rem = 0; }
+
+        # A record longer than the entire window can never be reassembled by any
+        # carry: growing pend to hold it drives the next read window to zero and
+        # STALLS the stream, which is worse than dropping. So: skip to the next
+        # newline, and COUNT it. Silence is what made W1 severe.
+        if (used == 0) {
+            if (total >= 4095) {
+                _watch_dropped = _watch_dropped + 1;
+                _watch_resync  = 1;
+                rem = 0;
+            }
+        }
+        if (rem > 4095) { rem = 0; }
         _watch_pend_n = rem;
         var k = 0;
         while (k < rem) {

@@ -2,8 +2,11 @@
 
 **The eye — AI-augmented system monitor for AGNOS / Cyrius**
 
-Version: 0.1
-Status: M2.5 complete (2026-05-20) — mihi-backed identity layer landed; M3 (AI) next
+Version: 0.2 (revised at v0.9.4)
+Status: M3 closed v0.8.2, M4 closed v0.9.3. M5 (v1.0 ship) in progress — see
+        [roadmap.md](development/roadmap.md) for the v1.0 criteria and the open
+        AGNOS-premise decision. ⚠ This document is the CONTRACT a v1.0 publishes;
+        §7 below was reconciled against `shu --help` line by line at v0.9.4.
 Audience: Implementation agent / contributors
 Name: Sanskrit **चक्षु** (*chakṣu*) — *the eye, the faculty of sight*. Same observational family as planned `drishti-*` video codecs (दृष्टि — *vision*).
 Binary name: `shu` — **S**ystem **H**ealth **U**tility, a contraction of *chak**shu***. See [ADR 0001](adr/0001-binary-name-shu.md).
@@ -16,11 +19,23 @@ Binary name: `shu` — **S**ystem **H**ealth **U**tility, a contraction of *chak
 
 **In scope:**
 
-- Process list with sort/filter (CPU, memory, name, user)
-- CPU usage (per-core + aggregate)
-- Memory usage (RAM, swap, cached, buffers)
-- Disk I/O rates (per-device + aggregate)
-- Network I/O rates (per-interface + aggregate)
+- Process list with sort/filter (CPU, memory, name — **not user**, see below)
+- CPU usage (**aggregate only** — per-core not implemented, see below)
+- Memory usage (RAM — **swap / cached / buffers not implemented**, see below)
+- Disk I/O rates (**aggregate only** — per-device not implemented, see below)
+- Network I/O rates (**aggregate only** — per-interface not implemented, see below)
+
+> ⛔ **SIX ITEMS ABOVE ARE UNIMPLEMENTED AND HAVE NEVER BEEN FORMALLY DESCOPED** — flagged at
+> v0.9.4, annotated rather than silently deleted. Verified absent from `src/`: per-core CPU,
+> swap (`/proc/swaps` appears nowhere, though §2 lists it as a 1 Hz source), cached/buffers,
+> per-device disk I/O, per-interface network I/O, and sort/column by user (there is no USER
+> column). The live table header is `PID S CPU% MEM% CMD` and the memory line is used/total only.
+>
+> **Per-core meters, a swap meter and a USER column are htop's default screen**, and this project's
+> stated goal is to replace htop/btop. Shipping 1.0.0 against a §1 that lists them as in-scope
+> publishes a false contract on day one. Each needs an explicit decision — **implement**, or move to
+> §12 with a descope note. This is a v1.0 blocker recorded in
+> [roadmap.md](development/roadmap.md).
 - Kill selected process (with confirm)
 - Plain-snapshot mode (`-p`) — single-frame text dump, pipeable
 - AI explanation of selected row / system state via the `hoosh` LLM gateway (HTTP) — shipped in the `shu-ai` build (v0.7.3+)
@@ -70,7 +85,7 @@ Data lives in two layers:
 | Network I/O | `/proc/net/dev` deltas | 1 Hz |
 | Load avg | `/proc/loadavg` | 1 Hz |
 
-Refresh rate configurable via `--rate <hz>` (range 0.2–10).
+Refresh rate configurable via `--rate <hz>` (**integer 1-10**; the "0.2–10" this line claimed until v0.9.4 is not what the binary accepts — see the `--rate` note in §7, where the open decision is recorded).
 
 ---
 
@@ -198,17 +213,35 @@ shu -p
 shu -h | --help | -V | --version
 
 OPTIONS:
-  -p                 Plain snapshot mode (single frame, no TUI)
-  --rate <HZ>        Refresh rate (0.2–10, default 1)
-  --color <when>     auto | always | never (default auto)
-  --pid <PID>        Focus a single process
-  --explain <PID>    Ask hoosh to explain PID and exit (shu-ai build; v0.7.3)
-  --watch [PATH]     Anomaly stream mode. Reads aegis's NDJSON event log;
-                     path, else $CHAKSHU_WATCH_PATH, else
-                     /var/log/aegis/events.jsonl. Non-TTY prints a plain dump.
-  --with-logs        Allow AI prompts to include sakshi log context (shu-ai; pending)
-  -h, --help         Show help
-  -V, --version      Show version
+  -p                      Plain snapshot mode (single frame, no TUI)
+  --sort cpu|mem|pid|name Process-table sort key (default cpu)
+  --top N                 Process-table row count (default 10)
+  --rate <HZ>             TUI refresh rate — INTEGER 1-10, default 1
+  --color <when>          auto | always | never (default auto; TUI only)
+                          auto honours $NO_COLOR, $TERM and isatty(stdout)
+  --theme <name>          dark | light | auto (default dark; TUI only)
+                          auto reads $COLORFGBG
+  --pid <PID>             Focus a single process (validates PID at startup)
+  --explain <PID>         Ask hoosh to explain PID and exit (shu-ai build)
+  --watch [PATH]          Anomaly stream mode. Reads aegis's NDJSON event log;
+                          path, else $CHAKSHU_WATCH_PATH, else
+                          /var/log/aegis/events.jsonl. Non-TTY prints a plain dump.
+                          LEAN build — works on a no-libc AGNOS box.
+  --with-logs             Fold recent log + anomaly context into AI prompts
+                          (shu-ai only; off by default). Shipped v0.8.1.
+  -h, --help              Show help
+  -V, --version           Show version
+
+Exit codes: 0 success · 1 runtime failure · 2 usage error.
+
+⚠ `--rate` READ THIS: this block said "0.2–10" until v0.9.4 while the code has always rejected
+anything below 1 (`--rate 0` exits 2). The spec has been corrected to match the binary rather than
+the reverse, because publishing a range the binary refuses is the worse failure. But the DECISION is
+open and must be settled before the v1.0 freeze: **integer Hz 1-10 yields only 100-1000 ms, and
+neither incumbent's default is expressible — htop defaults to 1.5 s, btop to 2000 ms.** A monitor
+whose goal is replacing them should be settable to their default refresh. Options: implement
+fractional Hz as originally specified, or switch to a millisecond interval in btop's shape
+(`--update <ms>`). Either is breaking after the freeze.
 ```
 
 ---
@@ -221,7 +254,7 @@ Measured at v0.9.0 under a real pseudo-terminal at `--rate 1`, 295 processes on 
 | Target | Goal | Status |
 |--------|------|--------|
 | Cold start (`shu --version`) | < 5 ms | **met** — ~2.0 ms |
-| First TUI frame | < 50 ms | met |
+| First TUI frame | < 50 ms | ⚠ **depends on the definition — unsettled.** First bytes on the wire measure 1.0 ms; the first COMPLETE frame (cpu/disk/net rates + PID header) measures ~109 ms median, gated by the deliberate 100 ms sample window. The `-p` row is qualified as "< 30 ms of *work*" and is met; this row carries no such qualifier and is 2.2x over on the complete-frame reading. Pick a definition and restate before the freeze. |
 | Steady-state CPU at 1 Hz | < 0.5% of one core | **met, at the margin** — 0.433–0.500% over five 60 s windows, mean 0.473% |
 | Memory resident | < 8 MB | **met** — 4.56 MB, flat |
 | `-p` snapshot | < 30 ms of work | met — ~12 ms (plus a deliberate 100 ms sample window) |
@@ -257,7 +290,7 @@ self-contained with neither.
 
 ## 9. Error Handling
 
-Errors go to stderr as `chakshu: <reason>`. The TUI always restores termios state on exit, including SIGTERM / SIGINT / panic paths. A double-fault path resets termios via direct syscall before re-raising.
+Errors go to stderr as `chakshu: <reason>`. The TUI always restores termios state on exit, including SIGTERM / SIGINT / panic paths. ⚠ **STRUCK v0.9.4:** this sentence used to promise that "a double-fault path resets termios via direct syscall before re-raising". No such code exists (zero grep hits in `src/tui.cyr`); teardown is the ordinary `_tui_teardown()` path off the signalfd loop exit. A v1.0 spec must not promise a recovery path the binary lacks. Note the one genuinely unrecoverable case is documented in `tests/MANUAL.md` §3: `kill -9` cannot be handled, leaves the terminal raw, and `reset` recovers it.
 
 ---
 
@@ -279,7 +312,7 @@ The binary is **`shu`** — **S**ystem **H**ealth **U**tility, a contraction of 
 
 ## 12. Future Work (post-v1, deferred)
 
-- GPU monitoring (NVIDIA/AMD/Intel) once `ai-hwaccel` exposes a stable surface
+- ~~GPU monitoring (NVIDIA/AMD/Intel)~~ — **SHIPPED v0.9.1**, not deferred: live busy% / VRAM / temperature from DRM sysfs, matched to devices by PCI id (`src/gpu.cyr`), with a smoke gate. Left here struck rather than deleted so the deferral decision stays legible.
 - Per-cgroup view (containers/services without becoming `bcicen/ctop`)
 - Historical replay (chakshu reading from a sakshi-backed time-series store)
 - Mobile/dashboard frontends — pure backend protocol over sandhi

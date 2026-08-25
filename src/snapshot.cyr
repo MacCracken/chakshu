@@ -246,6 +246,41 @@ fn snapshot_print(sort_key, top_n) {
         syscall(1, 1, "unavailable\n", 12);
     }
 
+    # v0.9.4: buffers / cached / swap — design-spec §1 listed all three as in
+    # scope from M0 and none was ever implemented. A swap meter is the second
+    # thing an htop user looks for, and "used" without "cached" overstates
+    # pressure badly on Linux: the page cache is reclaimable, so a box showing
+    # 55 GiB used and 50 GiB cached is not under memory pressure at all.
+    #
+    # ⚠ Read ONCE into the shared buffer and pull four fields, rather than four
+    # reads. /proc/meminfo is ~50 lines and re-reading it per field is the kind of
+    # avoidable syscall cost the §8 budget is measured against.
+    var mi_n = proc_read("/proc/meminfo", &buf, 8192);
+    if (mi_n > 0) {
+        var buffers_kb = proc_meminfo_field(&buf, "Buffers:");
+        var cached_kb  = proc_meminfo_field(&buf, "Cached:");
+        var swtot_kb   = proc_meminfo_field(&buf, "SwapTotal:");
+        var swfree_kb  = proc_meminfo_field(&buf, "SwapFree:");
+
+        syscall(1, 1, "      buff ", 11);
+        print_num(buffers_kb / 1024);
+        syscall(1, 1, " MiB / cache ", 13);
+        print_num(cached_kb / 1024);
+        syscall(1, 1, " MiB\n", 5);
+
+        syscall(1, 1, "swap: ", 6);
+        if (swtot_kb > 0) {
+            print_num((swtot_kb - swfree_kb) / 1024);
+            syscall(1, 1, " MiB used / ", 12);
+            print_num(swtot_kb / 1024);
+            syscall(1, 1, " MiB total\n", 11);
+        } else {
+            # Zero SwapTotal is a real, common configuration, not a read failure.
+            # Say so rather than printing "0 MiB / 0 MiB", which reads like a bug.
+            syscall(1, 1, "none configured\n", 16);
+        }
+    }
+
     # Line 3: cpu + disk + net (delta-based) ---------------------------
     # Sample 1
     # R7c (v0.7.13): 64 KiB heap scratch, allocated once, instead of 8 KiB
