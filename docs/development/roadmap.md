@@ -5,7 +5,7 @@
 > [`state.md`](state.md). This file answers one question: *what is left to reach
 > v1.0, and in which release does it land?*
 >
-> **Current: v0.8.2.** | **Last Updated**: 2026-08-24
+> **Current: v0.9.0.** | **Last Updated**: 2026-08-24
 
 ---
 
@@ -21,7 +21,7 @@ inside it are additive or corrective only.
 | ~~0.8.0~~ | ~~`--watch` anomaly stream~~ | **shipped 2026-08-24 — M3 closed.** Consumer in the lean `shu`; producer is aegis 1.1.7's NDJSON sink |
 | ~~0.8.1~~ | ~~`--with-logs` log + anomaly context~~ | **shipped 2026-08-24.** Per-pid attribution proved impossible (sakshi carries no pid); ships system-level context + the anomaly ring |
 | ~~0.8.2~~ | ~~AI hardening + hoosh gate promotion~~ | **shipped 2026-08-24.** The blocker was a whitespace-intolerant JSON parse misreported as a transport error, not libc |
-| **0.9.0** | Perf + size close-out | §8 targets either met or formally revised |
+| ~~0.9.0~~ | ~~Perf + size close-out~~ | **shipped 2026-08-24.** All §8 targets met; the size target formally revised 256 KB → 768 KB with the reason recorded |
 | **0.9.1** | GPU telemetry depth | Per-device stats beyond count/name/memory |
 | **0.9.2** | Theming + display polish | Dark/light configurable; no layout regressions |
 | **0.9.3** | AGNOS parity | `--agnos` TUI runs, not just `-p` |
@@ -30,28 +30,6 @@ inside it are additive or corrective only.
 ---
 
 ---
-
-## 0.9.0 — Perf + size close-out (opens M4)
-
-Perf was audited at v0.7.15 under a real PTY at `--rate 1`, 281 processes,
-16-core box. Two of four targets are met; the CPU one is diagnosed.
-
-- [ ] **CPU `< 0.5%` at 1 Hz — currently 0.549%.** v0.7.15 took the TUI from two
-      `/proc` walks per frame to one (rolling inter-frame baseline) and cached the
-      static identity facts, moving it 0.650% → 0.549%. What is left is the
-      per-row `cmdline` read and the render itself: measured `--top 1` at
-      **0.466%**, i.e. under target, so the remaining cost scales with visible
-      rows. Options: cache cmdline per pid across frames (it rarely changes), or
-      accept that the target implies a smaller table than a 281-process box shows.
-- [ ] **Binary size — §8's `< 256 KB`, currently 571,480 B (~2.2× over).** No
-      chakshu-side lever remains: the safe stdlib drops (`bench`, `freelist`,
-      `tagged`, `slice`) total ~25 KB, and `CYRIUS_DCE=1` has been a parity check
-      rather than an optimizer since cycc 6.5.16 — it NOPs dead code in place and
-      emits a byte-identical binary. **Decide here: revise §8, or take it upstream**
-      (what the mihi/ai-hwaccel bundles still pull in). See
-      [`p1-sweep-findings.md`](p1-sweep-findings.md).
-- [ ] Manual TTY checks documented in `tests/` — the PTY suite covers 12
-      scenarios; the checks that still need human eyes should be written down.
 
 ## 0.9.1 — GPU telemetry depth
 

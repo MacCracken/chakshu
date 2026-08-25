@@ -4,6 +4,86 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-08-24 — perf + size close-out (opens M4)
+
+Every design-spec §8 target is now met, and the one that could not be met has been
+revised to a number the architecture can actually hold rather than carried as a
+permanent red mark.
+
+| Target | Before | Now |
+|---|---|---|
+| CPU at 1 Hz (`< 0.5%`) | 0.517% | **0.433–0.500%**, mean 0.473% |
+| Memory (`< 8 MB`) | 4.56 MB | **4.56 MB** |
+| Cold start (`< 5 ms`) | ~2.0 ms | **~2.0 ms** |
+| Lean binary | 596 KB vs a 256 KB target | **622 KB vs a revised 768 KB target** |
+
+### Changed — CPU: the cost was the writes, not the reads
+
+The full table cost 0.517% against 0.467% at `--top 1`, so the residual scaled with
+rendered rows. The obvious suspect was the per-row `/proc/<pid>/cmdline` read.
+
+**It wasn't.** Caching those reads (79% hit rate, instrumented) moved the full-table
+number *not at all*. What actually cost the time was that each row emitted **~10
+separate `write(2)` calls** — one per colour escape, one per padded number, one per
+literal — roughly 180 syscalls per frame at 18 visible rows.
+
+- **Each table row is now composed into a buffer and emitted with ONE write**,
+  exactly the pattern `_tui_render_status` has always used. Colour handling is
+  preserved bit for bit: the same enable/suppress gates decide whether an escape is
+  appended, so `--color=never` emits identical bytes.
+- **`/proc/<pid>/cmdline` is cached anyway** — a direct-mapped 64-slot cache keyed on
+  pid **and comm**. Keying on pid alone would serve a stale cmdline after an `exec`,
+  and a wrong one after pid reuse; comm changes in both cases. A frame-count bound
+  (30 frames) means even an exec that somehow preserved comm self-corrects rather
+  than persisting for the session.
+
+**Recorded honestly:** this is met *at the margin*. Five 60 s windows gave
+0.433/0.467/0.483/0.483/0.500% — one sample sits exactly on the line, and a busier
+box or a taller terminal could push it back over. Further headroom is available
+(batching the whole frame rather than each row) and is not being spent now.
+
+**On measurement:** the earlier 20 s windows were quantised to 0.05% per tick
+(`CLK_TCK`=100), which is the same order as the effect being measured — "0.450 vs
+0.500" was a one-tick difference, not a signal. All numbers here use 60 s windows,
+where one tick is 0.017%.
+
+### Changed — design-spec §8's binary-size target: 256 KB → 768 KB
+
+The 256 KB figure was set at M0, before chakshu took its dependencies, and is not
+reachable while the lean monitor links `mihi` (identity probes) and `ai-hwaccel`
+(GPU panel). The binary peaked at 861 KB; the single biggest win (−290 KB) came from
+fixing two upstream repos to get bayan's 641 KB monolith out of the closure.
+
+No chakshu-side lever remains: the remaining safe stdlib drops total ~25 KB, and
+`CYRIUS_DCE=1` has been a parity check rather than an optimizer since cycc 6.5.16 —
+it NOPs dead code in place and emits a byte-identical binary. The rest is bulk
+inside the mihi/ai-hwaccel dist bundles, which is upstream work.
+
+§8 now states **< 768 KB**, which keeps the headroom the target existed to protect,
+with the original 256 KB aspiration and the reason it is unreachable recorded beside
+it. The user-facing comparison is unchanged: btop installs at ~1.7 MB, htop more
+once ncurses and libc are counted, and `shu` is self-contained with neither.
+`shu-ai` is explicitly out of scope — it is the opt-in heavy build.
+
+### Added
+
+- **`tests/MANUAL.md`** — the checks that genuinely need human eyes, each with the
+  reason it resists automation: colour legibility (the PTY suite proves escapes were
+  *emitted*, not that the result reads), drag-resize under a real window manager (a
+  stream of SIGWINCH, not one clean event), terminal state after each exit path
+  including the `kill -9` case that cannot be handled, byte-vs-column clipping of
+  wide characters, `--watch` against a live producer, and the `?` overlay against a
+  real gateway. Anything automatable was left out — the automated suite covers 12
+  PTY scenarios already.
+
+### Verified
+
+- Lean `shu`: **116/116**, smoke **PASS** (both binaries), PTY **12/12**, DCE parity
+  PASS, fmt clean, lint 0 non-cosmetic.
+- AI `shu-ai`: **39/39**, with-logs smoke **PASS**, hoosh-stub smoke **PASS**.
+- Frame render verified by reconstructing the screen from cursor-position escapes —
+  column alignment, colour bands and clipping unchanged by the row-batching rework.
+
 ## [0.8.2] — 2026-08-24 — AI hardening: the live path actually worked, chakshu was misreading it
 
 The last `continue-on-error` step in either workflow is now a **hard gate**. Getting

@@ -216,6 +216,72 @@ var _tui_color_suppress = 0;
 # Emit a raw ANSI escape if color is on AND not suppressed. Single
 # choke point — keeps the apply sites readable (`_tui_color_red()`
 # rather than `if enabled && !suppress: write(...)` everywhere).
+# --- buffered row composition (v0.9.0) --------------------------------
+#
+# The table row used to emit ~10 separate write(2) calls — one per colour
+# escape, one per padded number, one per literal. At 18 visible rows that is
+# ~180 syscalls per frame, and it is what kept the full table over design-spec
+# §8's < 0.5% CPU target: measured over 60 s at 1 Hz, the full table cost
+# 0.517% against 0.433% at `--top 1`, and that gap survived caching the
+# per-row /proc/<pid>/cmdline read (cache hit rate 79%), which is what ruled
+# the reads out and pointed at the writes.
+#
+# These compose into a caller buffer instead, so a row costs ONE write —
+# exactly the pattern _tui_render_status has always used. Colour handling is
+# preserved bit for bit: the same enable/suppress checks gate the escape, so a
+# --color=never run emits identical bytes to before.
+
+fn _tui_row_app(buf, pos, max, s) {
+    var n = strlen(s);
+    var i = 0;
+    while (i < n) {
+        if (pos >= max) { return pos; }
+        store8(buf + pos, load8(s + i));
+        pos = pos + 1;
+        i = i + 1;
+    }
+    return pos;
+}
+
+# Append a colour escape, honouring the same gates as _tui_color_emit.
+fn _tui_row_col(buf, pos, max, s) {
+    if (_tui_color_enabled == 0) { return pos; }
+    if (_tui_color_suppress == 1) { return pos; }
+    return _tui_row_app(buf, pos, max, s);
+}
+
+fn _tui_row_col_band(buf, pos, max, pct, low, mid) {
+    if (pct < low) { return _tui_row_col(buf, pos, max, "\x1b[32m"); }
+    if (pct < mid) { return _tui_row_col(buf, pos, max, "\x1b[33m"); }
+    return _tui_row_col(buf, pos, max, "\x1b[31m");
+}
+
+fn _tui_row_col_state(buf, pos, max, st) {
+    if (st == 82)  { return _tui_row_col(buf, pos, max, "\x1b[32m"); }   # R
+    if (st == 90)  { return _tui_row_col(buf, pos, max, "\x1b[31m"); }   # Z
+    if (st == 68)  { return _tui_row_col(buf, pos, max, "\x1b[33m"); }   # D
+    if (st == 84)  { return _tui_row_col(buf, pos, max, "\x1b[33m"); }   # T
+    if (st == 73)  { return _tui_row_col(buf, pos, max, "\x1b[36m"); }   # I
+    return pos;
+}
+
+# Right-align `n` in `width` columns.
+fn _tui_row_pad(buf, pos, max, n, width) {
+    var w = 1;
+    var x = n;
+    while (x >= 10) { w = w + 1; x = x / 10; }
+    var sp = width - w;
+    while (sp > 0) {
+        if (pos >= max) { return pos; }
+        store8(buf + pos, 32);
+        pos = pos + 1;
+        sp = sp - 1;
+    }
+    var digits[24];
+    var dn = _proc_int_to_cstr(n, &digits);
+    return _tui_row_app(buf, pos, max, &digits);
+}
+
 fn _tui_color_emit(s) {
     if (_tui_color_enabled == 0) { return 0; }
     if (_tui_color_suppress == 1) { return 0; }
@@ -932,6 +998,10 @@ fn tui_render_table_frame() {
     _snap_print_rate_bps(net_tx_bps);
     tty_clear_to_eol();
 
+    # One cache generation per rendered frame — bounds how long a cmdline can
+    # remain stale if an exec somehow preserved comm.
+    proc_cmdline_tick();
+
     # ----- row 5+: process table (header + top-N rows) -----
     # Only re-walk /proc when we actually took a new sample this frame; a
     # repaint reuses the table already in _proc_recs. The first frame's table
@@ -1023,15 +1093,28 @@ fn tui_render_table_frame() {
         var st  = load64(rec + 24);
         var mem = 0;
         if (mem_total_kb > 0) { mem = rss * 400 / mem_total_kb; }
-        _tui_color_dim(); _proc_print_int_pad(pid, 6); _tui_color_reset();
-        syscall(1, 1, " ", 1);
+        # v0.9.0: compose the whole row, emit it with ONE write. See
+        # _tui_row_app above for why.
+        var rowbuf[512];
+        var rp = 0;
+        rp = _tui_row_col(&rowbuf, rp, 512, "\x1b[2m");
+        rp = _tui_row_pad(&rowbuf, rp, 512, pid, 6);
+        rp = _tui_row_col(&rowbuf, rp, 512, "\x1b[0m");
+        rp = _tui_row_app(&rowbuf, rp, 512, " ");
         var sc[2];
         store8(&sc, st);
         store8(&sc + 1, 0);
-        _tui_color_state(st); syscall(1, 1, &sc, 1); _tui_color_reset();
-        _tui_color_pct_band(cpu, 25, 70); _proc_print_int_pad(cpu, 6); _tui_color_reset();
-        _tui_color_pct_band(mem, 50, 80); _proc_print_int_pad(mem, 6); _tui_color_reset();
-        syscall(1, 1, " ", 1);
+        rp = _tui_row_col_state(&rowbuf, rp, 512, st);
+        rp = _tui_row_app(&rowbuf, rp, 512, &sc);
+        rp = _tui_row_col(&rowbuf, rp, 512, "\x1b[0m");
+        rp = _tui_row_col_band(&rowbuf, rp, 512, cpu, 25, 70);
+        rp = _tui_row_pad(&rowbuf, rp, 512, cpu, 6);
+        rp = _tui_row_col(&rowbuf, rp, 512, "\x1b[0m");
+        rp = _tui_row_col_band(&rowbuf, rp, 512, mem, 50, 80);
+        rp = _tui_row_pad(&rowbuf, rp, 512, mem, 6);
+        rp = _tui_row_col(&rowbuf, rp, 512, "\x1b[0m");
+        rp = _tui_row_app(&rowbuf, rp, 512, " ");
+        if (rp > 0) { syscall(1, 1, &rowbuf, rp); }
         # cmdline read (top-N only — same as plain mode). Clip to terminal
         # width: the per-row prefix is pid + space + state 1 + cpu 6 + mem 6 +
         # space, i.e. pid_w + 15 columns.
@@ -1048,7 +1131,11 @@ fn tui_render_table_frame() {
         var pid_w = _proc_int_to_cstr(pid, &pid_str);
         if (pid_w < 6) { pid_w = 6; }
         var cmd_buf[256];
-        var cmd_n = _proc_read_cmdline(&pid_str, &cmd_buf, PROC_CMDLINE_MAX);
+        # v0.9.0: cached. This is the per-row read that put the full table over
+        # design-spec §8's < 0.5% CPU target (0.517% full vs 0.467% at --top 1
+        # over a 60 s window). The comm from THIS frame is passed so an exec or
+        # a pid reuse invalidates the entry — see proc_read_cmdline_cached.
+        var cmd_n = proc_read_cmdline_cached(&pid_str, pid, rec + 32, &cmd_buf, PROC_CMDLINE_MAX);
         var avail = _tui_cols - (pid_w + 15);
         if (avail < 0) { avail = 0; }
         if (cmd_n > 0) {

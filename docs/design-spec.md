@@ -215,13 +215,43 @@ OPTIONS:
 
 ## 8. Performance Targets
 
-| Target | Goal | Measured at |
-|--------|------|-------------|
-| Cold start (`shu --version`) | < 5 ms | M0 |
-| First TUI frame | < 50 ms | M1 |
-| Steady-state CPU at 1 Hz | < 0.5% on a 4-core machine | M2 |
-| Memory resident | < 8 MB | M2 |
-| `-p` snapshot | < 30 ms | M1 |
+Measured at v0.9.0 under a real pseudo-terminal at `--rate 1`, 295 processes on a
+16-core box, unless noted.
+
+| Target | Goal | Status |
+|--------|------|--------|
+| Cold start (`shu --version`) | < 5 ms | **met** — ~2.0 ms |
+| First TUI frame | < 50 ms | met |
+| Steady-state CPU at 1 Hz | < 0.5% of one core | **met, at the margin** — 0.433–0.500% over five 60 s windows, mean 0.473% |
+| Memory resident | < 8 MB | **met** — 4.56 MB, flat |
+| `-p` snapshot | < 30 ms of work | met — ~12 ms (plus a deliberate 100 ms sample window) |
+| Lean `shu` binary | **< 768 KB** | met — 622 KB |
+
+### On the binary-size target (revised at v0.9.0)
+
+This originally read **`< 256 KB`**. That figure was set at M0, before chakshu took
+its dependencies, and it is not reachable while the lean monitor links `mihi` (for
+identity probes) and `ai-hwaccel` (for the GPU panel):
+
+- The binary peaked at 861 KB and is now 622 KB. The single biggest win —
+  −290 KB — came from getting bayan's 641 KB monolith out of the closure by fixing
+  two upstream repos (see `docs/development/p1-sweep-findings.md`).
+- **No chakshu-side lever remains.** The remaining safe stdlib drops (`bench`,
+  `freelist`, `tagged`, `slice`) total ~25 KB combined.
+- **DCE is not a lever either.** Since cycc 6.5.16 the compiler emits every
+  *declared* stdlib module and `CYRIUS_DCE=1` NOPs dead code in place — it produces
+  a byte-identical binary. It is a parity check, not an optimizer.
+
+The rest is bulk inside the mihi/ai-hwaccel dist bundles, which is upstream work,
+not chakshu's. Rather than carry a permanently-red target, §8 now states a number
+the architecture can actually hold: **< 768 KB**, which keeps the headroom the
+target existed to protect. The user-facing comparison is unchanged — btop installs
+at ~1.7 MB, htop more once its ncurses and libc are counted, and `shu` is
+self-contained with neither.
+
+`shu-ai` is explicitly out of scope for this budget: it is the opt-in heavy build
+(~3.2 MB) and carries the TLS/HTTP chain by design.
+
 
 ---
 
