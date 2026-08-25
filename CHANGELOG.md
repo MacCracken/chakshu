@@ -6,6 +6,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [0.9.5] — 2026-08-25 — the six §1 features that were in scope since M0
 
+### Added — `scripts/check.sh`: run locally exactly what CI runs
+
+⛔ **This release and the last each shipped a red build**, both from the same mistake: a hand-rolled
+local sweep that *resembled* the CI gate instead of *being* it. v0.9.4 missed the AI-privacy scan
+because it lives in a separate CI job and was never run locally; v0.9.5 missed an fmt drift because
+the local loop walked `src/` and `ai/` while the gate also covers `tests/*.tcyr` and
+`ai/tests/*.tcyr`.
+
+`scripts/check.sh` runs all 18 gates in CI's order, including the two jobs that are easy to forget
+because they are not the build job. Every gate was mutation-verified: reintroducing the exact fmt
+drift CI caught, deleting a denylist entry, and declaring a network module in the lean manifest each
+turn it red.
+
+`CLAUDE.md`'s work loop now names it as step 3, with the rule that a gate added to `ci.yml` is added
+here in the same edit — a local runner that silently lags CI is worse than none, because it
+manufactures false confidence.
+
+
 ### Added — per-core CPU, per-device disk, per-interface network, and a USER column
 
 design-spec §1 listed all four as in scope from M0. None was implemented and none was ever formally

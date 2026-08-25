@@ -440,7 +440,7 @@ fn main() {
     var lone_w[64];
     var lone = "   8 0 sdb3 1 0 7 0 1 0 9 0 0 0 0\n";
     assert_eq(proc_diskstats_each(lone, strlen(lone), &lone_n, 16, &lone_r, &lone_w, 8), 1,
-              "sdb3 with no listed parent is kept — it is a device, not a partition");
+      "sdb3 with no listed parent is kept — it is a device, not a partition");
 
     # ⚠ Byte sizing again: function-local `var X[N]` is N BYTES. Names table is
     # 8 devices x 16 bytes = 128; counter arrays are 8 slots x 8 = 64.
@@ -472,7 +472,7 @@ fn main() {
     var one_a[8];
     var one_b[8];
     assert_eq(proc_netdev_each(ni_fix, strlen(ni_fix), &one_n, 16, &one_a, &one_b, 1), 1,
-              "max bounds the interface count");
+      "max bounds the interface count");
 
     test_group("proc.cyr — per-core CPU (v0.9.5)");
     # ⚠ 64 BYTES, not [8]. Function-local `var X[N]` is N BYTES in Cyrius (module
@@ -493,10 +493,10 @@ fn main() {
     var pc_one_a[64];
     var pc_one_t[64];
     assert_eq(proc_stat_percore(pc_fix, strlen(pc_fix), &pc_one_a, &pc_one_t, 1), 1,
-              "max bounds the core count");
+      "max bounds the core count");
     var pc_none = "intr 1 2 3\nctxt 9\n";
     assert_eq(proc_stat_percore(pc_none, strlen(pc_none), &pc_act, &pc_tot, 8), 0,
-              "a buffer with no cpuN lines yields 0 cores");
+      "a buffer with no cpuN lines yields 0 cores");
 
     test_group("cli.cyr — fractional --rate parsing (v0.9.4)");
     # Millihertz, so no float is involved anywhere. The whole point is that

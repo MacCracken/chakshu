@@ -67,11 +67,20 @@ Build-specific entries + AI module:
 
 1. Pick the next item from `docs/development/roadmap.md`
 2. Implement
-3. `cyrius build` → `cyrius test`
+3. **`bash scripts/check.sh`** — runs exactly what CI runs, in CI's order, and is the
+   only local check that counts. ⛔ Do NOT hand-roll a subset: v0.9.4 and v0.9.5 each
+   shipped a red build because a bespoke local sweep *resembled* the CI gate instead
+   of *being* it — once it missed the AI-privacy scan (a separate CI job), once it
+   walked `src/` and `ai/` while the fmt gate also covers `tests/*.tcyr` and
+   `ai/tests/*.tcyr`. If you add a gate to `ci.yml`, add it to `scripts/check.sh` in
+   the same edit.
 4. Manual TUI check on a real terminal — type checks can't catch ANSI regressions or termios state leaks
-5. Update `CHANGELOG.md`
-6. Update `docs/development/state.md` if version, binary size, deps, or milestone status changed
-7. Version bump only at milestone close, not per feature
+5. `python3 tests/agnos_qemu.py build/shu-agnos` if the change touches the AGNOS path.
+   Not in `check.sh` or CI: it boots a real AGNOS kernel under QEMU and needs
+   qemu/OVMF/mtools plus sibling agnos, agnoshi and gnoboot checkouts.
+6. Update `CHANGELOG.md`
+7. Update `docs/development/state.md` if version, binary size, deps, or milestone status changed
+8. Version bump only at milestone close, not per feature — and it is the **user's call**, never taken unilaterally
 
 ### Cyrius Idioms
 
