@@ -7,7 +7,7 @@
 # logic lives here once. `ai_explain` resolves to whichever is included.
 
 # Keep CHAKSHU_VERSION in sync with the VERSION file.
-var CHAKSHU_VERSION = "chakshu 0.7.15";
+var CHAKSHU_VERSION = "chakshu 0.8.0";
 
 # Exit codes per design-spec §9
 var EXIT_OK    = 0;
@@ -27,7 +27,7 @@ fn print_help() {
     println("  shu -p                   Plain snapshot (host/uptime/load/mem/cpu/disk/net + top-N process table)");
     println("  shu --pid <PID>          Focus a single process (status / cmdline / k to kill)");
     println("  shu --explain <PID>      AI explain via hoosh (shu-ai build only)");
-    println("  shu --watch              Anomaly stream (0.7.7)");
+    println("  shu --watch [PATH]       Anomaly stream — tail aegis security events");
     println("");
     println("Options:");
     println("  -p                        Plain snapshot mode (single frame to stdout)");
@@ -37,8 +37,12 @@ fn print_help() {
     println("  --color <when>            auto | always | never (default auto; TUI only)");
     println("  --pid <PID>               Focus a single process (validates PID exists at startup)");
     println("  --explain <PID>           Ask hoosh to explain PID and exit (shu-ai build; redacted context)");
-    println("  --watch                   Anomaly stream mode (0.7.7)");
-    println("  --with-logs               Allow AI prompts to include sakshi log context (0.7.7)");
+    println("  --watch [PATH]            Anomaly stream mode. Reads aegis's append-only");
+    println("                            NDJSON event log. Path resolution: this argument,");
+    println("                            then $CHAKSHU_WATCH_PATH, then");
+    println("                            /var/log/aegis/events.jsonl. Non-TTY prints a");
+    println("                            plain dump; a TTY gets the live panel.");
+    println("  --with-logs               Allow AI prompts to include sakshi log context (0.8.1)");
     println("  -h, --help                Show this help");
     println("  -V, --version             Show version");
     println("");
@@ -95,6 +99,8 @@ fn chakshu_main() {
     var mode_help    = 0;
     var mode_version = 0;
     var mode_p       = 0;
+    var mode_watch   = 0;
+    var watch_path   = 0;
 
     var sort_key    = SORT_CPU;
     var top_n       = PROC_DEFAULT_TOPN;
@@ -247,9 +253,26 @@ fn chakshu_main() {
             return ai_explain(ev);
         }
 
+        # v0.8.0: --watch is a real mode. It ACCUMULATES like -p rather than
+        # returning from mid-loop — the old early return meant `-p --watch`
+        # silently dropped the -p and `--watch --rate 2` never parsed --rate.
+        # An optional path may follow; anything starting with '-' is the next
+        # flag, not a path.
+        if (streq(a, "--watch") == 1) {
+            mode_watch = 1;
+            if (i + 1 < argc()) {
+                var wnext = argv(i + 1);
+                if (load8(wnext) != 45) {
+                    watch_path = wnext;
+                    i = i + 1;
+                }
+            }
+            i = i + 1;
+            continue;
+        }
+
         # Recognized flags that are not yet implemented — emit a
         # clear placeholder rather than a generic "unknown flag".
-        if (streq(a, "--watch") == 1)     { return print_unimplemented("--watch"); }
         if (streq(a, "--with-logs") == 1) { return print_unimplemented("--with-logs"); }
 
         return print_unknown_flag(a);
@@ -261,6 +284,22 @@ fn chakshu_main() {
     # R24 (v0.7.13): --pid is TUI-only, but `-p --pid N` used to discard it
     # silently — while a *bad* pid still exited 1 via the parse-time probe, so the
     # flag was half-honoured. Reject the combination explicitly instead.
+    # --watch is its own mode: it renders an event stream, not the process
+    # table, so combining it with -p or --pid is meaningless. Reject explicitly
+    # rather than silently honouring one and dropping the other (the R24 lesson
+    # from v0.7.13).
+    if (mode_watch == 1) {
+        if (mode_p == 1) {
+            eprintln("chakshu: --watch cannot be combined with -p");
+            return EXIT_USAGE;
+        }
+        if (focus_pid != 0) {
+            eprintln("chakshu: --watch cannot be combined with --pid");
+            return EXIT_USAGE;
+        }
+        return watch_run(_hz_to_ms(tui_rate_hz), color_mode, watch_path);
+    }
+
     if (mode_p == 1) {
         if (focus_pid != 0) {
             eprintln("chakshu: --pid cannot be combined with -p (focus mode is TUI-only)");

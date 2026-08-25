@@ -5,7 +5,7 @@
 > [`state.md`](state.md). This file answers one question: *what is left to reach
 > v1.0, and in which release does it land?*
 >
-> **Current: v0.7.15.** | **Last Updated**: 2026-08-24
+> **Current: v0.8.0.** | **Last Updated**: 2026-08-24
 
 ---
 
@@ -18,7 +18,7 @@ inside it are additive or corrective only.
 
 | Release | Theme | Gate |
 |---|---|---|
-| **0.8.0** | `--watch` anomaly stream — closes M3 | A user asks "why is this spiking" and gets an answer grounded in real `/proc` data |
+| ~~0.8.0~~ | ~~`--watch` anomaly stream~~ | **shipped 2026-08-24 — M3 closed.** Consumer in the lean `shu`; producer is aegis 1.1.7's NDJSON sink |
 | **0.8.1** | `--with-logs` sakshi context | Log lines reach the prompt, still redacted |
 | **0.8.2** | AI hardening + hoosh gate promotion | The stub smoke is a *hard* CI gate |
 | **0.9.0** | Perf + size close-out | §8 targets either met or formally revised |
@@ -28,21 +28,6 @@ inside it are additive or corrective only.
 | **1.0.0** | Ship as the AGNOS default monitor | Registry promotion, ISO default, announce |
 
 ---
-
-## 0.8.0 — `--watch` anomaly stream (closes M3)
-
-The substantive case for first-party: chakshu becomes the panel where the AGNOS
-LLM stack meets the live system view.
-
-- [ ] Subscribe to aegis/phylax events and surface them as an anomaly stream.
-- [ ] Decide the render: a dedicated mode, or a panel inside the TUI. `--watch`
-      currently exits `EXIT_ERR` via `print_unimplemented`, so the flag is
-      already reserved and smoke-tested.
-- [ ] Wire the stream into the `?` overlay's context so an explanation can cite
-      the anomaly that prompted it.
-
-**Gate:** ask "why is this process spiking", get a coherent answer quoting real
-`/proc` data.
 
 ## 0.8.1 — `--with-logs`
 
@@ -86,7 +71,7 @@ Perf was audited at v0.7.15 under a real PTY at `--rate 1`, 281 processes,
       emits a byte-identical binary. **Decide here: revise §8, or take it upstream**
       (what the mihi/ai-hwaccel bundles still pull in). See
       [`p1-sweep-findings.md`](p1-sweep-findings.md).
-- [ ] Manual TTY checks documented in `tests/` — the PTY suite covers 11
+- [ ] Manual TTY checks documented in `tests/` — the PTY suite covers 12
       scenarios; the checks that still need human eyes should be written down.
 
 ## 0.9.1 — GPU telemetry depth

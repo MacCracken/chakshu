@@ -24,7 +24,7 @@ Binary name: `shu` — **S**ystem **H**ealth **U**tility, a contraction of *chak
 - Kill selected process (with confirm)
 - Plain-snapshot mode (`-p`) — single-frame text dump, pipeable
 - AI explanation of selected row / system state via the `hoosh` LLM gateway (HTTP) — shipped in the `shu-ai` build (v0.7.3+)
-- Anomaly flagging via `aegis` / `phylax` hooks — pending v0.7.5
+- Anomaly flagging via aegis's event sink — shipped v0.8.0 (`--watch`)
 
 **Out of scope (for v1):**
 
@@ -104,13 +104,13 @@ Layout is text-anchored rather than box-drawn — bars and graphs are M4-polish 
 | Plain | `-p` / pipe-to-tty-detected | Single frame to stdout, no termios changes, no alt-buffer |
 | Single-process | `--pid N` | TUI focused on one process (full process tree, fds, threads) |
 | Explain | `--explain N` | AI explanation of process N — redacted prompt → hoosh, answer printed, exit (`shu-ai`; v0.7.3) |
-| Watch | `--watch` | Tail-mode: show events flagged by aegis/phylax as they occur (`shu-ai`; pending v0.7.5) |
+| Watch | `--watch [PATH]` | Tail-mode: show security events as they occur, from aegis's append-only NDJSON sink. **Lean `shu`** — see §6.4. |
 
 ---
 
 ## 6. AI Integration (M3)
 
-**Implemented in the `shu-ai` build (v0.7.2–v0.7.4).** §6.1–§6.3 below describe the shipped behaviour; §6.4 (`--watch`) is still pending (v0.7.5). The lean `shu` build has no AI surface — `--explain`/`?` there point users at `shu-ai`.
+**§6.1–§6.3 are implemented in the `shu-ai` build (v0.7.2–v0.7.4)**; the lean `shu` has no AI surface — `--explain`/`?` there point users at `shu-ai`. **§6.4's `--watch` shipped at v0.8.0 in the LEAN build**, because tailing a local event file needs no gateway; see §6.4 for why that placement changed.
 
 ### 6.1 Trigger surface
 
@@ -142,12 +142,45 @@ Excluded: env vars, /home paths, file contents, network packets.
 
 > If `hoosh` later exposes a Unix socket for internal use, a socket transport can be added behind the same `$CHAKSHU_HOOSH_URL` selection. For now it's HTTP.
 
-### 6.4 Anomaly stream + log context (pending — v0.7.5, closes M3)
+### 6.4 Anomaly stream + log context
 
-- `--watch`: `aegis` and `phylax` already publish events. `chakshu --watch` subscribes to that bus (transport TBD — sandhi pub/sub or polling the relevant hoosh/phylax HTTP endpoint) and renders flagged events in a dedicated panel.
-- `--with-logs`: opt-in to fold the last N `sakshi` log lines for the focused pid into the `--explain`/`?` prompt (§6.2). Off by default; privacy rules in §6.2 still apply.
+**Corrected at v0.8.0.** This section previously asserted that "`aegis` and `phylax`
+already publish events" and left the transport as "TBD — sandhi pub/sub or polling the
+relevant hoosh/phylax HTTP endpoint". All three claims were wrong, and the design was
+rebuilt on what actually exists:
 
-Both land in the `shu-ai` build.
+- **aegis did not publish.** Through 1.1.6 its daemon was a stub (`println("aegis ready")`,
+  return 0) and the codebase contained **zero** `sys_write` / `sys_socket` / `sys_bind`
+  calls — every `sys_open` was `O_RDONLY`. It could *serialize* an event
+  (`security_event_to_json`) but never wrote the bytes anywhere.
+- **phylax does not publish.** Its Unix socket is a scan RPC: send a path, get
+  `{"findings":N,"status":"ok"}`, connection closed. A second connection receives no
+  unsolicited bytes.
+- **"sandhi pub/sub" does not exist.** sandhi exports no subscribe/topic/listen surface.
+
+**Transport (settled):** an append-only **NDJSON** file — one complete JSON object per
+line, written by the producer in a single `write(2)` under `O_APPEND`. That framing is the
+contract: because the record and its newline land atomically, a consumer that stops at the
+last complete `\n` can never observe a torn record, so no lock, watermark, or producer
+cooperation is required. aegis **1.1.7** implements the producer side
+(`aegis_set_event_sink`, `AEGIS_EVENT_LOG`).
+
+**`--watch` lands in the LEAN `shu`, not `shu-ai`** — the second correction. Tailing a
+local file needs no libc, no network and no new dependency; the syscalls are already in
+the lean manifest. This means `--watch` works on a pure no-libc AGNOS host where `shu-ai`
+cannot run at all (sandhi dlopens libc), and it *strengthens* the "AI is opt-in at the
+binary level" rule rather than weakening it: reading a file another process wrote is not a
+network reach. Only AI **triage** of a flagged event needs the gateway, and that stays in
+`shu-ai`.
+
+Path resolution: `--watch <path>` argument, then `$CHAKSHU_WATCH_PATH`, then
+`/var/log/aegis/events.jsonl`. Non-TTY renders a deterministic escape-free dump (the `-p`
+posture of §2.2); a TTY gets the live panel.
+
+- `--with-logs`: opt-in to fold the last N `sakshi` log lines for the focused pid into the
+  `--explain`/`?` prompt (§6.2). Off by default; privacy rules in §6.2 still apply. Still
+  pending — this one **does** land in `shu-ai`, since it feeds a prompt.
+
 
 ---
 
@@ -167,8 +200,10 @@ OPTIONS:
   --color <when>     auto | always | never (default auto)
   --pid <PID>        Focus a single process
   --explain <PID>    Ask hoosh to explain PID and exit (shu-ai build; v0.7.3)
-  --watch            Anomaly stream mode (shu-ai build; pending v0.7.5)
-  --with-logs        Allow AI prompts to include sakshi log context (shu-ai; pending v0.7.5)
+  --watch [PATH]     Anomaly stream mode. Reads aegis's NDJSON event log;
+                     path, else $CHAKSHU_WATCH_PATH, else
+                     /var/log/aegis/events.jsonl. Non-TTY prints a plain dump.
+  --with-logs        Allow AI prompts to include sakshi log context (shu-ai; pending)
   -h, --help         Show help
   -V, --version      Show version
 ```

@@ -1,0 +1,144 @@
+# watch_render.cyr — presentation layer for the anomaly stream (`--watch`).
+#
+# Split from src/watch.cyr deliberately. Everything here depends on the TUI
+# (`_tui_rows`, `_tui_cols`, `tty_move`, the colour helpers) and on the CLI's
+# exit codes, so keeping it separate leaves `watch.cyr` free of those
+# dependencies — which is what lets the unit suite include the parser, ring and
+# tail reader directly and assert them without linking the whole TUI.
+#
+# Included by both build entries, after tui.cyr and cli.cyr.
+
+# --- render -----------------------------------------------------------
+
+# Resolve the sink path: explicit `--watch <path>` wins, then
+# CHAKSHU_WATCH_PATH, then the default. Returns a cstring.
+fn watch_resolve_path(explicit) {
+    if (explicit != 0) { if (strlen(explicit) > 0) { return explicit; } }
+    var env = getenv("CHAKSHU_WATCH_PATH");
+    if (env != 0) { if (strlen(env) > 0) { return env; } }
+    return watch_default_path();
+}
+
+# Plain, non-interactive render — the `-p` of the anomaly stream. Used when
+# stdin is not a TTY, which is what makes the mode assertable in CI without a
+# pseudo-terminal. Deterministic, newline-per-event, no escapes.
+fn watch_dump(path) {
+    var p = watch_resolve_path(path);
+    var rc = watch_open(p);
+    if (rc < 0) {
+        eprint_cstr("chakshu: cannot read anomaly stream: ");
+        eprintln(p);
+        eprintln("chakshu: set CHAKSHU_WATCH_PATH, or pass --watch <path>.");
+        eprintln("chakshu: aegis writes this file when AEGIS_EVENT_LOG is set (aegis >= 1.1.7).");
+        return EXIT_ERR;
+    }
+    syscall(1, 1, "anomaly stream: ", 16);
+    syscall(1, 1, p, strlen(p));
+    syscall(1, 1, "\n", 1);
+    var n = watch_count();
+    if (n == 0) {
+        syscall(1, 1, "  (no events)\n", 14);
+    }
+    var i = 0;
+    while (i < n) {
+        var lbl = watch_threat_label(watch_threat_at(i));
+        syscall(1, 1, "  ", 2);
+        syscall(1, 1, lbl, strlen(lbl));
+        syscall(1, 1, "  ", 2);
+        var t = watch_text_at(i);
+        syscall(1, 1, t, strlen(t));
+        syscall(1, 1, "\n", 1);
+        i = i + 1;
+    }
+    watch_close();
+    return EXIT_OK;
+}
+
+# Full-screen render for the interactive mode. A sibling of
+# tui_render_table_frame, dispatched from tui_render_frame — it reuses tui_run's
+# setup, epoll loop, key handling and teardown wholesale, and costs LESS per
+# frame than the process table because it never walks /proc.
+fn watch_render_frame() {
+    watch_poll();
+
+    tty_move(1, 1);
+    _tui_color_bold();
+    syscall(1, 1, "anomaly stream", 14);
+    _tui_color_reset();
+    syscall(1, 1, "  ", 2);
+    var p = watch_resolve_path(_watch_path_arg);
+    syscall(1, 1, p, strlen(p));
+    tty_clear_to_eol();
+
+    tty_move(2, 1);
+    if (watch_is_open() == 0) {
+        syscall(1, 1, "stream unavailable — is aegis running with AEGIS_EVENT_LOG set?", 62);
+        tty_clear_to_eol();
+    } else {
+        var n = watch_count();
+        syscall(1, 1, "events: ", 8);
+        print_num(n);
+        if (_watch_n > n) {
+            syscall(1, 1, "  (showing newest ", 18);
+            print_num(n);
+            syscall(1, 1, " of ", 4);
+            print_num(_watch_n);
+            syscall(1, 1, ")", 1);
+        }
+        tty_clear_to_eol();
+    }
+
+    tty_move(3, 1);
+    _tui_color_bold();
+    syscall(1, 1, "SEV   TIME      EVENT", 21);
+    _tui_color_reset();
+    tty_clear_to_eol();
+
+    # Rows 4..(_tui_rows-1) hold events, newest first. The status row is left to
+    # _tui_render_status so quit/help hints stay consistent with the other modes.
+    var avail = _tui_rows - 4;
+    if (avail < 0) { avail = 0; }
+    var shown = watch_count();
+    if (shown > avail) { shown = avail; }
+    var i = 0;
+    while (i < shown) {
+        tty_move(4 + i, 1);
+        var rank = watch_threat_at(i);
+        _tui_color_pct_band(rank * 20, 40, 70);
+        var lbl = watch_threat_label(rank);
+        syscall(1, 1, lbl, strlen(lbl));
+        _tui_color_reset();
+        syscall(1, 1, "  ", 2);
+        var t = watch_text_at(i);
+        var tn = strlen(t);
+        var cap = _tui_cols - 6;
+        if (cap < 0) { cap = 0; }
+        if (tn > cap) { tn = cap; }
+        if (tn > 0) { syscall(1, 1, t, tn); }
+        tty_clear_to_eol();
+        i = i + 1;
+    }
+    # Blank any rows a shrinking stream left behind.
+    var r = shown;
+    while (r < avail) {
+        tty_move(4 + r, 1);
+        tty_clear_to_eol();
+        r = r + 1;
+    }
+    _tui_render_status();
+    return 0;
+}
+
+# Entry point for `--watch`. Non-TTY degrades to the plain dump so the mode is
+# usable in a pipe and testable in CI; a TTY gets the full-screen panel through
+# tui_run.
+fn watch_run(refresh_ms, color_mode, path) {
+    _watch_path_arg = path;
+    if (tty_isatty(0) == 0) { return watch_dump(path); }
+    var p = watch_resolve_path(path);
+    watch_open(p);
+    _tui_watch_mode = 1;
+    var rc = tui_run(refresh_ms, SORT_CPU, PROC_DEFAULT_TOPN, color_mode, 0);
+    watch_close();
+    return rc;
+}

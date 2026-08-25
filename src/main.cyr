@@ -12,10 +12,12 @@ include "lib/ai-hwaccel.cyr"
 include "lib/mihi.cyr"
 include "src/proc.cyr"
 include "src/processes.cyr"
+include "src/watch.cyr"
 include "src/ai_stub.cyr"
 include "src/snapshot.cyr"
 include "src/tui.cyr"
 include "src/cli.cyr"
+include "src/watch_render.cyr"
 
 var r = chakshu_main();
 syscall(SYS_EXIT, r);

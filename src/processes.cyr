@@ -98,8 +98,8 @@ fn _proc_ensure_init() {
 fn _proc_scan_pids() {
     _proc_ensure_init();
     var scratch[4096];
-    var rc = dir_list_into(_proc_dir, &scratch, 4096,
-                           _proc_names, PROC_NAMES_CAP, _proc_offs, PROC_MAX);
+    var rc = dir_list_into(_proc_dir, &scratch, 4096, _proc_names, PROC_NAMES_CAP,
+      _proc_offs, PROC_MAX);
     if (rc >= 0) { return rc; }
     # Clamp fallback. dir_list_into bails on the FIRST overflow and discards
     # its running count, so returning rc here would render an EMPTY process

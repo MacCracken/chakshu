@@ -12,6 +12,7 @@ include "src/proc.cyr"
 # units below. Its module globals stay unallocated (nothing here calls
 # _proc_ensure_init), so including it costs the suite nothing at runtime.
 include "src/processes.cyr"
+include "src/watch.cyr"
 # darshana — for the signalfd teardown regression guard below. It is already a
 # [deps.darshana] module of this manifest, so no new dependency is introduced.
 include "lib/darshana.cyr"
@@ -89,6 +90,92 @@ fn main() {
     assert(_sfd_w >= 0, "tty_open_signalfd(TTY_SIGMASK_WINCH) returns an fd");
     tty_close_signalfd(_sfd_w, TTY_SIGMASK_WINCH);
     assert_eq(_test_sigblk_clear(), 1, "WINCH mask released too");
+
+    # ----- watch.cyr — the anomaly stream (v0.8.0) ---------------------
+    # These parse REAL aegis 1.1.7 output. The record below is verbatim from a
+    # live emitter, not hand-written, so the assertions pin the actual producer
+    # format rather than a guess at it.
+    test_group("watch.cyr — aegis NDJSON field extraction");
+    var wrec = "{\"id\":\"d3937571-0fed-4939-aa59-148bf012cbaa\",\"timestamp\":\"2026-08-25T00:49:17Z\",\"event_type\":\"MaliciousPayload\",\"source\":\"phylax\",\"agent_id\":null,\"threat_level\":\"Critical\",\"description\":\"entropy 7.94 in /tmp/x\",\"metadata\":{},\"resolved\":false}";
+    var wf[96];
+    assert(watch_json_field(wrec, "event_type", &wf, 96) > 0, "event_type extracted");
+    assert_eq(streq(&wf, "MaliciousPayload"), 1, "event_type value exact");
+    assert(watch_json_field(wrec, "threat_level", &wf, 96) > 0, "threat_level extracted");
+    assert_eq(streq(&wf, "Critical"), 1, "threat_level value exact");
+    assert(watch_json_field(wrec, "description", &wf, 96) > 0, "description extracted");
+    assert_eq(streq(&wf, "entropy 7.94 in /tmp/x"), 1, "description value exact");
+    assert(watch_json_field(wrec, "timestamp", &wf, 96) > 0, "timestamp extracted");
+    assert_eq(streq(&wf, "2026-08-25T00:49:17Z"), 1, "timestamp value exact");
+    # agent_id is JSON null, not a string — must report absent, not garbage.
+    assert_eq(watch_json_field(wrec, "agent_id", &wf, 96), 0 - 1, "null value reported absent");
+    assert_eq(watch_json_field(wrec, "nosuchkey", &wf, 96), 0 - 1, "missing key reported absent");
+    # A key name appearing INSIDE a value must not be mistaken for the key.
+    var wrec2 = "{\"description\":\"event_type is a decoy\",\"event_type\":\"RealKind\"}";
+    assert(watch_json_field(wrec2, "event_type", &wf, 96) > 0, "decoy: key found");
+    assert_eq(streq(&wf, "RealKind"), 1, "decoy in a value does not shadow the real key");
+
+    test_group("watch.cyr — threat ranking");
+    assert(watch_threat_rank("Critical") > watch_threat_rank("High"), "Critical outranks High");
+    assert(watch_threat_rank("High") > watch_threat_rank("Medium"), "High outranks Medium");
+    assert(watch_threat_rank("Medium") > watch_threat_rank("Low"), "Medium outranks Low");
+    assert(watch_threat_rank("Low") > watch_threat_rank("Info"), "Low outranks Info");
+    assert_eq(watch_threat_rank("Bogus"), WATCH_T_UNKNOWN, "unknown label ranks unknown");
+
+    test_group("watch.cyr — ingest, ring, eviction");
+    watch_reset();
+    assert_eq(watch_count(), 0, "ring starts empty");
+    assert_eq(watch_ingest_line(wrec), 1, "a real record is ingested");
+    assert_eq(watch_count(), 1, "ring holds it");
+    assert_eq(watch_threat_at(0), WATCH_T_CRITICAL, "threat rank stored");
+    assert(strstr(watch_text_at(0), "MaliciousPayload") >= 0, "kind is in the display line");
+    assert(strstr(watch_text_at(0), "entropy 7.94") >= 0, "description is in the display line");
+    assert(strstr(watch_text_at(0), "00:49:17") >= 0, "clock time extracted from the timestamp");
+    assert(strstr(watch_text_at(0), "2026-08-25") < 0, "date half dropped from the display line");
+
+    # Malformed input must be skipped, never fatal — this is a stream from
+    # another process and one bad line must not kill the monitor.
+    assert_eq(watch_ingest_line("not json at all"), 0, "garbage line skipped");
+    assert_eq(watch_ingest_line(""), 0, "empty line skipped");
+    assert_eq(watch_ingest_line("{\"threat_level\":\"High\"}"), 0, "record without event_type skipped");
+    assert_eq(watch_count(), 1, "skipped lines did not enter the ring");
+
+    # Partial-line handling: only COMPLETE records are consumed, and the caller
+    # is told exactly how many bytes to keep.
+    watch_reset();
+    var wbuf[512];
+    var wtwo = "{\"event_type\":\"A\",\"threat_level\":\"Low\"}\n{\"event_type\":\"B\",\"threat_level\":\"High\"}\n{\"event_type\":\"PART";
+    var wlen = strlen(wtwo);
+    memcpy(&wbuf, wtwo, wlen);
+    var used = watch_ingest_buf(&wbuf, wlen);
+    assert_eq(watch_count(), 2, "two complete records ingested");
+    assert(used < wlen, "trailing partial record not consumed");
+    assert_eq(load8(&wbuf + used), 123, "unconsumed remainder starts at the partial record");
+    assert(strstr(watch_text_at(0), "B") >= 0, "newest-first ordering");
+
+    # Eviction: the ring is a fixed window on the newest events.
+    watch_reset();
+    var wi = 0;
+    while (wi < WATCH_MAX + 5) {
+        watch_ingest_line("{\"event_type\":\"Fill\",\"threat_level\":\"Info\"}");
+        wi = wi + 1;
+    }
+    assert_eq(watch_count(), WATCH_MAX, "ring caps at WATCH_MAX");
+
+    # Control bytes in a daemon-authored field must not reach the terminal.
+    watch_reset();
+    watch_ingest_line("{\"event_type\":\"K\",\"description\":\"a\\u0000b\",\"threat_level\":\"Low\"}");
+    var wt = watch_text_at(0);
+    var wesc = 0;
+    var wj = 0;
+    while (wj < 120) {
+        var wc = load8(wt + wj);
+        if (wc == 0) { break; }
+        if (wc < 32) { wesc = 1; }
+        if (wc == 127) { wesc = 1; }
+        wj = wj + 1;
+    }
+    assert_eq(wesc, 0, "no control byte survives into the display line");
+    watch_reset();
 
     test_group("proc.cyr — meminfo field extraction");
     var mi = "MemTotal:       62662196 kB\nMemFree:        58880840 kB\nMemAvailable:   60482036 kB\nBuffers:            2664 kB\n";

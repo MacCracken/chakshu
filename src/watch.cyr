@@ -1,0 +1,377 @@
+# watch.cyr — the anomaly stream (`--watch`), v0.8.0.
+#
+# WHAT THIS CONSUMES
+#
+# aegis 1.1.7 appends every reported security event to an append-only NDJSON
+# file: one complete JSON object per line, written with a single `sys_write`
+# under `O_APPEND`. That framing is the whole contract — because the record and
+# its newline land atomically, a reader that stops at the last complete `\n`
+# can never observe a torn record, so this module needs no lock, no watermark
+# file, and no cooperation from the producer beyond the file existing.
+#
+# A real record (verbatim from aegis):
+#   {"id":"d393…","timestamp":"2026-08-25T00:49:17Z","event_type":"MaliciousPayload",
+#    "source":"phylax","agent_id":null,"threat_level":"Critical",
+#    "description":"entropy 7.94 in /tmp/x","metadata":{},"resolved":false}
+#
+# WHY THIS IS IN THE LEAN BUILD
+#
+# design-spec §6.4 originally placed `--watch` in `shu-ai` alongside `--explain`.
+# That was written when the transport was assumed to be "sandhi pub/sub or an
+# HTTP endpoint". Tailing a local file needs no libc, no network, and no new
+# dependency: `SYS_LSEEK` and the open/read/close syscalls are already in the
+# lean manifest. Putting the subscription in lean `shu` means `--watch` works on
+# a pure no-libc AGNOS host where `shu-ai` cannot run at all (sandhi dlopens
+# libc), and it *strengthens* "AI is opt-in at the binary level": subscribing to
+# a local file is not a network reach. Only AI triage of a flagged event needs
+# the gateway, and that stays in `shu-ai`.
+#
+# WHY A HAND-ROLLED FIELD READER RATHER THAN bayan
+#
+# The lean build deliberately does not link a JSON parser. Pulling `bayan` in
+# for five string fields would cost far more than this file (chakshu spent
+# v0.7.14 getting the 641 KB bayan monolith *out* of the lean closure). The
+# extractor below is deliberately minimal: it finds `"key":"` at the top level
+# of a flat record and copies bytes to the closing quote. It is not a JSON
+# parser and must not be sold as one — it is a field reader for a record shape
+# aegis controls and this module pins with tests.
+
+# Ring capacity and per-slot text budget. Module-scope `var X[N]` allocates
+# 8 bytes per element in cyrius, so `_watch_lines[1280]` is 10,240 bytes —
+# comfortably under the 65,536-byte CI large-buffer gate, and the whole ring is
+# static so the render path allocates nothing per frame.
+var WATCH_MAX  = 64;
+var WATCH_REC  = 160;
+var _watch_lines[1280];
+var _watch_threat[64];
+var _watch_n     = 0;        # total events ever ingested (not capped)
+var _watch_head  = 0;        # next slot to write
+
+# Threat ranks, ordered so a numeric compare is a severity compare.
+var WATCH_T_UNKNOWN  = 0;
+var WATCH_T_INFO     = 1;
+var WATCH_T_LOW      = 2;
+var WATCH_T_MEDIUM   = 3;
+var WATCH_T_HIGH     = 4;
+var WATCH_T_CRITICAL = 5;
+
+fn watch_threat_rank(s) {
+    if (streq(s, "Critical") == 1) { return WATCH_T_CRITICAL; }
+    if (streq(s, "High")     == 1) { return WATCH_T_HIGH; }
+    if (streq(s, "Medium")   == 1) { return WATCH_T_MEDIUM; }
+    if (streq(s, "Low")      == 1) { return WATCH_T_LOW; }
+    if (streq(s, "Info")     == 1) { return WATCH_T_INFO; }
+    return WATCH_T_UNKNOWN;
+}
+
+fn watch_threat_label(rank) {
+    if (rank == WATCH_T_CRITICAL) { return "CRIT"; }
+    if (rank == WATCH_T_HIGH)     { return "HIGH"; }
+    if (rank == WATCH_T_MEDIUM)   { return "MED "; }
+    if (rank == WATCH_T_LOW)      { return "LOW "; }
+    if (rank == WATCH_T_INFO)     { return "INFO"; }
+    return "????";
+}
+
+# Extract the string value of a top-level `"key":"value"` pair from a flat JSON
+# record into `out` (NUL-terminated, at most cap-1 bytes). Returns the byte
+# length written, or -1 if the key is absent or is not a string value.
+#
+# `\"` inside the value is honoured so a description containing a quote does not
+# truncate the field; no other escape is interpreted, because the value is
+# rendered as text and passed through chakshu's existing control-byte scrub
+# rather than being re-parsed.
+fn watch_json_field(buf, key, out, cap) {
+    # Build the `"key":"` needle so a value that merely CONTAINS the key name
+    # cannot be mistaken for the key itself.
+    var needle[64];
+    var klen = strlen(key);
+    if (klen > 58) { return 0 - 1; }
+    store8(&needle, 34);                       # '"'
+    var i = 0;
+    while (i < klen) {
+        store8(&needle + 1 + i, load8(key + i));
+        i = i + 1;
+    }
+    store8(&needle + 1 + klen, 34);            # '"'
+    store8(&needle + 2 + klen, 58);            # ':'
+    store8(&needle + 3 + klen, 0);
+
+    var off = strstr(buf, &needle);
+    if (off < 0) { return 0 - 1; }
+    var p = off + klen + 3;
+    if (load8(buf + p) != 34) { return 0 - 1; }   # not a string value (null, {}, false)
+    p = p + 1;
+
+    var n = 0;
+    while (n < cap - 1) {
+        var c = load8(buf + p);
+        if (c == 0) { break; }
+        if (c == 34) { break; }                    # closing quote
+        if (c == 92) {                             # backslash: keep the next byte verbatim
+            var nx = load8(buf + p + 1);
+            if (nx == 0) { break; }
+            store8(out + n, nx);
+            n = n + 1;
+            p = p + 2;
+        } else {
+            store8(out + n, c);
+            n = n + 1;
+            p = p + 1;
+        }
+    }
+    store8(out + n, 0);
+    return n;
+}
+
+# Append one already-formatted display line at `rank` into the ring, evicting
+# the oldest slot when full.
+fn _watch_push(rank, text) {
+    var slot = &_watch_lines + _watch_head * WATCH_REC;
+    var n = strlen(text);
+    if (n > WATCH_REC - 1) { n = WATCH_REC - 1; }
+    var i = 0;
+    while (i < n) {
+        # Scrub control bytes on the way in. These records are written by
+        # another process and can carry attacker-influenced text (a filename, a
+        # rule name), so an unfiltered copy would let an event repaint the
+        # terminal or forge a row — the same defect fixed for /proc cmdline and
+        # comm in v0.7.13. NUL terminates; every other C0 byte and DEL becomes
+        # '?'; bytes >= 0x80 pass through so UTF-8 survives.
+        var c = load8(text + i);
+        if (c < 32) { c = 63; }
+        if (c == 127) { c = 63; }
+        store8(slot + i, c);
+        i = i + 1;
+    }
+    store8(slot + n, 0);
+    store64(&_watch_threat + _watch_head * 8, rank);
+    _watch_head = _watch_head + 1;
+    if (_watch_head >= WATCH_MAX) { _watch_head = 0; }
+    _watch_n = _watch_n + 1;
+    return 0;
+}
+
+# Parse one NDJSON record and push it. Returns 1 if an event was ingested, 0 if
+# the line was not a usable record (blank, malformed, or missing the fields the
+# panel needs). A malformed line is skipped, never fatal: this is a stream from
+# another process and a monitor that dies on one bad line is useless.
+fn watch_ingest_line(line) {
+    if (strlen(line) < 2) { return 0; }
+
+    var ts[32];
+    var kind[48];
+    var threat[16];
+    var desc[96];
+    var have_kind = watch_json_field(line, "event_type", &kind, 48);
+    if (have_kind < 0) { return 0; }
+    if (watch_json_field(line, "threat_level", &threat, 16) < 0) {
+        store8(&threat, 0);
+    }
+    if (watch_json_field(line, "timestamp", &ts, 32) < 0) { store8(&ts, 0); }
+    if (watch_json_field(line, "description", &desc, 96) < 0) { store8(&desc, 0); }
+
+    # Display form: "HH:MM:SS  KIND  description". The date half of the ISO
+    # timestamp is dropped — the panel shows a live tail, so the clock time is
+    # what a reader needs and the row budget is tight.
+    var text[160];                 # == WATCH_REC; array sizes must be literals
+    var pos = 0;
+    var tl = strlen(&ts);
+    if (tl >= 19) {
+        var t = 11;
+        while (t < 19) {
+            store8(&text + pos, load8(&ts + t));
+            pos = pos + 1;
+            t = t + 1;
+        }
+    } else {
+        var q = 0;
+        while (q < 8) { store8(&text + pos, 45); pos = pos + 1; q = q + 1; }
+    }
+    store8(&text + pos, 32); pos = pos + 1;
+    store8(&text + pos, 32); pos = pos + 1;
+
+    var ki = 0;
+    var kn = strlen(&kind);
+    while (ki < kn) {
+        if (pos >= WATCH_REC - 2) { break; }
+        store8(&text + pos, load8(&kind + ki));
+        pos = pos + 1;
+        ki = ki + 1;
+    }
+    if (strlen(&desc) > 0) {
+        store8(&text + pos, 32); pos = pos + 1;
+        store8(&text + pos, 32); pos = pos + 1;
+        var di = 0;
+        var dn = strlen(&desc);
+        while (di < dn) {
+            if (pos >= WATCH_REC - 2) { break; }
+            store8(&text + pos, load8(&desc + di));
+            pos = pos + 1;
+            di = di + 1;
+        }
+    }
+    store8(&text + pos, 0);
+
+    _watch_push(watch_threat_rank(&threat), &text);
+    return 1;
+}
+
+# Ingest every COMPLETE line in `buf` (n bytes). Returns the number of bytes
+# consumed — the caller keeps the remainder as a partial trailing record and
+# prepends it to the next read. This is what makes the reader safe against
+# observing a write in progress even though aegis writes atomically: a read()
+# can still land mid-record if the producer appended between our size check and
+# our read.
+fn watch_ingest_buf(buf, n) {
+    var consumed = 0;
+    var start = 0;
+    var i = 0;
+    while (i < n) {
+        if (load8(buf + i) == 10) {
+            store8(buf + i, 0);
+            watch_ingest_line(buf + start);
+            store8(buf + i, 10);
+            start = i + 1;
+            consumed = start;
+        }
+        i = i + 1;
+    }
+    return consumed;
+}
+
+# How many events the ring currently holds (capped at WATCH_MAX).
+fn watch_count() {
+    if (_watch_n < WATCH_MAX) { return _watch_n; }
+    return WATCH_MAX;
+}
+
+# Text of the i-th most RECENT event (0 = newest). Returns 0 when out of range.
+fn watch_text_at(i) {
+    if (i < 0) { return 0; }
+    if (i >= watch_count()) { return 0; }
+    var slot = _watch_head - 1 - i;
+    while (slot < 0) { slot = slot + WATCH_MAX; }
+    return &_watch_lines + slot * WATCH_REC;
+}
+
+# Threat rank of the i-th most recent event, or WATCH_T_UNKNOWN out of range.
+fn watch_threat_at(i) {
+    if (i < 0) { return WATCH_T_UNKNOWN; }
+    if (i >= watch_count()) { return WATCH_T_UNKNOWN; }
+    var slot = _watch_head - 1 - i;
+    while (slot < 0) { slot = slot + WATCH_MAX; }
+    return load64(&_watch_threat + slot * 8);
+}
+
+fn watch_reset() {
+    _watch_n = 0;
+    _watch_head = 0;
+    return 0;
+}
+
+# --- tail reader ------------------------------------------------------
+#
+# Follow an append-only NDJSON file. Deliberately syscall-only: open, read,
+# lseek, close. No mmap, no inotify, no libc — everything here is already in
+# the lean manifest, which is what keeps `--watch` out of `shu-ai`.
+#
+# The producer only ever appends, so following is just "has the file grown
+# since we last looked". Growth is detected with lseek(SEEK_END), which costs
+# one syscall and — unlike stat — needs no struct layout knowledge.
+
+var WATCH_SEEK_SET = 0;
+var WATCH_SEEK_END = 2;
+
+var _watch_fd     = 0 - 1;
+var _watch_off    = 0;
+var _watch_pend[64];         # 512 bytes: partial trailing record between reads
+var _watch_pend_n = 0;
+var _watch_path_arg = 0;    # `--watch <path>` argument, 0 when unset
+
+# Default sink path. Overridable with `--watch <path>` or CHAKSHU_WATCH_PATH,
+# because an unprivileged `shu` cannot necessarily read /var/log.
+fn watch_default_path() { return "/var/log/aegis/events.jsonl"; }
+
+# Open `path` and ingest what is already there, so the panel opens with recent
+# history rather than waiting for the next event. The ring caps at WATCH_MAX,
+# so a large backlog naturally leaves only the newest events. Returns 0 on
+# success, or the negative open errno — a missing file is NOT fatal to the
+# caller: an absent producer should render an empty stream, not an error.
+fn watch_open(path) {
+    watch_close();
+    var fd = file_open(path, O_RDONLY, 0);
+    if (fd < 0) { return fd; }
+    _watch_fd = fd;
+    _watch_off = 0;
+    _watch_pend_n = 0;
+    watch_poll();
+    return 0;
+}
+
+fn watch_close() {
+    if (_watch_fd >= 0) { file_close(_watch_fd); _watch_fd = 0 - 1; }
+    _watch_off = 0;
+    _watch_pend_n = 0;
+    return 0;
+}
+
+fn watch_is_open() {
+    if (_watch_fd >= 0) { return 1; }
+    return 0;
+}
+
+# Read whatever has been appended since the last call and ingest every complete
+# record. Returns the number of events ingested (0 when nothing grew).
+#
+# Truncation is handled explicitly: if the file is SHORTER than our offset the
+# producer rotated or restarted it, so we reset to the beginning rather than
+# reading from a stale offset — which would otherwise splice the tail of an old
+# record onto the head of a new one and emit a garbage event.
+fn watch_poll() {
+    if (_watch_fd < 0) { return 0; }
+    var end = syscall(SYS_LSEEK, _watch_fd, 0, WATCH_SEEK_END);
+    if (end < 0) { return 0; }
+    if (end < _watch_off) {
+        _watch_off = 0;
+        _watch_pend_n = 0;
+    }
+    if (end == _watch_off) { return 0; }
+
+    var got = 0;
+    var rgo = 1;
+    while (rgo == 1) {
+        if (syscall(SYS_LSEEK, _watch_fd, _watch_off, WATCH_SEEK_SET) < 0) { return got; }
+        # Carry the partial record from last time in front of the new bytes so a
+        # record split across two reads is reassembled rather than dropped.
+        var buf[4096];
+        var i = 0;
+        while (i < _watch_pend_n) {
+            store8(&buf + i, load8(&_watch_pend + i));
+            i = i + 1;
+        }
+        var n = file_read(_watch_fd, &buf + _watch_pend_n, 4096 - _watch_pend_n - 1);
+        if (n <= 0) { return got; }
+        _watch_off = _watch_off + n;
+        var total = _watch_pend_n + n;
+        store8(&buf + total, 0);
+
+        var before = _watch_n;
+        var used = watch_ingest_buf(&buf, total);
+        got = got + (_watch_n - before);
+
+        # Keep the unconsumed remainder for next time. A remainder that cannot
+        # fit the carry buffer is a record longer than 512 bytes; drop it rather
+        # than grow without bound — the display truncates at 160 bytes anyway.
+        var rem = total - used;
+        if (rem > 512) { rem = 0; }
+        _watch_pend_n = rem;
+        var k = 0;
+        while (k < rem) {
+            store8(&_watch_pend + k, load8(&buf + used + k));
+            k = k + 1;
+        }
+        if (_watch_off >= end) { rgo = 0; }
+    }
+    return got;
+}

@@ -304,6 +304,11 @@ var _tui_msg_until = 0;
 #
 # `shu -p` deliberately keeps the two-sample 100 ms window: a one-shot snapshot
 # has no previous frame to difference against.
+# Set by watch_run (src/watch.cyr) so tui_render_frame dispatches to the
+# anomaly-stream panel instead of the process table. The whole of tui_run's
+# setup, epoll loop, key handling and teardown is reused as-is.
+var _tui_watch_mode = 0;
+
 var TUI_MIN_SAMPLE_MS = 200;
 # Static identity facts, probed once. hostname/kernel come from uname(2) and
 # MemTotal from /proc/meminfo — none of them can change while the process runs,
@@ -522,6 +527,9 @@ fn _tui_select_down() {
 # refresh tick, key event, SIGWINCH) calls this; it routes to
 # table mode (default) or focus mode (--pid N from CLI).
 fn tui_render_frame() {
+    # v0.8.0: `--watch` renders the anomaly stream in place of the table.
+    # Checked first so the watch panel never pays the process-table path.
+    if (_tui_watch_mode == 1) { return watch_render_frame(); }
     if (_tui_focus_pid != 0) {
         tui_render_focus_frame();
     } else {
@@ -1161,7 +1169,7 @@ fn _tui_render_status() {
             }
         }
         if (shown == 0) {
-        pos = pos + _tui_status_append(&sbuf, pos, max, "[\xe2\x86\x91\xe2\x86\x93] move  [s] sort  [f] filter  [k] kill  [?] explain  [q] quit");
+            pos = pos + _tui_status_append(&sbuf, pos, max, "[\xe2\x86\x91\xe2\x86\x93] move  [s] sort  [f] filter  [k] kill  [?] explain  [q] quit");
         }
         if (_tui_filter_n > 0) {
             pos = pos + _tui_status_append(&sbuf, pos, max, "  filter: ");

@@ -145,6 +145,91 @@ def expect_rc(label, rc, want, failures):
         failures.append(label)
 
 
+def _watch_scenario(shu_path):
+    """Drive `shu --watch <fixture>` under a PTY: assert the panel renders the
+    events already present, then append a NEW record and assert it appears
+    without a restart. Returns (ok, reason)."""
+    import re
+    import signal
+    import tempfile
+
+    fixture = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".jsonl", prefix="chakshu-watch-", delete=False)
+    fixture.write(
+        '{"id":"a","timestamp":"2026-08-25T00:49:17Z","event_type":"MaliciousPayload",'
+        '"source":"phylax","agent_id":null,"threat_level":"Critical",'
+        '"description":"entropy 7.94 in /tmp/x","metadata":{},"resolved":false}\n')
+    fixture.close()
+    path = fixture.name
+
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execv(shu_path, [shu_path, "--watch", path])
+        os._exit(1)
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+    buf = b""
+    deadline = time.time() + 5.0
+    while b"\x1b[?1049h" not in buf and time.time() < deadline:
+        try:
+            buf += os.read(fd, 65536)
+        except (BlockingIOError, OSError):
+            time.sleep(0.05)
+    time.sleep(0.8)
+
+    # Append while the panel is live.
+    with open(path, "a") as fh:
+        fh.write('{"timestamp":"2026-08-25T03:33:33Z","event_type":"TrustViolation",'
+                 '"threat_level":"High","description":"live append while watching"}\n')
+    time.sleep(2.0)
+    try:
+        buf += os.read(fd, 200000)
+    except (BlockingIOError, OSError):
+        pass
+    try:
+        os.write(fd, b"q")
+    except OSError:
+        pass
+    time.sleep(0.4)
+    try:
+        buf += os.read(fd, 200000)
+    except (BlockingIOError, OSError):
+        pass
+    rc = None
+    try:
+        _, status = os.waitpid(pid, 0)
+        rc = os.WEXITSTATUS(status)
+    except (ChildProcessError, OSError):
+        pass
+    if rc is None:
+        try:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+        except (ProcessLookupError, ChildProcessError, OSError):
+            pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+    text = re.sub(rb"\x1b\[[0-9;?]*[a-zA-Z]", b"", buf).decode("utf8", "replace")
+    if "anomaly stream" not in text:
+        return (False, "panel header missing")
+    if "MaliciousPayload" not in text:
+        return (False, "pre-existing event not rendered")
+    if "live append while watching" not in text:
+        return (False, "appended event not picked up (follow is broken)")
+    if rc != 0:
+        return (False, f"q exited {rc}, want 0")
+    return (True, "")
+
+
 def _overlay_signal_exits(shu_path):
     """Open the `?` overlay, send SIGTERM, and report whether the process
     exited on its own. Gates on the alt-screen escape so it does not race
@@ -377,9 +462,22 @@ def main():
         fail("SIGTERM ignored while '?' overlay open", "")
         failures.append("SIGTERM ignored while '?' overlay open")
 
+    # ---------------- 12: --watch panel follows a live stream ----------
+    # v0.8.0. The panel must show what is already in the sink AND pick up a
+    # record appended while it is running — following is the whole point of a
+    # stream mode, and a panel that only renders history is a static file
+    # viewer. Uses a real aegis-shaped record.
+    print("[12] --watch panel renders and follows")
+    ok, why = _watch_scenario(shu)
+    if ok:
+        passed("--watch shows history and picks up a live append")
+    else:
+        fail("--watch panel", why)
+        failures.append(f"--watch panel: {why}")
+
     # ---------------- summary ----------------
     print()
-    total = 11
+    total = 12
     if failures:
         print(f"PTY smoke: FAIL ({len(failures)} of {total} tests)")
         for f in failures:

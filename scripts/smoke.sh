@@ -69,13 +69,74 @@ grep -q "unknown flag" "$TMPDIR/err"           || fail "--bogus stderr missing '
 pass "unknown flag → exit 2, stderr only"
 
 # Recognized but unimplemented flag → EXIT_ERR (1), stderr message.
+# --watch became a real mode at v0.8.0; --with-logs is still the placeholder.
 set +e
-"$BIN" --watch >"$TMPDIR/out" 2>"$TMPDIR/err"
+"$BIN" --with-logs >"$TMPDIR/out" 2>"$TMPDIR/err"
 rc=$?
 set -e
-[ "$rc" -eq 1 ]                                || fail "--watch exit was $rc, want 1"
-grep -q "not implemented" "$TMPDIR/err"        || fail "--watch stderr missing 'not implemented'"
+[ "$rc" -eq 1 ]                                || fail "--with-logs exit was $rc, want 1"
+grep -q "not implemented" "$TMPDIR/err"        || fail "--with-logs stderr missing 'not implemented'"
 pass "unimplemented flag → exit 1, stderr only"
+
+# ============================================================
+# v0.8.0 — --watch anomaly stream
+# ============================================================
+echo "[M3] --watch anomaly stream"
+
+# Missing sink → EXIT_ERR with actionable stderr, nothing on stdout.
+set +e
+"$BIN" --watch "$TMPDIR/no-such-stream.jsonl" >"$TMPDIR/out" 2>"$TMPDIR/err"
+rc=$?
+set -e
+[ "$rc" -eq 1 ]                                || fail "--watch missing sink exit was $rc, want 1"
+[ ! -s "$TMPDIR/out" ]                         || fail "--watch missing sink wrote to stdout"
+grep -q "cannot read anomaly stream" "$TMPDIR/err" || fail "--watch missing sink stderr unhelpful"
+pass "--watch missing sink → exit 1, stderr only"
+
+# A real aegis-shaped record must parse and render newest-first with severity.
+cat >"$TMPDIR/events.jsonl" <<'JSONL'
+{"id":"a","timestamp":"2026-08-25T00:49:17Z","event_type":"PolicyViolation","source":"aegis","agent_id":null,"threat_level":"Low","description":"first event","metadata":{},"resolved":false}
+{"id":"b","timestamp":"2026-08-25T00:50:00Z","event_type":"MaliciousPayload","source":"phylax","agent_id":null,"threat_level":"Critical","description":"second event","metadata":{},"resolved":false}
+JSONL
+set +e
+"$BIN" --watch "$TMPDIR/events.jsonl" >"$TMPDIR/out" 2>"$TMPDIR/err"
+rc=$?
+set -e
+[ "$rc" -eq 0 ]                                || fail "--watch exit was $rc, want 0"
+[ ! -s "$TMPDIR/err" ]                         || fail "--watch wrote to stderr on success"
+grep -q "MaliciousPayload" "$TMPDIR/out"       || fail "--watch did not render event_type"
+grep -q "second event" "$TMPDIR/out"           || fail "--watch did not render description"
+grep -q "CRIT" "$TMPDIR/out"                   || fail "--watch did not render severity"
+grep -q "00:50:00" "$TMPDIR/out"               || fail "--watch did not render clock time"
+[ "$(head -2 "$TMPDIR/out" | tail -1 | grep -c CRIT)" -eq 1 ] || fail "--watch is not newest-first"
+pass "--watch renders a real aegis record, newest-first"
+
+# A malformed line must be skipped, not fatal — the stream is another
+# process's output and one bad record must not kill the monitor.
+printf 'not json at all\n{"event_type":"SandboxEscape","threat_level":"High","description":"after garbage"}\n' >>"$TMPDIR/events.jsonl"
+set +e
+"$BIN" --watch "$TMPDIR/events.jsonl" >"$TMPDIR/out" 2>"$TMPDIR/err"
+rc=$?
+set -e
+[ "$rc" -eq 0 ]                                || fail "--watch died on a malformed line (rc $rc)"
+grep -q "after garbage" "$TMPDIR/out"          || fail "--watch dropped the record after a bad line"
+pass "--watch skips a malformed record and keeps going"
+
+# No terminfo escapes in the non-TTY dump — same contract as `-p` (spec §2.2).
+if grep -q "$(printf '\033')" "$TMPDIR/out"; then
+    fail "--watch emitted terminfo escapes in a pipe"
+fi
+pass "--watch pipe output is escape-free"
+
+# Mode combinations are rejected, not silently half-honoured.
+for combo in "-p" "--pid 1"; do
+    set +e
+    "$BIN" --watch $combo >"$TMPDIR/out" 2>"$TMPDIR/err"
+    rc=$?
+    set -e
+    [ "$rc" -eq 2 ]                            || fail "--watch $combo exit was $rc, want 2"
+done
+pass "--watch rejects -p and --pid with exit 2"
 
 # ============================================================
 # M1 — plain snapshot shape

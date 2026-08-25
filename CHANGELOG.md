@@ -4,6 +4,101 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-08-24 — `--watch`: the anomaly stream (closes M3)
+
+`shu --watch` tails aegis's security-event stream and renders it live. This closes
+M3 — a user can now see flagged events on the machine they are monitoring.
+
+### The spec's premise was false, and is corrected
+
+design-spec §6.4 said "`aegis` and `phylax` already publish events" and left the
+transport "TBD — sandhi pub/sub or polling the relevant hoosh/phylax HTTP
+endpoint". Verified against source before building; all three claims were wrong:
+
+- **aegis did not publish.** Through 1.1.6 its daemon was a stub
+  (`println("aegis ready")`, return 0) and the codebase contained **zero**
+  `sys_write`/`sys_socket`/`sys_bind` calls — every `sys_open` was `O_RDONLY`. It
+  could *serialize* an event but never wrote the bytes anywhere.
+- **phylax does not publish.** Its Unix socket is a scan RPC: send a path, get
+  `{"findings":N,"status":"ok"}`, connection closed. A second connection gets no
+  unsolicited bytes.
+- **"sandhi pub/sub" does not exist** — no subscribe/topic/listen surface at all.
+
+Building against that sentence would have produced a panel with no source, so the
+producer was fixed first: **aegis 1.1.7** adds an append-only NDJSON event sink
+(`aegis_set_event_sink`, `AEGIS_EVENT_LOG`). §6.4 is rewritten to describe what
+exists.
+
+### Added
+
+- **`--watch [PATH]`** — tails an append-only NDJSON event file and renders events
+  newest-first with severity. Path resolution: the argument, then
+  `$CHAKSHU_WATCH_PATH`, then `/var/log/aegis/events.jsonl`.
+  - **TTY** → a live full-screen panel that follows the stream, reusing `tui_run`'s
+    setup, epoll loop, key handling and teardown. It costs *less* per frame than
+    the process table because it never walks `/proc`, so v0.7.15's
+    one-walk-per-frame invariant is preserved by construction.
+  - **Non-TTY** → a deterministic, escape-free dump, the `-p` posture of §2.2. This
+    is what makes the mode assertable in CI without a pseudo-terminal.
+- **`src/watch.cyr`** — record model, field reader, ring, and tail reader.
+
+### Changed — `--watch` ships in the LEAN `shu`, not `shu-ai`
+
+The spec placed it in `shu-ai` alongside `--explain`. That was written assuming a
+network transport. Tailing a local file needs no libc, no network and no new
+dependency — `SYS_LSEEK` and open/read/close are already in the lean manifest — so
+the subscription lives in the lean binary and only AI *triage* stays in `shu-ai`.
+
+`--watch` therefore works on a pure no-libc AGNOS host where `shu-ai` cannot run at
+all (sandhi dlopens libc). This **strengthens** "AI is opt-in at the binary level":
+reading a file another process wrote is not a network reach, and the CI gate that
+scans the lean manifest for transport modules is untouched.
+
+- **`--watch` now accumulates like `-p` instead of returning from mid-loop.** The
+  old stub short-circuited inside the arg loop, so `-p --watch` silently dropped the
+  `-p` and `--watch --rate 2` never parsed `--rate`. Combining `--watch` with `-p`
+  or `--pid` is now rejected with exit 2 rather than half-honoured (the R24 lesson).
+
+### Design notes
+
+- **No JSON parser is linked.** The lean build spent v0.7.14 getting the 641 KB
+  bayan monolith *out* of its closure; pulling it back for five string fields would
+  cost more than this whole module. `watch_json_field` is a deliberately minimal
+  field reader for a flat record shape aegis controls — it builds a `"key":`  needle
+  so a key name appearing inside a *value* cannot shadow the real key, and it is
+  pinned by tests rather than sold as a JSON parser.
+- **Events are scrubbed on ingest.** Records are written by another process and can
+  carry attacker-influenced text (a filename, a rule name), so every C0 byte and DEL
+  becomes `?` before it can reach the terminal — the same defect class fixed for
+  `/proc` cmdline and comm in v0.7.13.
+- **Truncation and rotation are handled.** If the file is shorter than the last
+  offset the producer rotated or restarted it, so the reader resets to the beginning
+  rather than splicing the tail of an old record onto the head of a new one.
+- **Partial records are carried, not dropped.** A `read(2)` can land mid-record even
+  though aegis writes atomically, so the unconsumed remainder is prepended to the
+  next read.
+
+### Verified
+
+- Lean `shu`: **116/116** (was 81 — +35 assertions), `scripts/smoke.sh` **PASS**
+  (+5 new `--watch` gates), `tests/integration_smoke.py` **12/12** (+1 scenario),
+  DCE parity PASS, lint 0 non-cosmetic.
+- AI `shu-ai`: **21/21**.
+- **End-to-end against a real producer**: aegis 1.1.7 wrote three records; `shu
+  --watch` rendered all three newest-first with correct severities and clock times.
+- **Live follow proven under a PTY**: with the panel open, a record appended to the
+  file appeared without a restart.
+- Error paths: missing sink → exit 1 with actionable stderr and nothing on stdout;
+  malformed line skipped and the stream keeps going; pipe output escape-free.
+
+### Note on scope
+
+This ships the **consumer**, and aegis 1.1.7 ships the **producer mechanism**.
+aegis's own daemon still reports no events of its own — the sink fires for anything
+calling `aegis_report_event`, and wiring real detection into its daemon loop remains
+open upstream work. `--watch` against an empty or absent sink renders an empty
+stream, which is the correct behaviour, not a failure.
+
 ## [0.7.15] — 2026-08-24 — one /proc walk per frame, and a forward-only roadmap
 
 ### Changed — TUI sampling
