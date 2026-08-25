@@ -18,6 +18,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Toolchain pin consistency
+        # FIRST step, before the toolchain install — it needs no toolchain, and
+        # failing here saves the runner a tarball download it cannot use.
+        #
+        # The install step below derives CYRIUS_VERSION from the ROOT manifest
+        # only, but the "Build + test shu-ai" step does `cd ai`, and the wrapper
+        # resolves cyrius.cyml from the compile cwd with NO ancestor walk-up. So
+        # the moment ai/cyrius.cyml's pin diverges from the root, every cyrius
+        # call in that step hard-errors with "pins version X but cyrius binary is
+        # not installed" — and release.yml does the same `cd ai` when it builds
+        # shu-ai, so a tag push breaks with it. It has drifted once already
+        # (d830369: root 6.2.36, ai/ 6.2.24; fixed hours later by 86966c3).
+        #
+        # The gate compares pin STRINGS IN FILES and never invokes cyrius — on a
+        # dev box with every version cached a stale pin silently execve()s into
+        # the old toolchain and exits 0, so any build-based check would be green
+        # locally and red here, which is the exact blind spot being closed.
+        run: sh scripts/toolchain-pin-check.sh
+
       - name: Install Cyrius toolchain
         # Pulls the version pinned in cyrius.cyml [package].cyrius and
         # runs the install.sh that ships inside the release tarball.
