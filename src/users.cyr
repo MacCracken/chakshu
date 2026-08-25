@@ -1,0 +1,144 @@
+# users.cyr — uid → username, for the process table's USER column (v0.9.5).
+#
+# design-spec §1 listed "sort/filter by user" as in scope from M0. It was never
+# implemented and never descoped: there was no USER column at all, and the live
+# header was `PID S CPU% MEM% CMD`. A USER column is part of htop's default
+# screen, so a monitor whose stated goal is replacing htop cannot omit it.
+#
+# ⚠ WHY A CACHE AND NOT A LOOKUP PER ROW. /etc/passwd is a linear scan, and the
+# table re-renders every frame — resolving per row per frame would re-read and
+# re-parse the whole file up to `--top N` times a second. The file is read ONCE,
+# lazily, on the first resolve, and the parsed pairs are kept. A monitor's own
+# cost is the thing §8 budgets, and this feature must not spend it.
+#
+# ⚠ NO getpwuid, DELIBERATELY. That is libc, and the lean `shu` links none — it
+# is the constraint the whole project is built on. /etc/passwd is plain text with
+# a documented format, which is the same reasoning that makes /proc the data
+# source everywhere else here.
+#
+# Falls back to the numeric uid when a name cannot be resolved, which is correct
+# rather than merely defensive: a container with no /etc/passwd, an LDAP-only
+# directory, or a uid with no local entry are all normal, and a numeric uid is
+# real information. An empty column would not be.
+
+var USERS_MAX      = 256;      # distinct uids cached; more falls back to numeric
+var USERS_NAME_MAX = 16;       # bytes kept per name, NUL-terminated
+
+var _users_uid[256];           # module scope: 256 * 8 = 2048 B
+var _users_names[512];         # 256 * 16 = 4096 B
+var _users_n      = 0;
+var _users_loaded = 0;
+var _users_buf    = 0;
+var USERS_BUF_CAP = 65536;
+
+# Parse /etc/passwd into the cache. Format: name:passwd:uid:gid:gecos:home:shell
+# Only fields 0 and 2 are read. Returns the number of entries cached.
+fn users_load() {
+    if (_users_loaded == 1) { return _users_n; }
+    _users_loaded = 1;                       # one attempt, even if it fails
+
+    # ⚠ Its OWN buffer, not proc_scratch(). The three scratch buffers hold live
+    # /proc/stat, /proc/diskstats and /proc/net/dev during a delta sample, and this
+    # resolves lazily from inside a render — borrowing one would overwrite a sample
+    # mid-frame. Allocated once; /etc/passwd is read exactly once per process.
+    if (_users_buf == 0) { _users_buf = alloc(USERS_BUF_CAP); }
+    if (_users_buf == 0) { return 0; }
+    var buf = _users_buf;
+    var n = proc_read("/etc/passwd", buf, USERS_BUF_CAP);
+    if (n <= 0) { return 0; }
+
+    var i = 0;
+    while (i < n) {
+        if (_users_n >= USERS_MAX) { break; }
+        # name = up to the first ':'
+        var ns = i;
+        while (i < n) {
+            if (load8(buf + i) == 58) { break; }
+            if (load8(buf + i) == 10) { break; }
+            i = i + 1;
+        }
+        var ne = i;
+        if (i >= n) { break; }
+        if (load8(buf + i) == 10) { i = i + 1; continue; }   # malformed line
+        i = i + 1;
+
+        # skip the password field
+        while (i < n) {
+            if (load8(buf + i) == 58) { break; }
+            if (load8(buf + i) == 10) { break; }
+            i = i + 1;
+        }
+        if (i >= n) { break; }
+        if (load8(buf + i) == 10) { i = i + 1; continue; }
+        i = i + 1;
+
+        # uid field
+        var uid = 0;
+        var got = 0;
+        while (i < n) {
+            var c = load8(buf + i);
+            if (c < 48) { break; }
+            if (c > 57) { break; }
+            uid = uid * 10 + (c - 48);
+            got = 1;
+            i = i + 1;
+        }
+
+        if (got == 1) {
+            var nl = ne - ns;
+            if (nl > USERS_NAME_MAX - 1) { nl = USERS_NAME_MAX - 1; }
+            if (nl > 0) {
+                store64(&_users_uid + _users_n * 8, uid);
+                var dst = &_users_names + _users_n * USERS_NAME_MAX;
+                var k = 0;
+                while (k < nl) { store8(dst + k, load8(buf + ns + k)); k = k + 1; }
+                store8(dst + nl, 0);
+                _users_n = _users_n + 1;
+            }
+        }
+
+        # advance to the next line
+        while (i < n) {
+            if (load8(buf + i) == 10) { break; }
+            i = i + 1;
+        }
+        i = i + 1;
+    }
+    return _users_n;
+}
+
+# Write pid-owner `uid`'s display name into `out` (cap bytes, NUL-terminated).
+# Returns the byte length written. Falls back to the decimal uid.
+fn users_name_for(uid, out, cap) {
+    users_load();
+    var i = 0;
+    while (i < _users_n) {
+        if (load64(&_users_uid + i * 8) == uid) {
+            var src = &_users_names + i * USERS_NAME_MAX;
+            var k = 0;
+            while (k < cap - 1) {
+                var c = load8(src + k);
+                if (c == 0) { break; }
+                store8(out + k, c);
+                k = k + 1;
+            }
+            store8(out + k, 0);
+            return k;
+        }
+        i = i + 1;
+    }
+    # Unresolved: render the number. Real information beats an empty column.
+    var d[24];
+    var dn = 0;
+    var v = uid;
+    if (v == 0) { store8(&d, 48); dn = 1; }
+    while (v > 0) { store8(&d + dn, 48 + v % 10); dn = dn + 1; v = v / 10; }
+    var w = 0;
+    while (w < dn) {
+        if (w >= cap - 1) { break; }
+        store8(out + w, load8(&d + dn - 1 - w));
+        w = w + 1;
+    }
+    store8(out + w, 0);
+    return w;
+}

@@ -285,11 +285,111 @@ fn proc_stat_cpu_agg(buf, out_active, out_total) {
     return 0;
 }
 
+# Per-core CPU counters from /proc/stat (v0.9.5 — design-spec §1 listed
+# "CPU usage (per-core + aggregate)" as in scope from M0; only the aggregate was
+# ever implemented).
+#
+# Fills out_active[i] and out_total[i] for each `cpuN` line, in file order, and
+# returns the number of cores found (0 if none). `max` bounds both arrays.
+#
+# ⚠ SKIPS THE FIRST LINE DELIBERATELY. /proc/stat opens with a bare `cpu` line
+# that is the SUM of all cores; counting it as a core would report an extra core
+# pegged at the machine average. The distinguishing byte is the one after "cpu":
+# a digit means a real core, a space means the aggregate.
+fn proc_stat_percore(buf, n, out_active, out_total, max) {
+    var cores = 0;
+    var cursor = 0;
+    while (cursor < n) {
+        if (cores >= max) { break; }
+        # Only lines starting exactly "cpu" followed by a DIGIT.
+        var is_core = 0;
+        if (memeq(buf + cursor, "cpu", 3) == 1) {
+            var d = load8(buf + cursor + 3);
+            if (d >= 48) { if (d <= 57) { is_core = 1; } }
+        }
+        if (is_core == 0) {
+            var prev0 = cursor;
+            _proc_skip_line(buf, &cursor);
+            if (cursor == prev0) { break; }
+            continue;
+        }
+
+        # Past "cpuN" — _proc_next_uint would otherwise read N as the first field.
+        var c2 = cursor + 3;
+        while (c2 < n) {
+            var dc = load8(buf + c2);
+            if (dc < 48) { break; }
+            if (dc > 57) { break; }
+            c2 = c2 + 1;
+        }
+
+        var total = 0;
+        var idle = 0;
+        var f = 0;
+        while (f < 10) {
+            var v = _proc_next_uint(buf, &c2);
+            total = total + v;
+            if (f == 3) { idle = idle + v; }    # idle
+            if (f == 4) { idle = idle + v; }    # iowait
+            f = f + 1;
+        }
+        store64(out_active + cores * 8, total - idle);
+        store64(out_total  + cores * 8, total);
+        cores = cores + 1;
+
+        var prev = cursor;
+        _proc_skip_line(buf, &cursor);
+        if (cursor == prev) { break; }
+    }
+    return cores;
+}
+
 # Should this diskstats device line be excluded from the aggregate?
 # Excludes synthetic / virtual block devices that would otherwise
 # inflate the I/O total: loop, ram, zram, dm-, mdN. Partitions still
 # double-count their parent disk in slice B's sum (qualitative I/O
 # view); a precise filter using sysfs lives at M2.
+
+# Is `name` a PARTITION of some other device in `table`?
+#
+# v0.9.5, and it is a pure string test on purpose. A partition's name is its parent
+# disk's name plus optional 'p' plus one or more digits — sda->sda1, nvme0n1->
+# nvme0n1p2 — and the parent is always listed in the same /proc/diskstats buffer.
+#
+# ⚠ THE FIRST CUT OF THIS PROBED /sys/block AND THAT WAS WRONG. It is the precise
+# test, but it made proc_diskstats_agg — a pure parser that the unit suite feeds
+# synthetic fixtures — depend on the HOST's device set: the "mdctl is included"
+# assertion started failing because this box has no /sys/block/mdctl. A parser
+# whose result depends on the machine running the test cannot be tested.
+fn _proc_name_is_partition(name, table, stride, count) {
+    var i = 0;
+    while (i < count) {
+        var cand = table + i * stride;
+        var cl = strlen(cand);
+        var nl = strlen(name);
+        if (cl > 0) {
+            if (nl > cl) {
+                if (memeq(name, cand, cl) == 1) {
+                    var j = cl;
+                    if (load8(name + j) == 112) { j = j + 1; }   # optional 'p'
+                    var digits = 0;
+                    var ok = 1;
+                    while (j < nl) {
+                        var c = load8(name + j);
+                        if (c < 48) { ok = 0; break; }
+                        if (c > 57) { ok = 0; break; }
+                        digits = digits + 1;
+                        j = j + 1;
+                    }
+                    if (ok == 1) { if (digits > 0) { return 1; } }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn _proc_diskstats_excluded(buf, name_off) {
     if (memeq(buf + name_off, "loop", 4) == 1) { return 1; }
     if (memeq(buf + name_off, "ram",  3) == 1) { return 1; }
@@ -314,39 +414,31 @@ fn _proc_diskstats_excluded(buf, name_off) {
 #   [6] sectors written   [7] write time (ms)    [8] I/Os in flight
 #   [9] time in queue     [10] weighted time     [11+] discard / flush
 fn proc_diskstats_agg(buf, n, out_sec_read, out_sec_writ) {
-    var sec_read_total = 0;
-    var sec_writ_total = 0;
-    var cursor = 0;
-    while (cursor < n) {
-        # major, minor — discard
-        _proc_next_uint(buf, &cursor);
-        _proc_next_uint(buf, &cursor);
-        # device name
-        var name_off = _proc_word_start(buf, &cursor);
-        # R7a (v0.7.13): `break`, not `return 0`. A truncated read (proc_read caps
-        # at the buffer size) lands mid-line; returning here skipped BOTH store64s
-        # below, so the caller kept whatever was already in its out-params and got
-        # a success code — stale totals reported as current. Breaking stores the
-        # partial totals, which is what proc_netdev_agg already does.
-        if (cursor >= n) { break; }
-        _proc_skip_word(buf, &cursor);
-        # 7 numeric fields up to and including sectors_written
-        _proc_next_uint(buf, &cursor);                       # reads
-        _proc_next_uint(buf, &cursor);                       # read_merges
-        var sec_r = _proc_next_uint(buf, &cursor);           # sectors_read
-        _proc_next_uint(buf, &cursor);                       # read_time
-        _proc_next_uint(buf, &cursor);                       # writes
-        _proc_next_uint(buf, &cursor);                       # write_merges
-        var sec_w = _proc_next_uint(buf, &cursor);           # sectors_written
-        # Skip the rest of the line
-        _proc_skip_line(buf, &cursor);
-        if (_proc_diskstats_excluded(buf, name_off) == 0) {
-            sec_read_total = sec_read_total + sec_r;
-            sec_writ_total = sec_writ_total + sec_w;
-        }
+    # v0.9.5: implemented ON TOP of proc_diskstats_each, so the summary line and the
+    # per-device line can never disagree — they are the same walk.
+    #
+    # ⛔ THIS PREVIOUSLY DOUBLE-COUNTED. It summed every non-excluded row, and a
+    # partition repeats its parent disk's sectors, so sda2's writes were also
+    # counted under sda: `disk: wr 12 MiB/s` was two copies of the same 6 MiB/s.
+    # The header carried "a precise filter using sysfs lives at M2" from M1 onward;
+    # the per-device view added in v0.9.5 made the double-count visible by printing
+    # both rows side by side.
+    # ⚠ 32 devices max here (names 32*16 = 512 B, counters 32*8 = 256 B). A host
+    # with more whole disks than that under-reports rather than overruns.
+    var nm[512];
+    var rr[256];
+    var ww[256];
+    var cnt = proc_diskstats_each(buf, n, &nm, 16, &rr, &ww, 32);
+    var tr = 0;
+    var tw = 0;
+    var i = 0;
+    while (i < cnt) {
+        tr = tr + load64(&rr + i * 8);
+        tw = tw + load64(&ww + i * 8);
+        i = i + 1;
     }
-    store64(out_sec_read, sec_read_total);
-    store64(out_sec_writ, sec_writ_total);
+    store64(out_sec_read, tr);
+    store64(out_sec_writ, tw);
     return 0;
 }
 
@@ -355,6 +447,126 @@ fn proc_diskstats_agg(buf, n, out_sec_read, out_sec_writ) {
 # Used to scale per-process CPU% from share-of-system to htop-style
 # share-of-one-core (a thread pegging one core reads ~100%, regardless
 # of how many other cores are idle).
+# Per-DEVICE diskstats (v0.9.5 — design-spec §1's "Disk I/O rates (per-device +
+# aggregate)"; only the aggregate was ever built).
+#
+# Fills out_names (a table of `stride`-byte NUL-terminated names), out_r and out_w,
+# and returns the device count. Applies the same exclusion list as the aggregate,
+# so loop/ram/zram/dm-/mdN devices do not appear — a per-device view of synthetic
+# devices is noise, and their inclusion would also disagree with the total above it.
+fn proc_diskstats_each(buf, n, out_names, stride, out_r, out_w, max) {
+    var count = 0;
+    var cursor = 0;
+    while (cursor < n) {
+        if (count >= max) { break; }
+        _proc_next_uint(buf, &cursor);                       # major
+        _proc_next_uint(buf, &cursor);                       # minor
+        var name_off = _proc_word_start(buf, &cursor);
+        if (cursor >= n) { break; }
+        _proc_skip_word(buf, &cursor);
+        _proc_next_uint(buf, &cursor);
+        _proc_next_uint(buf, &cursor);
+        var sec_r = _proc_next_uint(buf, &cursor);
+        _proc_next_uint(buf, &cursor);
+        _proc_next_uint(buf, &cursor);
+        _proc_next_uint(buf, &cursor);
+        var sec_w = _proc_next_uint(buf, &cursor);
+        _proc_skip_line(buf, &cursor);
+        if (_proc_diskstats_excluded(buf, name_off) == 0) {
+            var dst = out_names + count * stride;
+            var k = 0;
+            while (k < stride - 1) {
+                var c = load8(buf + name_off + k);
+                if (c == 32) { break; }
+                if (c == 9)  { break; }
+                if (c == 10) { break; }
+                if (c == 0)  { break; }
+                store8(dst + k, c);
+                k = k + 1;
+            }
+            store8(dst + k, 0);
+            store64(out_r + count * 8, sec_r);
+            store64(out_w + count * 8, sec_w);
+            count = count + 1;
+        }
+    }
+    # Second pass: drop partitions now that every name is known. A partition can
+    # only be recognised against the full set, and relying on parents preceding
+    # their partitions in the file would be an ordering assumption the kernel
+    # never promised.
+    var keep = 0;
+    var q = 0;
+    while (q < count) {
+        var qn = out_names + q * stride;
+        if (_proc_name_is_partition(qn, out_names, stride, count) == 0) {
+            if (keep != q) {
+                var c2 = 0;
+                while (c2 < stride) { store8(out_names + keep * stride + c2, load8(qn + c2)); c2 = c2 + 1; }
+                store64(out_r + keep * 8, load64(out_r + q * 8));
+                store64(out_w + keep * 8, load64(out_w + q * 8));
+            }
+            keep = keep + 1;
+        }
+        q = q + 1;
+    }
+    return keep;
+}
+
+# Per-INTERFACE /proc/net/dev (v0.9.5 — the §1 counterpart to the above).
+# `lo` is excluded for the same reason the aggregate excludes it: loopback traffic
+# is the machine talking to itself and swamps the real interfaces.
+fn proc_netdev_each(buf, n, out_names, stride, out_rx, out_tx, max) {
+    var count = 0;
+    var cursor = 0;
+    # Two header lines.
+    _proc_skip_line(buf, &cursor);
+    _proc_skip_line(buf, &cursor);
+    while (cursor < n) {
+        if (count >= max) { break; }
+        var name_off = _proc_word_start(buf, &cursor);
+        if (cursor >= n) { break; }
+        # The name carries a trailing ':' in this file — "  eth0: 1000 ...".
+        var nlen = 0;
+        while (nlen < stride - 1) {
+            var c = load8(buf + name_off + nlen);
+            if (c == 58) { break; }                          # ':'
+            if (c == 32) { break; }
+            if (c == 10) { break; }
+            if (c == 0)  { break; }
+            nlen = nlen + 1;
+        }
+        _proc_skip_word(buf, &cursor);
+        # ⚠ _proc_skip_word stops AT the ':', which is not whitespace, so
+        # _proc_next_uint would read 0 forever. The aggregate parser steps over it
+        # explicitly and so must this one; skipping that line is why the first cut
+        # of this function returned correct names with zeroed counters.
+        if (load8(buf + cursor) != 58) {
+            _proc_skip_line(buf, &cursor);
+            continue;
+        }
+        cursor = cursor + 1;                                 # past ':'
+        var rx = _proc_next_uint(buf, &cursor);              # field 0 = rx bytes
+        var f = 0;
+        while (f < 7) { _proc_next_uint(buf, &cursor); f = f + 1; }
+        var tx = _proc_next_uint(buf, &cursor);              # field 8 = tx bytes
+        _proc_skip_line(buf, &cursor);
+        var is_lo = 0;
+        if (nlen == 2) { if (memeq(buf + name_off, "lo", 2) == 1) { is_lo = 1; } }
+        if (is_lo == 0) {
+            if (nlen > 0) {
+                var dst = out_names + count * stride;
+                var k = 0;
+                while (k < nlen) { store8(dst + k, load8(buf + name_off + k)); k = k + 1; }
+                store8(dst + k, 0);
+                store64(out_rx + count * 8, rx);
+                store64(out_tx + count * 8, tx);
+                count = count + 1;
+            }
+        }
+    }
+    return count;
+}
+
 fn proc_stat_ncores(buf, n) {
     var cores = 0;
     var i = 0;

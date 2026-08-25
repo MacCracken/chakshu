@@ -20,7 +20,7 @@ The Sanskrit name **चक्षु** *chakṣu* means *the eye* / *the faculty 
 
 ## Status
 
-**v0.9.4 — monitor complete and audited; v1.0 is gated on the criteria in
+**v0.9.5 — monitor feature-complete and audited; v1.0 is gated on the criteria in
 [docs/development/roadmap.md](docs/development/roadmap.md), not on features.** What works today:
 
 - **Plain snapshot** (`shu -p`) — host / uptime / load / mem / cpu / disk / net, GPU telemetry, and a
@@ -31,6 +31,10 @@ The Sanskrit name **चक्षु** *chakṣu* means *the eye* / *the faculty 
   PCI id.
 - **Swap, cached and buffers** (v0.9.4) — on both `-p` and the TUI. Cached matters: Linux page cache
   is reclaimable, so "used" alone overstates memory pressure badly.
+- **Per-core CPU, per-device disk, per-interface network, and a USER column** (v0.9.5) — the
+  aggregate hides what you are usually looking for: one pegged core on an idle 16-core box reads as
+  6%. `--sort user` sorts by owner. `-p` prints the full breakdown; the TUI shows per-core when the
+  terminal is wide enough.
 - **Anomaly stream** (`shu --watch`, v0.8.0) — tails aegis's append-only NDJSON event log. **In the
   lean build**, so it works on a no-libc AGNOS box.
 - **AI integration** (`shu-ai` only) — `--explain <pid>` and the `?` key send a *privacy-redacted*
@@ -39,8 +43,8 @@ The Sanskrit name **चक्षु** *chakṣu* means *the eye* / *the faculty 
 - **AGNOS** (v0.9.3) — both `-p` and the **TUI** run on AGNOS, via a poll loop over `kbscan` #42 and
   `winsize` #60 in place of the Linux termios/SIGWINCH/epoll trio. See the caveats below.
 
-**Two binaries.** The default **`shu`** is the lean monitor (**640 KB**, no AI deps, no libc, no
-network); **`shu-ai`** adds the AI panel (**3.26 MB**; pulls `sandhi` / `niyama`).
+**Two binaries.** The default **`shu`** is the lean monitor (**660 KB**, no AI deps, no libc, no
+network); **`shu-ai`** adds the AI panel (**3.28 MB**; pulls `sandhi` / `niyama`).
 
 ### Running on AGNOS — read this first
 
@@ -90,7 +94,7 @@ CYRIUS_ALLOW_PARENT_INCLUDES=1 cyrius build main.cyr build/shu-ai
 ./build/shu-ai
 ```
 
-Why two binaries? The Cyrius toolchain links every declared stdlib module into the binary (dead code is NOP'd, not dropped — and since cycc 6.5.16 it emits every *declared* module rather than pruning to what `main` reaches, so `CYRIUS_DCE=1` no longer shrinks the output at all). The AI dep chain (`sandhi`'s TLS/HTTP stack + `niyama`'s regex/unicode tables) would bloat every build to ~3.2 MB. Confining those deps to `ai/cyrius.cyml` keeps the default `shu` at ~640 KB — still smaller than btop's install and fully self-contained (no libc / ncurses). `shu-ai` is the opt-in heavy build; note that `sandhi` dlopens libc for DNS/TLS, so **`shu-ai` (unlike `shu`) is not a pure no-libc binary** and its live path only runs on a host with libc.
+Why two binaries? The Cyrius toolchain links every declared stdlib module into the binary (dead code is NOP'd, not dropped — and since cycc 6.5.16 it emits every *declared* module rather than pruning to what `main` reaches, so `CYRIUS_DCE=1` no longer shrinks the output at all). The AI dep chain (`sandhi`'s TLS/HTTP stack + `niyama`'s regex/unicode tables) would bloat every build to ~3.2 MB. Confining those deps to `ai/cyrius.cyml` keeps the default `shu` at ~660 KB — still smaller than btop's install and fully self-contained (no libc / ncurses). `shu-ai` is the opt-in heavy build; note that `sandhi` dlopens libc for DNS/TLS, so **`shu-ai` (unlike `shu`) is not a pure no-libc binary** and its live path only runs on a host with libc.
 
 ---
 
@@ -101,6 +105,7 @@ shu                       # full TUI: processes + cpu + mem + disk + net + gpu
 shu -p                    # plain snapshot, one frame to stdout (pipeable)
 shu --pid 1234            # focus a single process
 shu --sort mem --top 25   # sort by memory, show 25 rows
+shu --sort user           # group the table by owning user
 shu --rate 0.5            # refresh every 2s (btop's default; 0.2-10, fractional OK)
 shu --theme light         # re-tint for a light terminal background
 shu --color never         # no colour (auto honours $NO_COLOR / $TERM / isatty)

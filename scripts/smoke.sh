@@ -184,8 +184,26 @@ grep -q '^kern: ' "$TMPDIR/snap"                               || fail "missing 
 grep -q '^proc: ' "$TMPDIR/snap"                               || fail "missing 'proc:' line"
 grep -q '^mem:'   "$TMPDIR/snap"                               || fail "missing 'mem:' line"
 grep -q '^cpu:'   "$TMPDIR/snap"                               || fail "missing 'cpu:' delta line"
-grep -q '^   PID S' "$TMPDIR/snap"                             || fail "missing PID table header"
-pass "header shape (host/kern/proc/[gpu?]/mem/cpu/PID-header)"
+# v0.9.5 widened the table header with a USER column, so this assertion moved
+# with it. Asserting the FULL header rather than a prefix is deliberate: a prefix
+# match would have silently accepted the column being dropped again.
+grep -q '^   PID USER      S  CPU%  MEM% CMD$' "$TMPDIR/snap" || fail "missing/!changed PID table header"
+pass "header shape (host/kern/proc/[gpu?]/mem/swap/cpu/core/disk/net/PID-header)"
+
+# v0.9.5: the design-spec §1 features that were in scope from M0 and unimplemented
+# until this release. Each is asserted by its own line so a regression names itself
+# rather than showing up as a vague header mismatch.
+grep -q '^      buff '   "$TMPDIR/snap" || fail "missing buffers/cache line (v0.9.5)"
+grep -q '^swap: '        "$TMPDIR/snap" || fail "missing swap line (v0.9.5)"
+grep -q '^core: '        "$TMPDIR/snap" || fail "missing per-core CPU line (v0.9.5)"
+grep -q '^disk: .* rd '  "$TMPDIR/snap" || fail "missing per-device disk line (v0.9.5)"
+grep -q '^net:  .* rx '  "$TMPDIR/snap" || fail "missing per-interface net line (v0.9.5)"
+pass "per-core / per-device / per-interface / swap / cache lines present"
+
+# The USER column must resolve to a NAME, not be left blank or numeric-only. Every
+# Linux box has root, and pid 1 is root's, so this is stable across runners.
+grep -qE '^ +1 root ' "$TMPDIR/snap" || fail "USER column did not resolve pid 1 to 'root'"
+pass "USER column resolves uid -> name"
 
 # v0.9.1: when a gpu line is present AND the driver publishes DRM telemetry,
 # it must carry live fields rather than only the static capacity. Conditional
@@ -228,12 +246,12 @@ echo "[M1] --top N"
 # M2.5 reshape: count rows AFTER the PID header rather than total lines
 # — header size now varies (5 or 6 fixed lines + optional gpu) across
 # hosts; the rows-after-PID count is the actual invariant.
-top5_rows=$(awk '/^   PID S/ {start=1; next} start' "$TMPDIR/top5" | wc -l)
+top5_rows=$(awk '/^   PID USER/ {start=1; next} start' "$TMPDIR/top5" | wc -l)
 [ "$top5_rows" -eq 5 ]                         || fail "--top 5 produced $top5_rows process rows, want 5"
 pass "--top 5 → 5 process rows"
 
 "$BIN" -p --top 1 > "$TMPDIR/top1" 2>/dev/null || fail "--top 1 exited non-zero"
-top1_rows=$(awk '/^   PID S/ {start=1; next} start' "$TMPDIR/top1" | wc -l)
+top1_rows=$(awk '/^   PID USER/ {start=1; next} start' "$TMPDIR/top1" | wc -l)
 [ "$top1_rows" -eq 1 ]                         || fail "--top 1 produced $top1_rows process rows, want 1"
 pass "--top 1 → 1 process row"
 
@@ -258,7 +276,7 @@ echo "[M1] --sort"
 for key in cpu mem pid name; do
     "$BIN" -p --sort "$key" --top 5 > "$TMPDIR/sort.$key" 2>/dev/null \
         || fail "--sort $key exited non-zero"
-    sort_rows=$(awk '/^   PID S/ {start=1; next} start' "$TMPDIR/sort.$key" | wc -l)
+    sort_rows=$(awk '/^   PID USER/ {start=1; next} start' "$TMPDIR/sort.$key" | wc -l)
     [ "$sort_rows" -eq 5 ] \
         || fail "--sort $key produced $sort_rows process rows, want 5"
 done
@@ -267,8 +285,8 @@ pass "--sort {cpu,mem,pid,name} all exit 0"
 # --sort pid asc → first row PID < last row PID. PID header line is no
 # longer at NR==4; awk-extract via row index 1/5 in the rows-after-PID
 # stream so the assertion stays stable across header reshapes.
-first_pid=$(awk '/^   PID S/ {start=1; next} start' "$TMPDIR/sort.pid" | awk 'NR==1 { print $1 }')
-last_pid=$(awk '/^   PID S/ {start=1; next} start' "$TMPDIR/sort.pid" | awk 'NR==5 { print $1 }')
+first_pid=$(awk '/^   PID USER/ {start=1; next} start' "$TMPDIR/sort.pid" | awk 'NR==1 { print $1 }')
+last_pid=$(awk '/^   PID USER/ {start=1; next} start' "$TMPDIR/sort.pid" | awk 'NR==5 { print $1 }')
 [ "$first_pid" -lt "$last_pid" ] \
     || fail "--sort pid asc broken: first=$first_pid last=$last_pid"
 pass "--sort pid is ascending"

@@ -31,6 +31,21 @@ fn _snap_print_pad2(n) {
 # unit — losing sub-unit precision is fine for plain mode (the TUI
 # will show one decimal at M2). Matches the design-spec §4 mockup
 # style ("↓ 2.4M/s") modulo the decimal.
+# Index of `name` in a `stride`-byte name table of `count` entries, or -1.
+#
+# Used to pair sample 2's devices/interfaces with sample 1's BY NAME. Pairing by
+# slot index would silently subtract one device's counter from another's whenever
+# the set changes between samples — a USB disk appearing, an interface coming up —
+# and print a fabricated rate rather than nothing.
+fn _snap_match_name(name, table, stride, count) {
+    var i = 0;
+    while (i < count) {
+        if (streq(name, table + i * stride) == 1) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
 fn _snap_print_rate_bps(bps) {
     # R13 (v0.7.13): clamp negatives. Rates are a delta between two samples of a
     # monotonic counter, but the counter set is NOT stable across the window — an
@@ -316,6 +331,24 @@ fn snapshot_print(sort_key, top_n) {
     proc_diskstats_agg(db1, d1n, &sec_r1, &sec_w1);
     proc_netdev_agg   (nb1, n1n, &rx1, &tx1);
     var ncores = proc_stat_ncores(sb1, s1n);
+    # v0.9.5: per-core baseline. ⚠ MUST be taken here — `sb1` is reused for the
+    # second /proc/stat read below, so anything not copied out now is gone.
+    # ⚠ 256 BYTES = 32 u64 slots: function-local `var X[N]` is N BYTES in Cyrius.
+    var pc_a1[256];
+    var pc_t1[256];
+    var pc_n1 = proc_stat_percore(sb1, s1n, &pc_a1, &pc_t1, 32);
+    # v0.9.5 per-device / per-interface baselines. Same constraint: db1/nb1 are
+    # reused for sample 2, so anything not copied out now is gone.
+    # ⚠ Function-local `var X[N]` is N BYTES: names are 8 x 16 = 128, counters
+    # 8 slots x 8 = 64.
+    var dnm1[128];
+    var dr1[64];
+    var dw1[64];
+    var dn1 = proc_diskstats_each(db1, d1n, &dnm1, 16, &dr1, &dw1, 8);
+    var nnm1[128];
+    var nrx1[64];
+    var ntx1[64];
+    var nn1 = proc_netdev_each(nb1, n1n, &nnm1, 16, &nrx1, &ntx1, 8);
 
     # Slice C — sample 1 of /proc/[pid]/stat (utime+stime per pid).
     # Same 100ms window as the aggregate cpu/disk/net sampling, so the
@@ -334,9 +367,18 @@ fn snapshot_print(sort_key, top_n) {
     # warns has "bitten us twice". eprintln() computes the length with strlen().
     # A source that vanished BETWEEN the two samples (a rotated file, an
     # unmounted procfs) is the same degraded case, not a fatal one.
-    if (s2n < 0) { syscall(1, 1, "cpu:  n/a   disk: n/a   net: n/a\n", 33); return snapshot_finish_no_delta(sort_key, top_n); }
-    if (d2n < 0) { syscall(1, 1, "cpu:  n/a   disk: n/a   net: n/a\n", 33); return snapshot_finish_no_delta(sort_key, top_n); }
-    if (n2n < 0) { syscall(1, 1, "cpu:  n/a   disk: n/a   net: n/a\n", 33); return snapshot_finish_no_delta(sort_key, top_n); }
+    if (s2n < 0) {
+        syscall(1, 1, "cpu:  n/a   disk: n/a   net: n/a\n", 33);
+        return snapshot_finish_no_delta(sort_key, top_n);
+    }
+    if (d2n < 0) {
+        syscall(1, 1, "cpu:  n/a   disk: n/a   net: n/a\n", 33);
+        return snapshot_finish_no_delta(sort_key, top_n);
+    }
+    if (n2n < 0) {
+        syscall(1, 1, "cpu:  n/a   disk: n/a   net: n/a\n", 33);
+        return snapshot_finish_no_delta(sort_key, top_n);
+    }
 
     var cpu_active2 = 0;
     var cpu_total2  = 0;
@@ -347,6 +389,17 @@ fn snapshot_print(sort_key, top_n) {
     proc_stat_cpu_agg (sb1, &cpu_active2, &cpu_total2);
     proc_diskstats_agg(db1, d2n, &sec_r2, &sec_w2);
     proc_netdev_agg   (nb1, n2n, &rx2, &tx2);
+    var pc_a2[256];
+    var pc_t2[256];
+    var pc_n2 = proc_stat_percore(sb1, s2n, &pc_a2, &pc_t2, 32);
+    var dnm2[128];
+    var dr2p[64];
+    var dw2p[64];
+    var dn2 = proc_diskstats_each(db1, d2n, &dnm2, 16, &dr2p, &dw2p, 8);
+    var nnm2[128];
+    var nrx2[64];
+    var ntx2[64];
+    var nn2 = proc_netdev_each(nb1, n2n, &nnm2, 16, &nrx2, &ntx2, 8);
 
     # CPU% = 100 * active_delta / total_delta. Guard div-by-zero on the
     # off-chance both samples capture the exact same tick (USER_HZ is
@@ -376,6 +429,80 @@ fn snapshot_print(sort_key, top_n) {
     syscall(1, 1, " tx ", 4);
     _snap_print_rate_bps(net_tx_bps);
     syscall(1, 1, "\n", 1);
+
+    # v0.9.5: per-core CPU. design-spec §1 listed "CPU usage (per-core + aggregate)"
+    # as in scope from M0 and only the aggregate was ever built — yet per-core
+    # meters are the first thing on htop's default screen, and the aggregate hides
+    # exactly what a reader is usually looking for: one pegged core on an otherwise
+    # idle box reads as 6% on a 16-core machine.
+    #
+    # ⚠ Both samples must report the SAME core count. They will not if a CPU is
+    # hot-plugged between them, and pairing core i of one sample with core i of the
+    # other would then compare different CPUs. Bail rather than print a wrong number.
+    if (pc_n1 > 0) {
+        if (pc_n1 == pc_n2) {
+            syscall(1, 1, "core: ", 6);
+            var ci = 0;
+            while (ci < pc_n1) {
+                var cd_tot = load64(&pc_t2 + ci * 8) - load64(&pc_t1 + ci * 8);
+                var cpct = 0;
+                if (cd_tot > 0) {
+                    cpct = (load64(&pc_a2 + ci * 8) - load64(&pc_a1 + ci * 8)) * 100 / cd_tot;
+                }
+                # R13's clamp applies per core too: a counter that goes backwards
+                # (suspend/resume, a core going offline) must not print negative.
+                if (cpct < 0) { cpct = 0; }
+                if (cpct > 100) { cpct = 100; }
+                _proc_print_int_pad(cpct, 4);
+                ci = ci + 1;
+            }
+            syscall(1, 1, "\n", 1);
+        }
+    }
+
+    # v0.9.5: per-device disk and per-interface network — design-spec §1 listed
+    # both as in scope from M0 and only the aggregates were built. The aggregate
+    # answers "is the machine busy"; these answer "which device", which is the
+    # question you actually act on.
+    #
+    # ⚠ ENTITIES ARE MATCHED BY NAME, NOT BY INDEX. A device can appear or vanish
+    # between the two samples (a USB disk, an interface coming up), and pairing
+    # slot i of one sample with slot i of the other would then subtract one
+    # device's counter from another's — producing an enormous fabricated rate.
+    if (dn2 > 0) {
+        syscall(1, 1, "disk: ", 6);
+        var di = 0;
+        while (di < dn2) {
+            var dprev = _snap_match_name(&dnm2 + di * 16, &dnm1, 16, dn1);
+            if (dprev >= 0) {
+                syscall(1, 1, &dnm2 + di * 16, strlen(&dnm2 + di * 16));
+                syscall(1, 1, " rd ", 4);
+                _snap_print_rate_bps((load64(&dr2p + di * 8) - load64(&dr1 + dprev * 8)) * 512 * 1000 / SNAP_SAMPLE_MS);
+                syscall(1, 1, " wr ", 4);
+                _snap_print_rate_bps((load64(&dw2p + di * 8) - load64(&dw1 + dprev * 8)) * 512 * 1000 / SNAP_SAMPLE_MS);
+                syscall(1, 1, "  ", 2);
+            }
+            di = di + 1;
+        }
+        syscall(1, 1, "\n", 1);
+    }
+    if (nn2 > 0) {
+        syscall(1, 1, "net:  ", 6);
+        var ni = 0;
+        while (ni < nn2) {
+            var nprev = _snap_match_name(&nnm2 + ni * 16, &nnm1, 16, nn1);
+            if (nprev >= 0) {
+                syscall(1, 1, &nnm2 + ni * 16, strlen(&nnm2 + ni * 16));
+                syscall(1, 1, " rx ", 4);
+                _snap_print_rate_bps((load64(&nrx2 + ni * 8) - load64(&nrx1 + nprev * 8)) * 1000 / SNAP_SAMPLE_MS);
+                syscall(1, 1, " tx ", 4);
+                _snap_print_rate_bps((load64(&ntx2 + ni * 8) - load64(&ntx1 + nprev * 8)) * 1000 / SNAP_SAMPLE_MS);
+                syscall(1, 1, "  ", 2);
+            }
+            ni = ni + 1;
+        }
+        syscall(1, 1, "\n", 1);
+    }
 
     # Slice C — process table. Sample 2 needs the aggregate cpu_total
     # delta (already computed) and the core count (parsed from sample

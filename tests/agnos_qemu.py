@@ -248,7 +248,11 @@ def main():
         check("host line", "host: agnos" in out)
         check("kernel line", "kern: AGNOS" in out)
         check("memory line", "mem:" in out and "MiB total" in out)
-        check("column header reached (ran to the end)", "PID S  CPU%  MEM% CMD" in out)
+        # v0.9.5 widened the header with a USER column. Asserting the FULL header
+        # keeps this a real end-of-output marker: a prefix match would still pass if
+        # the table were truncated mid-header.
+        check("column header reached (ran to the end)",
+              "PID USER      S  CPU%  MEM% CMD" in out)
 
         print("[2] absent /proc degrades to n/a, never a false zero")
         check("loadavg reports n/a", "load: n/a" in out)

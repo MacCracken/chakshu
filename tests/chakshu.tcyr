@@ -8,6 +8,7 @@
 # prompt / JSON marshalling) live in ai/tests/chakshu-ai.tcyr — they need
 # the AI dep chain that only the shu-ai build carries.
 include "src/proc.cyr"
+include "src/users.cyr"
 include "src/rate.cyr"
 # v0.7.13 P-1 sweep: processes.cyr joins the suite for the sort-comparator
 # units below. Its module globals stay unallocated (nothing here calls
@@ -414,6 +415,88 @@ fn main() {
     proc_netdev_agg(net_fix2, strlen(net_fix2), &nrx2, &ntx2);
     assert_eq(nrx2, 400, "two non-lo interfaces sum rx");
     assert_eq(ntx2, 600, "two non-lo interfaces sum tx");
+
+    test_group("proc.cyr — per-device disk + per-interface net (v0.9.5)");
+    # Partitions repeat their parent's sectors. Listing both showed the same I/O
+    # twice, and the AGGREGATE summed both — `disk: wr 12 MiB/s` was two copies of
+    # one 6 MiB/s. Pure string test: parent + optional 'p' + digits.
+    var pt_names[128];
+    var pt_r[64];
+    var pt_w[64];
+    var pt_fix = "   8 0 sda 1 0 100 0 1 0 200 0 0 0 0\n   8 1 sda1 1 0 40 0 1 0 80 0 0 0 0\n   8 2 sda2 1 0 60 0 1 0 120 0 0 0 0\n 259 0 nvme0n1 1 0 50 0 1 0 60 0 0 0 0\n 259 1 nvme0n1p1 1 0 50 0 1 0 60 0 0 0 0\n";
+    var pt_n = proc_diskstats_each(pt_fix, strlen(pt_fix), &pt_names, 16, &pt_r, &pt_w, 8);
+    assert_eq(pt_n, 2, "sda1/sda2/nvme0n1p1 dropped as partitions");
+    assert_eq(streq(&pt_names, "sda"), 1, "sda kept");
+    assert_eq(streq(&pt_names + 16, "nvme0n1"), 1, "nvme0n1 kept (the 'p' form is handled)");
+    # The aggregate is built on the same walk, so the two can never disagree.
+    var ag_r = 0;
+    var ag_w = 0;
+    proc_diskstats_agg(pt_fix, strlen(pt_fix), &ag_r, &ag_w);
+    assert_eq(ag_r, 150, "aggregate reads = sda 100 + nvme0n1 50, NOT 300 with partitions");
+    assert_eq(ag_w, 260, "aggregate writes = sda 200 + nvme0n1 60, NOT 460");
+    # A name that merely ENDS in a digit is not a partition of anything listed.
+    var lone_n[128];
+    var lone_r[64];
+    var lone_w[64];
+    var lone = "   8 0 sdb3 1 0 7 0 1 0 9 0 0 0 0\n";
+    assert_eq(proc_diskstats_each(lone, strlen(lone), &lone_n, 16, &lone_r, &lone_w, 8), 1,
+              "sdb3 with no listed parent is kept — it is a device, not a partition");
+
+    # ⚠ Byte sizing again: function-local `var X[N]` is N BYTES. Names table is
+    # 8 devices x 16 bytes = 128; counter arrays are 8 slots x 8 = 64.
+    var dd_names[128];
+    var dd_r[64];
+    var dd_w[64];
+    var dd_fix = "   8       0 sda 10 0 100 0 20 0 200 0 0 0 0\n   7       0 loop0 1 0 9 0 1 0 9 0 0 0 0\n 259       0 nvme0n1 5 0 50 0 6 0 60 0 0 0 0\n";
+    var dd_n = proc_diskstats_each(dd_fix, strlen(dd_fix), &dd_names, 16, &dd_r, &dd_w, 8);
+    assert_eq(dd_n, 2, "loop0 excluded, sda + nvme0n1 kept");
+    assert_eq(streq(&dd_names, "sda"), 1, "first device name parsed");
+    assert_eq(streq(&dd_names + 16, "nvme0n1"), 1, "second device name parsed");
+    assert_eq(load64(&dd_r + 0), 100, "sda sectors_read");
+    assert_eq(load64(&dd_w + 0), 200, "sda sectors_written");
+    assert_eq(load64(&dd_r + 8), 50,  "nvme0n1 sectors_read");
+
+    var ni_names[128];
+    var ni_rx[64];
+    var ni_tx[64];
+    var ni_fix = "Inter-|   Receive\n face |bytes\n    lo: 264 3 0 0 0 0 0 0 264 3 0 0 0 0 0 0\n  eth0: 1000 5 0 0 0 0 0 0 2000 6 0 0 0 0 0 0\n wlan0: 300 2 0 0 0 0 0 0 400 2 0 0 0 0 0 0\n";
+    var ni_n = proc_netdev_each(ni_fix, strlen(ni_fix), &ni_names, 16, &ni_rx, &ni_tx, 8);
+    assert_eq(ni_n, 2, "lo excluded, eth0 + wlan0 kept");
+    assert_eq(streq(&ni_names, "eth0"), 1, "interface name parsed without its colon");
+    assert_eq(streq(&ni_names + 16, "wlan0"), 1, "second interface name parsed");
+    assert_eq(load64(&ni_rx + 0), 1000, "eth0 rx bytes");
+    assert_eq(load64(&ni_tx + 0), 2000, "eth0 tx bytes (9th field, not the 2nd)");
+    assert_eq(load64(&ni_rx + 8), 300,  "wlan0 rx bytes");
+    # `max` must bound the walk, or a host with many interfaces overruns the caller.
+    var one_n[16];
+    var one_a[8];
+    var one_b[8];
+    assert_eq(proc_netdev_each(ni_fix, strlen(ni_fix), &one_n, 16, &one_a, &one_b, 1), 1,
+              "max bounds the interface count");
+
+    test_group("proc.cyr — per-core CPU (v0.9.5)");
+    # ⚠ 64 BYTES, not [8]. Function-local `var X[N]` is N BYTES in Cyrius (module
+    # scope is N*8), so `var act[8]` is ONE u64 slot and core 1's store64 runs
+    # straight past it into the next local. The first cut of this test did exactly
+    # that and reported the parser broken when the parser was fine.
+    var pc_act[64];
+    var pc_tot[64];
+    var pc_fix = "cpu  100 0 100 800 0 0 0 0 0 0\ncpu0 10 0 10 80 0 0 0 0 0 0\ncpu1 20 0 20 60 0 0 0 0 0 0\nintr 5 5 5\nctxt 99\n";
+    var pc_n = proc_stat_percore(pc_fix, strlen(pc_fix), &pc_act, &pc_tot, 8);
+    assert_eq(pc_n, 2, "two cpuN lines found — the bare 'cpu' aggregate is skipped");
+    assert_eq(load64(&pc_tot + 0), 100, "cpu0 total = 10+0+10+80");
+    assert_eq(load64(&pc_act + 0), 20,  "cpu0 active = total - (idle + iowait)");
+    assert_eq(load64(&pc_tot + 8), 100, "cpu1 total = 20+0+20+60");
+    assert_eq(load64(&pc_act + 8), 40,  "cpu1 active");
+    # The bare `cpu` line is the SUM of all cores; counting it would report an
+    # extra core pegged at the machine average.
+    var pc_one_a[64];
+    var pc_one_t[64];
+    assert_eq(proc_stat_percore(pc_fix, strlen(pc_fix), &pc_one_a, &pc_one_t, 1), 1,
+              "max bounds the core count");
+    var pc_none = "intr 1 2 3\nctxt 9\n";
+    assert_eq(proc_stat_percore(pc_none, strlen(pc_none), &pc_act, &pc_tot, 8), 0,
+              "a buffer with no cpuN lines yields 0 cores");
 
     test_group("cli.cyr — fractional --rate parsing (v0.9.4)");
     # Millihertz, so no float is involved anywhere. The whole point is that

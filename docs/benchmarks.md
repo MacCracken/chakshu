@@ -5,7 +5,7 @@ forward from an earlier release; where a number disagrees with a prior document,
 one that was taken with a stated method.
 
 **Box:** AMD Ryzen 7 5800H (16 cores) · Arch Linux 7.1.9-arch1-2 · 290 processes at rest ·
-cyrius 6.5.35 · chakshu v0.9.4 · `build/shu` 640,216 B.
+cyrius 6.5.35 · chakshu v0.9.5 · `build/shu` 659,576 B.
 
 Targets come from [`design-spec.md`](design-spec.md) §8.
 
@@ -15,23 +15,30 @@ Targets come from [`design-spec.md`](design-spec.md) §8.
 
 | Measurement | Target (§8) | Measured | Verdict |
 |---|---|---|---|
-| TUI CPU, 1 Hz | < 0.5 % of one core | **0.500 %** | ⚠️ **at the boundary**, see below |
+| TUI CPU, 1 Hz | < 0.5 % of one core | **0.533 %** | ❌ **over**, see below |
 | TUI CPU, 4 Hz | *(none)* | 2.050 % | — |
-| Steady RSS (peak) | < 8 MB | **4,684 kB (4.57 MB)** | ✅ met, 42 % headroom |
+| Steady RSS (peak) | < 8 MB | **4,708 kB (4.60 MB)** | ✅ met, 42 % headroom |
 | Cold start (`--version`) | < 5 ms | **0.544 ms** | ✅ met, 9x headroom |
 | `shu -p` wall | < 30 ms *of work* | **111.0 ms** wall = 100 ms sample window + **~11 ms work** | ✅ met on the stated definition |
 | First TUI frame | < 50 ms | first bytes 1.0 ms; first **complete** frame ~109 ms | ⚠️ **definition unsettled** |
 
-### The 1 Hz CPU figure is at the limit, not under it
+### The 1 Hz CPU figure is now OVER the target — stated plainly
 
-0.500 % against a `< 0.5 %` target is a pass only by rounding, and it should be read as *at the
-budget* rather than *within* it. It is stable — three independent 60 s windows landed on
-0.499–0.500 % — so this is the real steady-state cost on a 290-process box, not variance. A machine
-with substantially more processes will exceed it, because the per-frame cost is dominated by the
-`/proc` walk, which is linear in process count.
+**0.533 % against `< 0.5 %` is a miss.** It was 0.500 % at v0.9.4, which was already *at* the budget
+rather than within it; v0.9.5's per-core, per-device and per-interface parsing added ~0.033 %.
 
-Either the target or the workload needs restating before it is frozen: `< 0.5 %` with no stated
-process count is not a checkable claim.
+Two things follow, and neither is "adjust the number until it passes":
+
+1. **The target is not checkable as written.** `< 0.5 %` states no process count, and the per-frame
+   cost is dominated by the `/proc` walk, which is linear in it. On a 290-process box the monitor
+   costs 0.533 %; on a 1,200-process box it will cost several times that, against the same target.
+   A budget has to name its workload.
+2. **The USER column showed how much room is actually there.** Reading `/proc/<pid>/status` for every
+   pid cost **0.866 %** — a 73 % rise — and making that read lazy for everything except
+   `--sort user` brought it back to 0.517 %. The same technique has not been applied to the rest of
+   the per-pid walk, so there is headroom left if the budget is held.
+
+⚠ Recorded as a **miss**, not waived. Design-spec §8 is a v1.0 contract and this is the number.
 
 ### Rate scaling is essentially linear
 
@@ -79,9 +86,9 @@ containing the cpu/disk/net rate line. The gap between them is the same 100 ms s
 
 | Artifact | Size | Note |
 |---|---|---|
-| `build/shu` (lean, x86_64) | 640,216 B | vs the revised < 768 KB target — met, ~130 KB headroom |
-| `build/shu-agnos` (lean, AGNOS) | 633,840 B | compile-gated in CI since v0.9.4 |
-| `ai/build/shu-ai` | 3,256,448 B | explicitly out of budget — the opt-in heavy build |
+| `build/shu` (lean, x86_64) | 659,576 B | vs the revised < 768 KB target — met, ~130 KB headroom |
+| `build/shu-agnos` (lean, AGNOS) | 653,192 B | compile-gated in CI since v0.9.4 |
+| `ai/build/shu-ai` | 3,275,808 B | explicitly out of budget — the opt-in heavy build |
 | `build/shu` (lean, aarch64) | ~975,888 B | ⚠️ **over** the 768 KB target; aarch64 is not in the release matrix |
 
 The 768 KB figure is a revision made at v0.9.0. The original 256 KB came from M0, before chakshu

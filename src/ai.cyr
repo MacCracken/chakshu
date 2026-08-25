@@ -595,10 +595,20 @@ fn _ai_path_has_prefix(path, pfx) {
 # the R14 failure mode — hung in raw mode and the alt screen with signals blocked,
 # needing another terminal to recover.
 fn _ai_log_path_ok_resolved(rp) {
-    if (_ai_path_has_prefix(rp, "/proc/") == 1) { return 0; }
-    if (_ai_path_has_prefix(rp, "/sys/")  == 1) { return 0; }
-    if (_ai_path_has_prefix(rp, "/dev/")  == 1) { return 0; }
-    if (_ai_path_has_prefix(rp, "/home/") == 1) { return 0; }
+    # ⚠ The DENY markers below are load-bearing, not decoration. CI's AI-privacy
+    # scan greps these sources for a quoted home-directory literal, because for most
+    # of this file's life any mention WAS a violation. A denylist inverts that: the
+    # literal has to be present precisely so the path can be REFUSED.
+    #
+    # So the gate was rewritten rather than relaxed. A marked line must also carry
+    # `return 0;` — structurally a refusal, so the marker cannot wave through a line
+    # that actually reads — and CI separately asserts all four denials still EXIST.
+    # Deleting one now fails, which the old "never mention it" rule could never
+    # catch: it could only see a read being added, never a refusal being removed.
+    if (_ai_path_has_prefix(rp, "/proc/") == 1) { return 0; }   # privacy: DENY
+    if (_ai_path_has_prefix(rp, "/sys/")  == 1) { return 0; }   # privacy: DENY
+    if (_ai_path_has_prefix(rp, "/dev/")  == 1) { return 0; }   # privacy: DENY
+    if (_ai_path_has_prefix(rp, "/home/") == 1) { return 0; }   # privacy: DENY
     return 1;
 }
 

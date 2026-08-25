@@ -5,7 +5,7 @@
 > [`state.md`](state.md). This file answers one question: *what is left to reach
 > v1.0, and in which release does it land?*
 >
-> **Current: v0.9.4.** | **Last Updated**: 2026-08-25
+> **Current: v0.9.5.** | **Last Updated**: 2026-08-25
 
 ---
 
@@ -26,6 +26,7 @@ inside it are additive or corrective only.
 | ~~0.9.2~~ | ~~Theming + display polish~~ | **shipped 2026-08-24.** `--theme dark\|light\|auto`; `--color auto` now honours NO_COLOR/TERM/isatty instead of aliasing `always` |
 | ~~0.9.3~~ | ~~AGNOS parity~~ | **shipped 2026-08-24.** TUI runs on AGNOS via `kbscan`/`winsize` polling. Root-caused an AGNOS kernel bug (12 KB usable of a 2 MB stack page) and fixed it upstream in cycle 1.56.46 |
 | ~~0.9.4~~ | ~~v1.0 readiness~~ | **shipped 2026-08-25.** Security audit PASS (14 confirmed of 38 raised); fractional `--rate`; swap/cached/buffers; benchmarks + audit artifacts; an `--agnos` CI gate and the literal-length gate the P-1 sweep specified. Two v1.0 criteria went unmet → met |
+| ~~0.9.5~~ | ~~design-spec §1 close-out~~ | **shipped 2026-08-25.** All six §1 features that were in scope since M0 now ship; found and fixed a double-count in the aggregate disk rate; `docs/cli-contract.md` written (criterion 1) and criterion 4 decided |
 | **1.0.0** | Ship as the AGNOS default monitor | Registry promotion, ISO default, announce |
 
 ---
@@ -44,10 +45,10 @@ inside it are additive or corrective only.
 
 | # | Criterion | State |
 |---|---|---|
-| 1 | **CLI surface frozen and documented** — every flag's argument shape, the exit-code matrix, and the semver policy for what forces a v2 | ❌ **not met.** No contract doc exists. `docs/design-spec.md` §7 omits `--sort`, `--top` and `--theme`, misstates `--rate`'s range, and still calls `--with-logs` "pending" |
-| 2 | **Test coverage adequate for the surface** | ⚠️ **close.** 130 monitor + 39 AI + 14 PTY + 17 AGNOS-QEMU + 25 smoke gates. `--rate`/`--color`/`--theme`/`--pid 0`/unknown-flag exit codes gated at v0.9.4; a literal-length gate is still absent |
+| 1 | **CLI surface frozen and documented** — every flag's argument shape, the exit-code matrix, and the semver policy for what forces a v2 | ⚠️ **documented (v0.9.5), not yet frozen.** [`docs/cli-contract.md`](../cli-contract.md) states the whole surface and the freeze/no-freeze split. It ends with **7 open questions** that must be settled before a 1.0 tag, because each is a breaking change afterwards — `--watch`'s optional argument, no `--`, no `--flag=value`, `-p` colliding with both incumbents, `--top` reading as a mode, `--explain` exiting 0 on an unreachable gateway, and inconsistent mode-incompatible-flag handling |
+| 2 | **Test coverage adequate for the surface** | ✅ **met (v0.9.5).** **179** monitor + 39 AI unit tests, 25 smoke gates, 14 PTY scenarios, 17 AGNOS-QEMU checks, plus the literal-length and toolchain-pin gates. Every flag in the frozen surface now has an exit-code gate, and the v0.9.5 parsers (per-core, per-device, per-interface, partition filter) are fixture-tested rather than only exercised against this host |
 | 3 | **Benchmarks captured** in `docs/benchmarks.md` | ✅ **met (v0.9.4).** Captured with a stated method and a committed harness (`tests/bench_tui.py`), including what is deliberately *not* benchmarked. Surfaced two unsettled §8 rows in the process: the 1 Hz CPU budget is met only by rounding and has no stated process count, and "first TUI frame < 50 ms" has no work-vs-wall definition |
-| 4 | **≥1 downstream consumer green** | ❓ **undefined for a binary with no library surface.** Needs an explicit recorded decision — the AGNOS ISO is the closest analogue |
+| 4 | **≥1 downstream consumer green** | ✅ **decided (v0.9.5) — substituted, with the reason recorded.** The criterion is meaningless as written for a binary with no library surface: nothing can import chakshu. Two candidates were considered and rejected — the AGNOS ISO (chakshu is not on it yet, so it would be circular) and "the smoke suite" (self-referential; a project cannot be its own downstream). The substitute is the property the criterion actually exists to check — *that the frozen surface is exercised by something other than its own unit tests*: `-p`'s pipe-safe output and the full flag surface are driven end-to-end on every push by `scripts/smoke.sh` (25 gates), `tests/integration_smoke.py` (14 PTY scenarios) and `tests/agnos_qemu.py` (17 checks on a real AGNOS kernel). ⚠ Reversible: if chakshu ever grows a library surface, restore the original criterion |
 | 5 | **CHANGELOG complete** from v0.1.0 onward | ✅ **met** |
 | 6 | **Security audit PASS** in `docs/audit/YYYY-MM-DD-audit.md` | ✅ **met (v0.9.4).** [`docs/audit/2026-08-25-audit.md`](../audit/2026-08-25-audit.md) — 4 surfaces, 38 raised, **14 confirmed** (24 refuted by an adversarial pass), all fixed and gated. Two HIGH: `--watch` silently dropped 23.7% of security events, and `$CHAKSHU_LOG_PATH` put the process environment into the AI prompt. GPU telemetry came back clean. Known gaps stated rather than hidden |
 
@@ -114,6 +115,12 @@ inside it are additive or corrective only.
 - Historical replay — chakshu over a sakshi-backed time-series store.
 - Mobile / dashboard frontends: same backend, different render layer.
 - Themed glyphs / non-ASCII art mode (btop-style).
+- Focus-panel depth: threads list, fd enumeration, and per-focused-pid CPU%
+  (`src/tui.cyr` head comment). None gates v1.0 — the focus panel already shows
+  status, cmdline and the kill flow.
+- Promote reverse-video (`_tui_invert_on`/`_off`) into darshana. The trigger is a
+  SECOND consumer wanting the same primitive; cyim's syntax highlighting needs
+  richer attributes, so it is not that consumer (`src/tui.cyr:~200`).
 - Plugin surface for custom panels.
 
 ---

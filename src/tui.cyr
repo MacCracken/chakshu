@@ -61,7 +61,9 @@
 # based on _tui_focus_pid. Sort/filter/arrow keys are no-ops in
 # focus mode; q/Ctrl-C exits, k kills the focused pid (confirm
 # flow shared with table mode). Threads list / fd enumeration /
-# focused-pid CPU% deferred to a polish slice.
+# focused-pid CPU% are NOT implemented (deferred — docs/development/roadmap.md
+# "Post-v1"). None of the three gates v1.0; the focus panel already shows status,
+# cmdline and the kill flow.
 # Slice G.4:
 #   G.4 — M2 close review + audit
 #
@@ -199,9 +201,10 @@ var KEY_LEFT  = 1002;
 var KEY_RIGHT = 1003;
 
 # Reverse-video on/off (CSI 7m / CSI 0m). Used to highlight the
-# selected row in the process table. Inline here for now; promotes
-# to darshana when a second consumer (cyim's syntax highlighting
-# uses richer attributes — different need) wants the same primitive.
+# selected row in the process table. Deliberately inline rather than in
+# darshana: the extraction trigger is a SECOND consumer wanting the same
+# primitive, and cyim's syntax highlighting needs richer attributes, so it is
+# not that consumer. Extraction deferred — docs/development/roadmap.md "Post-v1".
 fn _tui_invert_on()  { syscall(1, 1, "\x1b[7m", 4); return 0; }
 fn _tui_invert_off() { syscall(1, 1, "\x1b[0m", 4); return 0; }
 
@@ -472,6 +475,14 @@ var _tui_prev_sec_w   = 0;
 var _tui_prev_rx      = 0;
 var _tui_prev_tx      = 0;
 # Last computed values, reused when a repaint arrives too soon to re-sample.
+# v0.9.5 per-core rolling baseline. Module scope, so [32] is 32 u64 slots.
+# The TUI keeps a ROLLING delta (one sample per frame) rather than `-p`'s paired
+# two-sample window, so the baseline has to persist across frames like the
+# aggregate counters above.
+var _tui_pc_a[32];
+var _tui_pc_t[32];
+var _tui_pc_n     = 0;
+var _tui_pc_pct[32];
 var _tui_cpu_pct      = 0;
 var _tui_disk_rd_bps  = 0;
 var _tui_disk_wr_bps  = 0;
@@ -631,6 +642,7 @@ fn _tui_cycle_sort() {
     if (_tui_sort_key == SORT_CPU)       { _tui_sort_key = SORT_MEM; }
     elif (_tui_sort_key == SORT_MEM)     { _tui_sort_key = SORT_PID; }
     elif (_tui_sort_key == SORT_PID)     { _tui_sort_key = SORT_NAME; }
+    elif (_tui_sort_key == SORT_NAME)    { _tui_sort_key = SORT_USER; }
     else                                  { _tui_sort_key = SORT_CPU; }
     # Reset selection AND viewport on sort change — the row at the
     # prior index almost certainly maps to a different process now,
@@ -1063,6 +1075,32 @@ fn tui_render_table_frame() {
         if (dn > 0) { proc_diskstats_agg(db1, dn, &sec_r, &sec_w); }
         if (nn > 0) { proc_netdev_agg   (nb1, nn, &rx, &tx); }
         if (sn > 0) { _tui_ncores = proc_stat_ncores(sb1, sn); }
+        # v0.9.5: per-core. Percentages are computed against the PREVIOUS frame's
+        # per-core baseline, then the baseline is replaced — the same rolling shape
+        # the aggregate uses. A changed core count (hot-plug) invalidates the
+        # pairing, so the old baseline is dropped rather than compared across it.
+        if (sn > 0) {
+            var pa[256];
+            var pt[256];
+            var pn = proc_stat_percore(sb1, sn, &pa, &pt, 32);
+            var pi = 0;
+            while (pi < pn) {
+                var pct = 0;
+                if (_tui_pc_n == pn) {
+                    var dtot = load64(&pt + pi * 8) - load64(&_tui_pc_t + pi * 8);
+                    if (dtot > 0) {
+                        pct = (load64(&pa + pi * 8) - load64(&_tui_pc_a + pi * 8)) * 100 / dtot;
+                    }
+                }
+                if (pct < 0) { pct = 0; }
+                if (pct > 100) { pct = 100; }
+                store64(&_tui_pc_pct + pi * 8, pct);
+                store64(&_tui_pc_a + pi * 8, load64(&pa + pi * 8));
+                store64(&_tui_pc_t + pi * 8, load64(&pt + pi * 8));
+                pi = pi + 1;
+            }
+            _tui_pc_n = pn;
+        }
 
         # Mirror `-p`'s rule exactly: the line is n/a if ANY of the three
         # sources is missing, since a partial line is harder to read than none.
@@ -1146,6 +1184,25 @@ fn tui_render_table_frame() {
         _snap_print_rate_bps(net_rx_bps);
         _tui_color_bold(); syscall(1, 1, " tx ", 4); _tui_color_reset();
         _snap_print_rate_bps(net_tx_bps);
+
+        # v0.9.5: per-core, appended to THIS row rather than given its own.
+        # ⚠ A new row would cost a process row on every terminal, and the process
+        # table is what the monitor is for. So it appears only when the width is
+        # actually there — 4 columns per core plus the ~62 this row already uses.
+        # `shu -p` always prints the full breakdown, where rows are free.
+        if (_tui_pc_n > 0) {
+            if (_tui_cols >= 62 + _tui_pc_n * 4 + 6) {
+                _tui_color_bold(); syscall(1, 1, "   core", 7); _tui_color_reset();
+                var ci = 0;
+                while (ci < _tui_pc_n) {
+                    var cp = load64(&_tui_pc_pct + ci * 8);
+                    _tui_color_pct_band(cp, 25, 70);
+                    _proc_print_int_pad(cp, 4);
+                    _tui_color_reset();
+                    ci = ci + 1;
+                }
+            }
+        }
     }
     tty_clear_to_eol();
 
@@ -1163,7 +1220,7 @@ fn tui_render_table_frame() {
         if (_proc_n == 0) { processes_sample_delta(total_delta, ncores, sort_key); }
     }
     tty_move(5, 1);
-    syscall(1, 1, "   PID S  CPU%  MEM% CMD", 24);
+    syscall(1, 1, "   PID USER      S  CPU%  MEM% CMD", 34);
     tty_clear_to_eol();
 
     # Slice E.5: build the filtered index list. Walks _proc_recs in
@@ -1252,6 +1309,17 @@ fn tui_render_table_frame() {
         rp = _tui_row_pad(&rowbuf, rp, 512, pid, 6);
         rp = _tui_row_col(&rowbuf, rp, 512, "\x1b[0m");
         rp = _tui_row_app(&rowbuf, rp, 512, " ");
+        # v0.9.5: USER, left-aligned in a 9-wide column, dim like the pid — it is
+        # context for the row, not the row's subject. Clipped rather than widened:
+        # the column budget belongs to CMD, which is the field a reader scans.
+        var unm[24];
+        var ul = users_name_for(proc_rec_uid(rec), &unm, 24);
+        if (ul > 9) { ul = 9; store8(&unm + 9, 0); }
+        rp = _tui_row_col(&rowbuf, rp, 512, _tui_c_faint());
+        rp = _tui_row_app(&rowbuf, rp, 512, &unm);
+        rp = _tui_row_col(&rowbuf, rp, 512, "\x1b[0m");
+        var upad = 10 - ul;
+        while (upad > 0) { rp = _tui_row_app(&rowbuf, rp, 512, " "); upad = upad - 1; }
         var sc[2];
         store8(&sc, st);
         store8(&sc + 1, 0);
@@ -1267,8 +1335,10 @@ fn tui_render_table_frame() {
         rp = _tui_row_app(&rowbuf, rp, 512, " ");
         if (rp > 0) { syscall(1, 1, &rowbuf, rp); }
         # cmdline read (top-N only — same as plain mode). Clip to terminal
-        # width: the per-row prefix is pid + space + state 1 + cpu 6 + mem 6 +
-        # space, i.e. pid_w + 15 columns.
+        # width: the per-row prefix is pid + space + USER 9 + space + state 1 +
+        # cpu 6 + mem 6 + space, i.e. pid_w + 25 columns. ⚠ v0.9.5 widened this by
+        # 10 for the USER column — the clip and the prefix must move together or
+        # long cmdlines wrap and scroll the header off the top.
         #
         # R21 (v0.7.13 P-1 sweep): this used a hardcoded 21, which assumes the
         # pid column is exactly 6 wide. _proc_print_int_pad only PADS to 6 — it
@@ -1287,7 +1357,7 @@ fn tui_render_table_frame() {
         # over a 60 s window). The comm from THIS frame is passed so an exec or
         # a pid reuse invalidates the entry — see proc_read_cmdline_cached.
         var cmd_n = proc_read_cmdline_cached(&pid_str, pid, rec + 32, &cmd_buf, PROC_CMDLINE_MAX);
-        var avail = _tui_cols - (pid_w + 15);
+        var avail = _tui_cols - (pid_w + 25);
         if (avail < 0) { avail = 0; }
         if (cmd_n > 0) {
             var to_print = cmd_n;
@@ -1411,9 +1481,11 @@ fn _tui_render_status() {
             # The agnos console draws bytes, not UTF-8 — the 3-byte arrows
             # come out as mojibake ("aa"), so the hint line says which keys
             # to press in ASCII instead. Same bindings, legible glyphs.
-            pos = pos + _tui_status_append(&sbuf, pos, max, "[up/dn] move  [s] sort  [f] filter  [k] kill  [?] explain  [q] quit");
+            pos = pos + _tui_status_append(&sbuf, pos, max, "[up/dn] move  [s] sort  [f] filter");
+            pos = pos + _tui_status_append(&sbuf, pos, max, "  [k] kill  [?] explain  [q] quit");
             #else
-            pos = pos + _tui_status_append(&sbuf, pos, max, "[\xe2\x86\x91\xe2\x86\x93] move  [s] sort  [f] filter  [k] kill  [?] explain  [q] quit");
+            pos = pos + _tui_status_append(&sbuf, pos, max, "[\xe2\x86\x91\xe2\x86\x93] move  [s] sort  [f] filter");
+            pos = pos + _tui_status_append(&sbuf, pos, max, "  [k] kill  [?] explain  [q] quit");
             #endif
         }
         if (_tui_filter_n > 0) {
@@ -1674,7 +1746,10 @@ fn tui_run(refresh_ms, sort_key, top_n, color_mode, focus_pid) {
     _tui_filter_n     = 0;
 
     # Color: --color {auto, always} → enabled; never → disabled.
-    # auto and always behave identically in TUI mode for now.
+    # ⚠ This used to add "auto and always behave identically in TUI mode" — false
+    # since v0.9.2 and contradicted by the note directly below, which describes the
+    # real detection. Removed rather than annotated: a stale claim beside its own
+    # correction is worse than no comment.
     _tui_color_enabled = 1;
     # v0.9.2: `auto` now actually decides something. It used to be a synonym for
     # `always` in the TUI — the flag parsed three values but only two behaved

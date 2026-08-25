@@ -4,7 +4,107 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.5] — 2026-08-25 — the six §1 features that were in scope since M0
+
+### Added — per-core CPU, per-device disk, per-interface network, and a USER column
+
+design-spec §1 listed all four as in scope from M0. None was implemented and none was ever formally
+descoped; v0.9.4 recorded the gap, and this release closes it. Together with swap/cached/buffers in
+v0.9.4 that is **all six**.
+
+Per-core meters, a swap meter and a USER column are htop's *default screen* — a monitor whose stated
+goal is replacing htop could not omit them. The aggregate actively hides what a reader is usually
+looking for: one pegged core on an otherwise idle 16-core box reads as 6 %.
+
+`-p` gains `core:`, `disk:` and `net:` breakdown lines. The TUI appends per-core to its existing
+cpu row **only when the terminal is wide enough** — a new row would cost a process row on every
+terminal, and the process table is what the monitor is for.
+
+### Fixed — the aggregate disk rate double-counted every partition
+
+Found by building the per-device view, which printed `sda` and `sda2` side by side with the same
+6 MiB/s while the summary said 12. A partition repeats its parent disk's sectors, and the aggregate
+summed both. `proc.cyr` had carried *"a precise filter using sysfs lives at M2"* since M1.
+
+⚠ The first fix **probed `/sys/block` and was wrong** — it is the precise test, but it made
+`proc_diskstats_agg`, a pure parser the unit suite feeds synthetic fixtures, depend on the *host's*
+device set: the "mdctl is included" assertion started failing because this box has no
+`/sys/block/mdctl`. A parser whose result depends on the machine running the test cannot be tested.
+It is now a pure string test — parent + optional `p` + digits — and the aggregate is implemented on
+top of the per-device walk, so the summary and the breakdown cannot disagree.
+
+### Changed — the USER column is resolved lazily, because it was not free
+
+Reading `/proc/<pid>/status` for every pid took the TUI from **0.500 % to 0.866 %** of a core at
+1 Hz — a 73 % rise. It is now read for every pid only when `--sort user` is in effect (a sort key
+must be known for every row); every other sort leaves a sentinel and resolves the displayed rows
+lazily, the same trick already used for cmdline. That brought it back to 0.517 %.
+
+uid → name comes from `/etc/passwd` parsed once and cached (`src/users.cyr`). No `getpwuid`: that is
+libc, and the lean `shu` links none. An unresolvable uid renders as its **number** — a container
+with no `/etc/passwd` is normal, and a number is real information where a blank column is not.
+
+⚠ **`-p` output shape changed**: the table header is now `   PID USER      S  CPU%  MEM% CMD`.
+Scripts matching the old header need updating. `scripts/smoke.sh` gates the full header rather than a
+prefix, so dropping the column again would be caught.
+
+### Added — `docs/cli-contract.md`, the v1.0 surface (criterion 1)
+
+chakshu ships a binary, so "public API frozen" means the **command surface**. States every flag's
+argument shape, the exit-code matrix, `-p`'s line contract, the key bindings, and the semver rule for
+what forces a v2 — plus, explicitly, what does *not* freeze.
+
+⛔ It ends with **7 open questions that must be settled before a 1.0 tag**, because each becomes a
+breaking change afterwards: `--watch`'s optional argument, no `--` end-of-options, no `--flag=value`,
+`-p` colliding with both incumbents, `--top` reading as a mode, `--explain` exiting 0 on an
+unreachable gateway, and inconsistent mode-incompatible-flag handling.
+
+### Changed — v1.0 criterion 4 substituted, with the reason recorded
+
+"≥1 downstream consumer green" is meaningless for a binary with no library surface — nothing can
+import chakshu. The AGNOS ISO was rejected as circular (chakshu is not on it yet) and "the smoke
+suite" as self-referential. The substitute is the property the criterion exists to check — that the
+frozen surface is exercised by something other than its own unit tests. Reversible if chakshu ever
+grows a library surface.
+
+### ⚠ design-spec §8's 1 Hz CPU budget is now MISSED, and is recorded as a miss
+
+**0.533 % against `< 0.5 %`.** It was 0.500 % at v0.9.4 — at the budget rather than within it — and
+this release's parsing added ~0.033 %. Not waived and not adjusted to fit: §8 is a v1.0 contract and
+this is the number. The target is also not checkable as written, since it states no process count
+while the cost is linear in it. See [`docs/benchmarks.md`](docs/benchmarks.md).
+
+### Tests
+
+179 monitor unit tests (was 153) — the new parsers are fixture-tested rather than only exercised
+against this host. `scripts/smoke.sh` gained six gates, each asserting one v0.9.5 line so a
+regression names itself, plus one proving the USER column resolves `pid 1` to `root`. All six were
+mutation-checked: removing the line each guards makes it fail.
+
+
 ## [0.9.4] — 2026-08-25 — v1.0 readiness: security audit, fractional `--rate`, and the docs told the truth again
+
+### Changed — the AI-privacy CI gate now checks for a REFUSAL, not for silence
+
+The gate failed the audit fix that closed A1. It grepped the AI sources for a quoted
+home-directory literal and failed on any hit — correct for most of this file's life, when any
+mention meant the prompt path could read a home directory. A denylist inverts that: the literal has
+to be present precisely so the path can be refused.
+
+Rewritten rather than relaxed. A line may carry the literal only if it is marked `# privacy: DENY`
+**and** is structurally a refusal (`return 0;` on the same line), so the marker cannot wave through a
+line that actually reads. CI now also asserts all four denials (`/proc/`, `/sys/`, `/dev/`, `/home/`)
+still **exist** — deleting one fails, which the old rule could never catch: it could only see a read
+being added, never a refusal being removed. Mutation-verified in both directions.
+
+### Fixed — lint: three untracked deferrals, two over-long lines, doubled blank lines
+
+One of the deferrals was a stale claim rather than a deferral: `src/tui.cyr` still said "auto and
+always behave identically in TUI mode for now" — false since v0.9.2 and contradicted by the note
+directly beneath it. Removed rather than annotated; a stale claim sitting beside its own correction
+is worse than no comment. The other two are real deferrals (focus-panel depth; promoting
+reverse-video into darshana) and are now cross-referenced to `roadmap.md` "Post-v1", where they have
+been recorded so the reference points at something.
 
 ### Security — audit PASS, 14 confirmed findings fixed
 

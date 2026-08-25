@@ -19,23 +19,27 @@ Binary name: `shu` — **S**ystem **H**ealth **U**tility, a contraction of *chak
 
 **In scope:**
 
-- Process list with sort/filter (CPU, memory, name — **not user**, see below)
-- CPU usage (**aggregate only** — per-core not implemented, see below)
-- Memory usage (RAM — **swap / cached / buffers not implemented**, see below)
-- Disk I/O rates (**aggregate only** — per-device not implemented, see below)
-- Network I/O rates (**aggregate only** — per-interface not implemented, see below)
+- Process list with sort/filter (CPU, memory, name, **user** — USER column + `--sort user`, v0.9.5)
+- CPU usage (per-core + aggregate — v0.9.5)
+- Memory usage (RAM, swap, cached, buffers — v0.9.4/v0.9.5)
+- Disk I/O rates (per-device + aggregate — v0.9.5)
+- Network I/O rates (per-interface + aggregate — v0.9.5)
 
-> ⛔ **SIX ITEMS ABOVE ARE UNIMPLEMENTED AND HAVE NEVER BEEN FORMALLY DESCOPED** — flagged at
-> v0.9.4, annotated rather than silently deleted. Verified absent from `src/`: per-core CPU,
-> swap (`/proc/swaps` appears nowhere, though §2 lists it as a 1 Hz source), cached/buffers,
-> per-device disk I/O, per-interface network I/O, and sort/column by user (there is no USER
-> column). The live table header is `PID S CPU% MEM% CMD` and the memory line is used/total only.
+> ✅ **ALL SIX SHIPPED — v0.9.4 and v0.9.5.** These were listed as in scope from M0, were never
+> implemented, and were never formally descoped; the gap was recorded here at v0.9.4 and closed at
+> v0.9.5. Per-core meters, a swap meter and a USER column are htop's default screen, so a monitor
+> whose stated goal is replacing htop could not omit them.
 >
-> **Per-core meters, a swap meter and a USER column are htop's default screen**, and this project's
-> stated goal is to replace htop/btop. Shipping 1.0.0 against a §1 that lists them as in-scope
-> publishes a false contract on day one. Each needs an explicit decision — **implement**, or move to
-> §12 with a descope note. This is a v1.0 blocker recorded in
-> [roadmap.md](development/roadmap.md).
+> Two notes worth keeping, because both were found by building the features:
+>
+> - **The per-device view exposed a double-count in the aggregate.** A partition repeats its parent
+>   disk's sectors, so `disk: wr 12 MiB/s` was two copies of the same 6 MiB/s. This file carried
+>   *"a precise filter using sysfs lives at M2"* from M1 onward. It is now a pure string test
+>   (parent + optional `p` + digits) rather than a filesystem probe — a first cut did use sysfs and
+>   made a fixture-driven unit test depend on the host's device set.
+> - **The USER column costs measurable time.** Reading `/proc/<pid>/status` for every pid took the
+>   TUI from 0.500% to 0.866% of a core. It is now read for every pid ONLY when sorting by user, and
+>   resolved lazily for the displayed rows otherwise — the same trick already used for cmdline.
 - Kill selected process (with confirm)
 - Plain-snapshot mode (`-p`) — single-frame text dump, pipeable
 - AI explanation of selected row / system state via the `hoosh` LLM gateway (HTTP) — shipped in the `shu-ai` build (v0.7.3+)

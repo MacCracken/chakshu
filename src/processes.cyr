@@ -21,7 +21,9 @@
 # stat parse and only matters for the displayed top-N. Slice D will
 # read cmdline for the post-sort top-N rather than every pid.
 
-var PROC_REC_SIZE      = 48;
+# v0.9.5: 48 -> 56. The record was exactly full — pid/cpu/rss/state at +0..+31 and
+# comm at +32..+47 — so the USER column needed one more slot: uid at +48.
+var PROC_REC_SIZE      = 56;
 # R5 (v0.7.13 P-1 sweep): raised 1024 -> 8192. The walk below breaks at
 # PROC_MAX *before* the sort runs, so on a host with more than PROC_MAX
 # processes the busiest one was simply absent from the table — the monitor
@@ -42,6 +44,7 @@ var SORT_CPU  = 0;   # cpu_pct desc — default
 var SORT_MEM  = 1;   # rss desc
 var SORT_PID  = 2;   # pid asc
 var SORT_NAME = 3;   # comm asc (lexicographic)
+var SORT_USER = 4;   # username asc then pid — design-spec §1, shipped v0.9.5
 
 # Cmdline display cap. /proc/[pid]/cmdline can be ARG_MAX (2 MB) but
 # the displayed line wants to fit comfortably in a typical terminal /
@@ -127,6 +130,32 @@ fn _proc_scan_pids() {
 }
 
 # Sample 1 — populate _proc_map[pid] = utime+stime.
+# Owning (real) uid for a pid, or 0 when it cannot be read.
+#
+# ⚠ A SECOND per-pid read, which this file's header warns against for cmdline
+# ("per-line work that dwarfs the per-pid stat parse"). MEASURED, and the warning
+# was right: reading it for every pid took the TUI from 0.500% to **0.866%** of a
+# core at 1 Hz on a 289-process box — a 73% rise that blows design-spec §8's
+# `< 0.5%` budget outright.
+#
+# So it is read for every pid ONLY when sorting by user, where a sort key must be
+# known for every row. On every other sort the record carries -1 and the name is
+# resolved lazily for the displayed top-N — the same trick this file already uses
+# for cmdline, and the cost falls to ~10 reads per frame instead of ~289.
+# The column is never faked: an unresolvable uid renders as its number.
+fn _proc_read_uid(pid_str) {
+    var upath[64];
+    proc_pid_path(pid_str, "/status", &upath);
+    var ub[1024];
+    var un = file_read_all(&upath, &ub, 1023);
+    if (un <= 0) { return 0; }
+    store8(&ub + un, 0);
+    # "Uid:\t<real>\t<eff>\t<saved>\t<fs>" — the REAL uid is first and is what
+    # ps/htop show. proc_line_field is line-anchored (R10), so a process renamed
+    # to "Uid:0" via prctl cannot plant a match inside its own Name: line.
+    return proc_line_field(&ub, "Uid:");
+}
+
 fn processes_sample1() {
     _proc_ensure_init();
     map_u64_clear(_proc_map);
@@ -177,6 +206,19 @@ fn _proc_cmp(a, b, sort_key) {
     if (sort_key == SORT_MEM)  { return load64(a + 16) - load64(b + 16); }
     if (sort_key == SORT_PID)  { return load64(b + 0)  - load64(a + 0); }
     if (sort_key == SORT_NAME) { return _proc_cmp_comm(a + 32, b + 32); }
+    if (sort_key == SORT_USER) {
+        # Sort by the RESOLVED NAME, not the uid: the column shows names, and a
+        # table ordered by a number the reader cannot see looks unsorted. Ties —
+        # the common case, since most rows share one owner — fall back to pid so
+        # the order is stable rather than arbitrary.
+        var na[24];
+        var nb[24];
+        users_name_for(load64(a + 48), &na, 24);
+        users_name_for(load64(b + 48), &nb, 24);
+        var uc = _proc_cmp_comm(&na, &nb);
+        if (uc != 0) { return uc; }
+        return load64(b + 0) - load64(a + 0);
+    }
     return 0;
 }
 
@@ -273,6 +315,9 @@ fn processes_sample_delta(total_delta, ncores, sort_key) {
                     store64(rec + 16, load64(&srec + 16));
                     store64(rec + 24, load64(&srec + 0));
                     memcpy(rec + 32, &srec + 24, 16);
+                    var uidv = 0 - 1;                       # -1 = unread sentinel
+                    if (sort_key == SORT_USER) { uidv = _proc_read_uid(name); }
+                    store64(rec + 48, uidv);
                     _proc_n = _proc_n + 1;
                 }
             }
@@ -324,6 +369,9 @@ fn processes_sample2(total_delta, ncores, sort_key) {
                     store64(rec + 16, load64(&srec + 16));
                     store64(rec + 24, load64(&srec + 0));
                     memcpy(rec + 32, &srec + 24, 16);
+                    var uidv = 0 - 1;                       # -1 = unread sentinel
+                    if (sort_key == SORT_USER) { uidv = _proc_read_uid(name); }
+                    store64(rec + 48, uidv);
                     _proc_n = _proc_n + 1;
                 }
             }
@@ -407,17 +455,36 @@ fn _proc_print_int_pad(n, width) {
     return 0;
 }
 
+# Owning uid for a record, reading it now if the sampler skipped it.
+#
+# The sampler only pays the per-pid /status read when sorting by user; every other
+# sort leaves -1 here and this resolves the handful of rows actually displayed.
+# Callers must go through this rather than loading +48 directly, or a row will
+# render its owner as "-1".
+fn proc_rec_uid(rec) {
+    var u = load64(rec + 48);
+    if (u >= 0) { return u; }
+    var pbuf[24];
+    _proc_int_to_cstr(load64(rec + 0), &pbuf);
+    u = _proc_read_uid(&pbuf);
+    store64(rec + 48, u);                       # memoise for this frame
+    return u;
+}
+
 # Render the top-N rows of the sorted process table to stdout. Layout:
 #
-#      PID S  CPU%  MEM% CMD
-#    1234 R    18     3 firefox
-#     892 S     6     1 Web Content
+#      PID USER      S  CPU%  MEM% CMD
+#    1234 macro     R    18     3 firefox
+#     892 root      S     6     1 Web Content
 #
-# Right-align numeric columns; left-align CMD with one trailing space.
+# v0.9.5: USER added — design-spec §1 listed sort/filter by user as in scope from
+# M0 and there was no column at all. It sits second because that is where htop and
+# ps put it, and a migrating user reads left-to-right.
+# Right-align numeric columns; left-align USER and CMD with one trailing space.
 # mem_pct = rss_pages × 4096 × 100 / (mem_total_kb × 1024) simplifies
 # to rss × 400 / mem_total_kb (integer truncation; sub-1% reads as 0).
 fn processes_render(top_n, mem_total_kb) {
-    syscall(1, 1, "   PID S  CPU%  MEM% CMD\n", 25);
+    syscall(1, 1, "   PID USER      S  CPU%  MEM% CMD\n", 35);
     var n = _proc_n;
     if (n > top_n) { n = top_n; }
     var i = 0;
@@ -432,6 +499,17 @@ fn processes_render(top_n, mem_total_kb) {
             mem = rss * 400 / mem_total_kb;
         }
         _proc_print_int_pad(pid, 6);
+        syscall(1, 1, " ", 1);
+        # USER, left-aligned in a 9-wide column. Names longer than that are
+        # CLIPPED rather than widening the row: the column budget belongs to CMD,
+        # which is the field a reader actually scans, and 9 covers the overwhelming
+        # majority of real account names.
+        var unm[24];
+        var ul = users_name_for(proc_rec_uid(rec), &unm, 24);
+        if (ul > 9) { ul = 9; }
+        syscall(1, 1, &unm, ul);
+        var upad = 9 - ul;
+        while (upad > 0) { syscall(1, 1, " ", 1); upad = upad - 1; }
         syscall(1, 1, " ", 1);
         var sc[2];
         store8(&sc, st);

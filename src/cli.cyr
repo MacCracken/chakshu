@@ -7,7 +7,7 @@
 # logic lives here once. `ai_explain` resolves to whichever is included.
 
 # Keep CHAKSHU_VERSION in sync with the VERSION file.
-var CHAKSHU_VERSION = "chakshu 0.9.4";
+var CHAKSHU_VERSION = "chakshu 0.9.5";
 
 # Exit codes per design-spec §9
 var EXIT_OK    = 0;
@@ -31,7 +31,7 @@ fn print_help() {
     println("");
     println("Options:");
     println("  -p                        Plain snapshot mode (single frame to stdout)");
-    println("  --sort cpu|mem|pid|name   Process-table sort key (default cpu)");
+    println("  --sort cpu|mem|pid|name|user  Process-table sort key (default cpu)");
     println("  --top N                   Process-table row count (default 10)");
     println("  --rate <HZ>               TUI refresh rate, 0.2-10, default 1. Fractional");
     println("                            accepted: 0.5 = 2s (btop's default), 0.667 = 1.5s");
@@ -77,7 +77,6 @@ fn eprintln(s) {
     eprint("\n", 1);
     return 0;
 }
-
 
 fn print_unknown_flag(flag) {
     eprint_cstr("chakshu: unknown flag: ");
@@ -152,10 +151,10 @@ fn chakshu_main() {
         if (streq(a, "--version") == 1) { mode_version = 1; i = i + 1; continue; }
         if (streq(a, "-p") == 1)        { mode_p = 1;       i = i + 1; continue; }
 
-        # --sort cpu|mem|pid|name (default cpu).
+        # --sort cpu|mem|pid|name|user (default cpu).
         if (streq(a, "--sort") == 1) {
             if (i + 1 >= n) {
-                eprintln("chakshu: --sort requires a value (cpu|mem|pid|name)");
+                eprintln("chakshu: --sort requires a value (cpu|mem|pid|name|user)");
                 return EXIT_USAGE;
             }
             var v = argv(i + 1);
@@ -163,10 +162,11 @@ fn chakshu_main() {
             elif    (streq(v, "mem")  == 1) { sort_key = SORT_MEM; }
             elif    (streq(v, "pid")  == 1) { sort_key = SORT_PID; }
             elif    (streq(v, "name") == 1) { sort_key = SORT_NAME; }
+            elif    (streq(v, "user") == 1) { sort_key = SORT_USER; }
             else {
                 eprint_cstr("chakshu: --sort: unknown key '");
                 eprint_cstr(v);
-                eprintln("' (want cpu|mem|pid|name)");
+                eprintln("' (want cpu|mem|pid|name|user)");
                 return EXIT_USAGE;
             }
             i = i + 2;
@@ -390,5 +390,4 @@ fn chakshu_main() {
     tui_set_theme(theme_mode);
     return tui_run(_mhz_to_ms(tui_rate_mhz), sort_key, top_n, color_mode, focus_pid);
 }
-
 

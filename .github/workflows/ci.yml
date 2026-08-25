@@ -323,12 +323,39 @@ jobs:
           for f in ai/*.cyr; do [ -f "$f" ] && AI_SRC="$AI_SRC $f"; done
           if [ -n "$AI_SRC" ]; then
             echo "AI privacy scan over:$AI_SRC"
-            home_hits=$(grep -n '"/home/' $AI_SRC 2>/dev/null || true)
+            # A "/home/ literal in the AI sources used to be, by itself, a finding —
+            # for most of this file's life any mention meant the prompt path could
+            # read a user's home directory. v0.9.4 inverted that: the audit found
+            # $CHAKSHU_LOG_PATH was unvalidated (CHAKSHU_LOG_PATH=/proc/self/environ
+            # put the whole environment on the wire to hoosh), and the fix is a
+            # DENYLIST — which must name the paths it refuses.
+            #
+            # So the rule is no longer "never mention it". A line may carry the
+            # literal only if it is marked `# privacy: DENY` *and* is structurally a
+            # refusal (`return 0;` on the same line). Both are required, so the
+            # marker cannot be used to wave through a line that actually reads.
+            marked=$(grep -n 'privacy: DENY' $AI_SRC 2>/dev/null || true)
+            bad_marker=$(echo "$marked" | grep -v 'return 0;' | grep . || true)
+            if [ -n "$bad_marker" ]; then
+              echo "FAIL: a 'privacy: DENY' marker is not on a refusal line"
+              echo "$bad_marker"
+              FAIL=1
+            fi
+            home_hits=$(grep -n '"/home/' $AI_SRC 2>/dev/null | grep -v 'privacy: DENY' || true)
             if [ -n "$home_hits" ]; then
-              echo "FAIL: AI prompt path references /home/"
+              echo "FAIL: AI prompt path references /home/ outside the denylist"
               echo "$home_hits"
               FAIL=1
             fi
+            # ...and the denials must still be THERE. Deleting the denylist would
+            # otherwise pass silently, which is the failure direction that matters:
+            # the old gate could only catch adding a read, never removing a refusal.
+            for deny in '/proc/' '/sys/' '/dev/' '/home/'; do
+              if ! grep -q "\"$deny\".*privacy: DENY" $AI_SRC 2>/dev/null; then
+                echo "FAIL: the AI log-path denylist no longer refuses $deny"
+                FAIL=1
+              fi
+            done
             # getenv-equivalent in cyrius is the `env` lib. chakshu legitimately
             # reads three CHAKSHU_* settings through one helper, so allowlist by
             # ARGUMENT rather than by name: the generic body is `getenv(name)`,
