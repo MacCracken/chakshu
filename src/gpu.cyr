@@ -1,0 +1,336 @@
+# gpu.cyr — live GPU telemetry from DRM sysfs (v0.9.1).
+#
+# WHY THIS EXISTS SEPARATELY FROM mihi
+#
+# mihi (via ai-hwaccel) answers "what accelerators are in this machine" — name,
+# total memory, family, type. That is IDENTITY, probed once and cached, and it is
+# the right split: mihi explicitly does not own delta-sourced data.
+#
+# It cannot answer "what is the GPU doing right now", because ai-hwaccel is a
+# no-exec capability detector: it has no utilisation, temperature, power or clock
+# surface at all (verified — zero such functions in its 6,273-line bundle). Live
+# numbers from a vendor library would mean NVML or ROCm via FFI, which CLAUDE.md
+# forbids in the lean build.
+#
+# But the kernel already publishes them as plain text. amdgpu exposes
+# `gpu_busy_percent`, `mem_info_vram_used/total` and hwmon `temp1_input` under
+# /sys/class/drm/cardN/device/ — the same shape of interface as /proc, readable
+# with open/read/close and no libc. That is exactly chakshu's contract: the
+# kernel ABI is the interface, and per-frame deltas are chakshu's job.
+#
+# COVERAGE, HONESTLY
+#
+# This works where the driver publishes the nodes. amdgpu does. Intel's i915/xe
+# do not expose a simple busy percentage (utilisation there lives behind perf/PMU,
+# which is a different and much larger surface). NVIDIA's proprietary driver
+# publishes none of it — that needs NVML. So a card with no telemetry renders its
+# identity exactly as before and simply omits the live fields. Absence is normal,
+# not an error, and is never reported as one.
+
+var GPU_MAX_CARDS = 8;
+
+# Per-card sysfs device path, discovered once. Module scope: 8 slots x 96 bytes.
+var _gpu_paths[96];
+var _gpu_vendor[8];
+var _gpu_device[8];
+var _gpu_ncards = 0;
+var _gpu_scanned = 0;
+
+fn _gpu_path_at(i) { return &_gpu_paths + i * 96; }
+
+# Read a small unsigned integer from a sysfs file. Returns -1 when the file is
+# absent or unreadable — which is the common case for a driver that does not
+# publish that node, and must stay silent rather than surfacing as an error.
+fn gpu_read_int(path) {
+    var buf[64];
+    var n = file_read_all(path, &buf, 63);
+    if (n <= 0) { return 0 - 1; }
+    store8(&buf + n, 0);
+    return atoi(&buf);
+}
+
+# Read a hex sysfs id ("0x1002\n") into an integer. Returns -1 on failure.
+fn gpu_read_hex_id(path) {
+    var buf[32];
+    var n = file_read_all(path, &buf, 31);
+    if (n <= 0) { return 0 - 1; }
+    store8(&buf + n, 0);
+    var i = 0;
+    if (load8(&buf) == 48) { if (load8(&buf + 1) == 120) { i = 2; } }   # skip "0x"
+    var v = 0;
+    var any = 0;
+    while (i < n) {
+        var c = load8(&buf + i);
+        var d = 0 - 1;
+        if (c >= 48) { if (c <= 57) { d = c - 48; } }
+        if (c >= 97) { if (c <= 102) { d = c - 87; } }
+        if (c >= 65) { if (c <= 70) { d = c - 55; } }
+        if (d < 0) { break; }
+        v = v * 16 + d;
+        any = 1;
+        i = i + 1;
+    }
+    if (any == 0) { return 0 - 1; }
+    return v;
+}
+
+# Discover DRM cards that publish live telemetry. Scans /sys/class/drm for
+# `cardN` (not the `cardN-CONNECTOR` output nodes, which have no device stats)
+# and keeps those exposing gpu_busy_percent. Runs once per process — the set of
+# installed GPUs does not change while a monitor is open.
+fn gpu_scan() {
+    if (_gpu_scanned == 1) { return _gpu_ncards; }
+    _gpu_scanned = 1;
+    _gpu_ncards = 0;
+
+    var idx = 0;
+    while (idx < GPU_MAX_CARDS) {
+        # Build "/sys/class/drm/card<N>/device/"
+        var base[96];
+        var pos = 0;
+        var pre = "/sys/class/drm/card";
+        var pl = strlen(pre);
+        var k = 0;
+        while (k < pl) { store8(&base + pos, load8(pre + k)); pos = pos + 1; k = k + 1; }
+        var ds[24];
+        var dl = _proc_int_to_cstr(idx, &ds);
+        var m = 0;
+        while (m < dl) { store8(&base + pos, load8(&ds + m)); pos = pos + 1; m = m + 1; }
+        var suf = "/device/";
+        var sl = strlen(suf);
+        var q = 0;
+        while (q < sl) { store8(&base + pos, load8(suf + q)); pos = pos + 1; q = q + 1; }
+        store8(&base + pos, 0);
+
+        # Keep it only if it publishes a busy percentage.
+        var probe[128];
+        _gpu_join(&base, "gpu_busy_percent", &probe, 128);
+        if (gpu_read_int(&probe) >= 0) {
+            var slot = _gpu_path_at(_gpu_ncards);
+            var c = 0;
+            while (c < pos) { store8(slot + c, load8(&base + c)); c = c + 1; }
+            store8(slot + pos, 0);
+
+            var vp[128];
+            _gpu_join(&base, "vendor", &vp, 128);
+            store64(&_gpu_vendor + _gpu_ncards * 8, gpu_read_hex_id(&vp));
+            var dp[128];
+            _gpu_join(&base, "device", &dp, 128);
+            store64(&_gpu_device + _gpu_ncards * 8, gpu_read_hex_id(&dp));
+
+            _gpu_ncards = _gpu_ncards + 1;
+            if (_gpu_ncards >= GPU_MAX_CARDS) { return _gpu_ncards; }
+        }
+        idx = idx + 1;
+    }
+    return _gpu_ncards;
+}
+
+# Join a sysfs directory path and a leaf name into `out`.
+fn _gpu_join(dir, leaf, out, cap) {
+    var pos = 0;
+    var dl = strlen(dir);
+    var i = 0;
+    while (i < dl) {
+        if (pos >= cap - 1) { break; }
+        store8(out + pos, load8(dir + i));
+        pos = pos + 1;
+        i = i + 1;
+    }
+    var ll = strlen(leaf);
+    var j = 0;
+    while (j < ll) {
+        if (pos >= cap - 1) { break; }
+        store8(out + pos, load8(leaf + j));
+        pos = pos + 1;
+        j = j + 1;
+    }
+    store8(out + pos, 0);
+    return pos;
+}
+
+# Match a telemetry card to a mihi accelerator index.
+#
+# mihi's device name embeds the PCI ids ("AMD Radeon (PCI 0x1002:0x1638)"), and
+# sysfs publishes the same pair, so the pairing is exact rather than positional.
+# That matters on a mixed machine: an NVIDIA card contributes an entry to mihi's
+# list but publishes no telemetry, so pairing by index alone would attribute the
+# AMD card's utilisation to the NVIDIA one. Falls back to index order only when
+# the name carries no parseable ids AND the counts line up.
+fn gpu_card_for(mihi_idx, mihi_name) {
+    var n = gpu_scan();
+    if (n == 0) { return 0 - 1; }
+
+    if (mihi_name != 0) {
+        # Find "0x" in the name, then read <vendor>:<device>.
+        var off = strstr(mihi_name, "0x");
+        if (off >= 0) {
+            var v = _gpu_parse_hex_at(mihi_name, off + 2);
+            var colon = strstr(mihi_name + off, ":");
+            if (colon >= 0) {
+                var d = _gpu_parse_hex_at(mihi_name + off, colon + 1);
+                if (v >= 0) {
+                    if (d >= 0) {
+                        var i = 0;
+                        while (i < n) {
+                            if (load64(&_gpu_vendor + i * 8) == v) {
+                                if (load64(&_gpu_device + i * 8) == d) { return i; }
+                            }
+                            i = i + 1;
+                        }
+                        # Ids parsed but no card matched: this accelerator has no
+                        # telemetry. Do NOT fall through to index order — that is
+                        # exactly the misattribution this matching prevents.
+                        return 0 - 1;
+                    }
+                }
+            }
+        }
+    }
+
+    if (mihi_idx < n) { return mihi_idx; }
+    return 0 - 1;
+}
+
+fn _gpu_parse_hex_at(s, off) {
+    var v = 0;
+    var any = 0;
+    var i = off;
+    # Skip an optional "0x" prefix. mihi renders the pair as
+    # "(PCI 0x1002:0x1638)", so the byte after the colon is the '0' of a second
+    # "0x" — without this, parsing stops at the 'x' and yields 0, which then
+    # matches nothing and silently drops the card's telemetry.
+    if (load8(s + i) == 48) {
+        var nx = load8(s + i + 1);
+        if (nx == 120) { i = i + 2; }
+        if (nx == 88)  { i = i + 2; }
+    }
+    while (1 == 1) {
+        var c = load8(s + i);
+        var d = 0 - 1;
+        if (c >= 48) { if (c <= 57) { d = c - 48; } }
+        if (c >= 97) { if (c <= 102) { d = c - 87; } }
+        if (c >= 65) { if (c <= 70) { d = c - 55; } }
+        if (d < 0) { break; }
+        v = v * 16 + d;
+        any = 1;
+        i = i + 1;
+    }
+    if (any == 0) { return 0 - 1; }
+    return v;
+}
+
+# --- per-card live readings. All return -1 when unavailable. ---
+
+fn gpu_busy_pct(card) {
+    if (card < 0) { return 0 - 1; }
+    if (card >= _gpu_ncards) { return 0 - 1; }
+    var p[128];
+    _gpu_join(_gpu_path_at(card), "gpu_busy_percent", &p, 128);
+    return gpu_read_int(&p);
+}
+
+fn gpu_vram_used(card) {
+    if (card < 0) { return 0 - 1; }
+    if (card >= _gpu_ncards) { return 0 - 1; }
+    var p[128];
+    _gpu_join(_gpu_path_at(card), "mem_info_vram_used", &p, 128);
+    return gpu_read_int(&p);
+}
+
+fn gpu_vram_total(card) {
+    if (card < 0) { return 0 - 1; }
+    if (card >= _gpu_ncards) { return 0 - 1; }
+    var p[128];
+    _gpu_join(_gpu_path_at(card), "mem_info_vram_total", &p, 128);
+    return gpu_read_int(&p);
+}
+
+# Temperature in millidegrees C, from the card's hwmon node. hwmon instances are
+# numbered globally, so the index is not predictable — probe a small range rather
+# than assuming hwmon0.
+fn gpu_temp_millic(card) {
+    if (card < 0) { return 0 - 1; }
+    if (card >= _gpu_ncards) { return 0 - 1; }
+    var h = 0;
+    while (h < 8) {
+        var leaf[64];
+        var lp = 0;
+        var pre = "hwmon/hwmon";
+        var pl = strlen(pre);
+        var i = 0;
+        while (i < pl) { store8(&leaf + lp, load8(pre + i)); lp = lp + 1; i = i + 1; }
+        var ds[24];
+        var dl = _proc_int_to_cstr(h, &ds);
+        var m = 0;
+        while (m < dl) { store8(&leaf + lp, load8(&ds + m)); lp = lp + 1; m = m + 1; }
+        var suf = "/temp1_input";
+        var sl = strlen(suf);
+        var q = 0;
+        while (q < sl) { store8(&leaf + lp, load8(suf + q)); lp = lp + 1; q = q + 1; }
+        store8(&leaf + lp, 0);
+
+        var p[192];
+        _gpu_join(_gpu_path_at(card), &leaf, &p, 192);
+        var t = gpu_read_int(&p);
+        if (t >= 0) { return t; }
+        h = h + 1;
+    }
+    return 0 - 1;
+}
+
+# Does this card publish anything live at all?
+fn gpu_has_telemetry(card) {
+    if (gpu_busy_pct(card) >= 0) { return 1; }
+    return 0;
+}
+
+# --- render helper ----------------------------------------------------
+
+# Emit the live telemetry suffix for one accelerator: " busy N%  vram U/T MiB
+# NN°C". Each field is emitted only if the driver publishes it, so a card with
+# no telemetry adds nothing at all and the line reads exactly as it did before
+# v0.9.1. Writes nothing and returns 0 when there is nothing to say.
+#
+# VRAM here is the LIVE used/total from mem_info_vram_*, which is a different
+# number from mihi_gpu_memory_bytes: that one is the accelerator's advertised
+# capacity (and for some NPUs a vendor-documented constant, not a sysfs read).
+# When live VRAM is available it is strictly more informative, so the caller
+# prints this instead of the static capacity rather than alongside it.
+fn gpu_emit_live(card) {
+    if (card < 0) { return 0; }
+    var wrote = 0;
+
+    var busy = gpu_busy_pct(card);
+    if (busy >= 0) {
+        syscall(1, 1, "  busy ", 7);
+        print_num(busy);
+        syscall(1, 1, "%", 1);
+        wrote = 1;
+    }
+
+    var used = gpu_vram_used(card);
+    var total = gpu_vram_total(card);
+    if (used >= 0) {
+        if (total > 0) {
+            syscall(1, 1, "  vram ", 7);
+            print_num(used / 1048576);
+            syscall(1, 1, "/", 1);
+            print_num(total / 1048576);
+            syscall(1, 1, " MiB", 4);
+            wrote = 1;
+        }
+    }
+
+    var t = gpu_temp_millic(card);
+    if (t >= 0) {
+        syscall(1, 1, "  ", 2);
+        print_num(t / 1000);
+        # U+00B0 (degree sign) as its UTF-8 bytes, so the source is not
+        # sensitive to editor encoding — same convention as the arrows in the
+        # status line.
+        syscall(1, 1, "\xc2\xb0C", 3);
+        wrote = 1;
+    }
+    return wrote;
+}

@@ -174,6 +174,23 @@ grep -q '^cpu:'   "$TMPDIR/snap"                               || fail "missing 
 grep -q '^   PID S' "$TMPDIR/snap"                             || fail "missing PID table header"
 pass "header shape (host/kern/proc/[gpu?]/mem/cpu/PID-header)"
 
+# v0.9.1: when a gpu line is present AND the driver publishes DRM telemetry,
+# it must carry live fields rather than only the static capacity. Conditional
+# on both, because a CI runner has no GPU and NVIDIA's proprietary driver
+# publishes none of these nodes — absence is correct, not a failure.
+if grep -q "^gpu:" "$TMPDIR/snap"; then
+    if [ -r /sys/class/drm/card0/device/gpu_busy_percent ] \
+    || [ -r /sys/class/drm/card1/device/gpu_busy_percent ]; then
+        grep -qE "^gpu:.*busy [0-9]+%" "$TMPDIR/snap" \
+            || fail "gpu line lacks live busy% despite DRM telemetry being readable"
+        grep -qE "^gpu:.*vram [0-9]+/[0-9]+ MiB" "$TMPDIR/snap" \
+            || fail "gpu line lacks live vram used/total"
+        pass "gpu line carries live DRM telemetry"
+    else
+        pass "gpu line present; no DRM telemetry on this host (expected)"
+    fi
+fi
+
 # Each header line should also carry its co-fields.
 sed -n '1p' "$TMPDIR/snap" | grep -q 'up: '                    || fail "line 1 missing 'up: '"
 sed -n '1p' "$TMPDIR/snap" | grep -q 'load: '                  || fail "line 1 missing 'load: '"

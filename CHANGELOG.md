@@ -4,6 +4,76 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-08-24 — GPU telemetry depth: live busy%, VRAM and temperature
+
+The gpu line went from static identity to live readings:
+
+```
+before  gpu:  AMD Radeon (PCI 0x1002:0x1638) (3072 MiB)
+after   gpu:  AMD Radeon (PCI 0x1002:0x1638)  busy 0%  vram 172/3072 MiB  47°C
+```
+
+### Where the numbers come from — and why not from mihi
+
+mihi/ai-hwaccel answers *what accelerators exist* (name, capacity, family, type).
+It cannot answer *what the GPU is doing*: ai-hwaccel is a no-exec capability
+detector with **no** utilisation, temperature, power or clock surface anywhere in
+its 6,273-line bundle (verified, not assumed). Getting live numbers from a vendor
+library would mean NVML or ROCm through FFI, which CLAUDE.md forbids in the lean
+build.
+
+But the kernel already publishes them as plain text. `amdgpu` exposes
+`gpu_busy_percent`, `mem_info_vram_used/total` and hwmon `temp1_input` under
+`/sys/class/drm/cardN/device/` — the same shape of interface as `/proc`, read with
+open/read/close and no libc. That is chakshu's contract exactly: the kernel ABI is
+the interface, identity belongs to mihi, and per-frame deltas are chakshu's job.
+
+### Added
+
+- **`src/gpu.cyr`** — DRM sysfs telemetry: card discovery, live readings, and a
+  render helper. No new dependency; the syscalls were already in the lean manifest.
+- Live fields in the gpu line for both `shu -p` and the TUI, replacing the static
+  capacity when telemetry is available (live used/total is strictly more
+  informative than an advertised capacity).
+
+### Devices are matched by PCI id, not by index
+
+mihi's device name embeds the ids (`(PCI 0x1002:0x1638)`) and sysfs publishes the
+same pair, so the pairing is exact. This matters on a mixed machine: an NVIDIA card
+contributes an entry to mihi's list but publishes no DRM telemetry, so pairing by
+position would attribute the AMD card's utilisation to the NVIDIA one. When ids
+parse but match no telemetry card, the accelerator is reported as having none —
+deliberately **not** falling back to index order, which is the misattribution the
+matching exists to prevent.
+
+### Coverage, stated honestly
+
+This works where the driver publishes the nodes. `amdgpu` does. Intel's `i915`/`xe`
+do not expose a simple busy percentage (utilisation there lives behind perf/PMU, a
+much larger surface). NVIDIA's proprietary driver publishes none of it. A card with
+no telemetry renders its identity exactly as before and omits the live fields —
+absence is normal and is never surfaced as an error.
+
+### Verified
+
+- Read against real hardware and cross-checked against sysfs: busy 0%,
+  vram 172/3072 MiB, temp within a degree of a concurrent `cat` (it is live data).
+- **130/130** lean assertions (was 116). The PCI-parsing tests are mutation-checked:
+  removing the `0x`-prefix skip fails exactly the two that should.
+- New `scripts/smoke.sh` gate asserts the live fields appear **when** the host
+  publishes DRM telemetry, and passes cleanly when it does not (CI runners, NVIDIA).
+
+### Fixed during development
+
+- **A `0x`-prefix parsing bug that would have silently disabled all telemetry.**
+  mihi renders *both* ids `0x`-prefixed, so a parser starting after the colon reads
+  the `0`, stops at the `x`, yields 0, matches no card, and drops the readings with
+  no error. Caught by probing real hardware rather than trusting the code path.
+- **A smoke gate that could never run.** The new GPU assertion initially grepped
+  `$TMPDIR/out` while `-p` is captured to `$TMPDIR/snap`, so the whole block was
+  skipped silently — the same dead-gate class the v0.7.13 sweep found in the
+  AI-privacy check. Caught by verifying the gate *printed*, not that the suite passed.
+
 ## [0.9.0] — 2026-08-24 — perf + size close-out (opens M4)
 
 Every design-spec §8 target is now met, and the one that could not be met has been

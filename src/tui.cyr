@@ -882,11 +882,17 @@ fn tui_render_table_frame() {
             if (gname != 0) {
                 syscall(1, 1, gname, strlen(gname));
             }
-            var gmem_b = mihi_gpu_memory_bytes(gi);
-            if (gmem_b > 0) {
-                syscall(1, 1, " (", 2);
-                print_num(gmem_b / 1048576);
-                syscall(1, 1, " MiB)", 5);
+            # v0.9.1: prefer LIVE telemetry (busy%, vram used/total, temp) read
+            # straight from DRM sysfs. Falls back to mihi's static capacity when
+            # the driver publishes nothing — see src/gpu.cyr for which drivers do.
+            var gcard = gpu_card_for(gi, gname);
+            if (gpu_emit_live(gcard) == 0) {
+                var gmem_b = mihi_gpu_memory_bytes(gi);
+                if (gmem_b > 0) {
+                    syscall(1, 1, " (", 2);
+                    print_num(gmem_b / 1048576);
+                    syscall(1, 1, " MiB)", 5);
+                }
             }
             gi = gi + 1;
         }

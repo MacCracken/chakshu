@@ -12,6 +12,7 @@ include "src/proc.cyr"
 # units below. Its module globals stay unallocated (nothing here calls
 # _proc_ensure_init), so including it costs the suite nothing at runtime.
 include "src/processes.cyr"
+include "src/gpu.cyr"
 include "src/watch.cyr"
 # darshana — for the signalfd teardown regression guard below. It is already a
 # [deps.darshana] module of this manifest, so no new dependency is introduced.
@@ -95,6 +96,39 @@ fn main() {
     # These parse REAL aegis 1.1.7 output. The record below is verbatim from a
     # live emitter, not hand-written, so the assertions pin the actual producer
     # format rather than a guess at it.
+    # ----- gpu.cyr — DRM sysfs telemetry (v0.9.1) ----------------------
+    # These assert the PARSING, which is what can silently rot; the live values
+    # depend on the box and are checked by the -p smoke instead.
+    test_group("gpu.cyr — sysfs value parsing");
+    # A sysfs int node is "N\n" — the trailing newline must not break atoi.
+    assert_eq(gpu_read_int("/proc/sys/kernel/pid_max") > 0, 1, "reads an int sysfs/proc node");
+    assert_eq(gpu_read_int("/sys/class/drm/definitely-not-here"), 0 - 1, "absent node reports -1, not 0");
+
+    # PCI-id matching. mihi renders "(PCI 0x1002:0x1638)"; BOTH ids are 0x-prefixed,
+    # and the second prefix is what a naive parser trips on — it reads the '0',
+    # stops at 'x', yields 0, matches nothing, and silently drops the telemetry.
+    assert_eq(_gpu_parse_hex_at("0x1002", 0), 4098, "parses a 0x-prefixed id");
+    assert_eq(_gpu_parse_hex_at("1002", 0), 4098, "parses a bare hex id");
+    var pcistr = "AMD Radeon (PCI 0x1002:0x1638)";
+    var poff = strstr(pcistr, "0x");
+    assert(poff >= 0, "finds the first id in a mihi device name");
+    assert_eq(_gpu_parse_hex_at(pcistr, poff + 2), 4098, "vendor id parsed from the name");
+    var pcolon = strstr(pcistr + poff, ":");
+    assert(pcolon >= 0, "finds the id separator");
+    assert_eq(_gpu_parse_hex_at(pcistr + poff, pcolon + 1), 5688, "device id parsed past the second 0x");
+    assert_eq(_gpu_parse_hex_at("zz", 0), 0 - 1, "non-hex reports -1");
+
+    # An accelerator whose ids parse but match no telemetry card must report
+    # "no card" rather than falling back to index order — that fallback would
+    # attribute one GPU's utilisation to a different one on a mixed machine.
+    assert_eq(gpu_card_for(0, "Bogus Device (PCI 0xdead:0xbeef)"), 0 - 1, "unmatched PCI ids yield no card");
+
+    # Out-of-range cards must be inert, never fatal.
+    assert_eq(gpu_busy_pct(0 - 1), 0 - 1, "busy% of an invalid card is -1");
+    assert_eq(gpu_vram_used(99), 0 - 1, "vram of an out-of-range card is -1");
+    assert_eq(gpu_temp_millic(0 - 1), 0 - 1, "temp of an invalid card is -1");
+    assert_eq(gpu_has_telemetry(0 - 1), 0, "invalid card reports no telemetry");
+
     test_group("watch.cyr — aegis NDJSON field extraction");
     var wrec = "{\"id\":\"d3937571-0fed-4939-aa59-148bf012cbaa\",\"timestamp\":\"2026-08-25T00:49:17Z\",\"event_type\":\"MaliciousPayload\",\"source\":\"phylax\",\"agent_id\":null,\"threat_level\":\"Critical\",\"description\":\"entropy 7.94 in /tmp/x\",\"metadata\":{},\"resolved\":false}";
     var wf[96];

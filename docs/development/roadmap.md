@@ -5,7 +5,7 @@
 > [`state.md`](state.md). This file answers one question: *what is left to reach
 > v1.0, and in which release does it land?*
 >
-> **Current: v0.9.0.** | **Last Updated**: 2026-08-24
+> **Current: v0.9.1.** | **Last Updated**: 2026-08-24
 
 ---
 
@@ -22,7 +22,7 @@ inside it are additive or corrective only.
 | ~~0.8.1~~ | ~~`--with-logs` log + anomaly context~~ | **shipped 2026-08-24.** Per-pid attribution proved impossible (sakshi carries no pid); ships system-level context + the anomaly ring |
 | ~~0.8.2~~ | ~~AI hardening + hoosh gate promotion~~ | **shipped 2026-08-24.** The blocker was a whitespace-intolerant JSON parse misreported as a transport error, not libc |
 | ~~0.9.0~~ | ~~Perf + size close-out~~ | **shipped 2026-08-24.** All §8 targets met; the size target formally revised 256 KB → 768 KB with the reason recorded |
-| **0.9.1** | GPU telemetry depth | Per-device stats beyond count/name/memory |
+| ~~0.9.1~~ | ~~GPU telemetry depth~~ | **shipped 2026-08-24.** Live busy%/VRAM/temp from DRM sysfs, matched to devices by PCI id |
 | **0.9.2** | Theming + display polish | Dark/light configurable; no layout regressions |
 | **0.9.3** | AGNOS parity | `--agnos` TUI runs, not just `-p` |
 | **1.0.0** | Ship as the AGNOS default monitor | Registry promotion, ISO default, announce |
@@ -30,13 +30,6 @@ inside it are additive or corrective only.
 ---
 
 ---
-
-## 0.9.1 — GPU telemetry depth
-
-- [ ] Richer per-device stats beyond the count/name/memory shipped at M2.5. The
-      old blocker is gone: v0.7.14 moved ai-hwaccel to 2.3.19 in lockstep with
-      mihi 1.2.5, so the coordinated bump this was waiting on has happened. What
-      remains is choosing which stats to surface and where in the layout.
 
 ## 0.9.2 — Theming + display polish
 
