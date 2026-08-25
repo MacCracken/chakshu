@@ -1,0 +1,192 @@
+# tui_agnos.cyr — AGNOS-native input for the TUI (v0.9.3).
+#
+# WHY A SEPARATE INPUT PATH AT ALL
+#
+# The Linux TUI is built on three things agnos does not have: termios raw mode,
+# SIGWINCH, and epoll with a per-fd data tag. darshana's agnos `tty_raw` returns
+# -1 *by design* — agnos has no termios, the kernel console runs its own line
+# discipline, and darshana's own comment calls -1 "the honest verdict" rather
+# than pretending raw mode succeeded. So `tui_run` bailed to `-p` on agnos, and
+# the interactive monitor simply did not exist there.
+#
+# What agnos does provide is a different, simpler shape:
+#
+#   kbscan #42   sys_kbscan(buf, max) -> count   NON-BLOCKING drain of raw
+#                keyboard SCANCODES. Not a byte stream, not ASCII.
+#   winsize #60  the live framebuffer character grid, already wrapped by
+#                darshana's agnos `tty_winsize` — so resize is a POLL, not a
+#                signal, and SIGWINCH never enters the picture.
+#
+# That maps cleanly onto a poll loop: each tick, drain scancodes, poll the grid,
+# render. No signalfd, no epoll, no termios. This file is that loop's input half.
+#
+# ⚠ SCANCODES, NOT CHARACTERS. kbscan hands back raw Set-1 scancodes because
+# keys are discrete events. A press yields the code; a RELEASE yields the same
+# code with bit 7 set (0x80). Releases are discarded here — chakshu is a
+# key-press UI, and treating a release as a press would double every keystroke.
+
+var _AG_SC_RELEASE = 128;      # 0x80 — set on break codes
+
+# Shift state, tracked across drains: Set-1 reports shift as its own
+# make/break pair rather than modifying the letter's code, so a filter-mode
+# capital letter needs this. Left shift 0x2A, right shift 0x36.
+var _ag_shift = 0;
+
+# Translate one Set-1 MAKE code to a chakshu key, or -1 if it is a key chakshu
+# has no use for. Only the keys the TUI actually dispatches on are mapped, plus
+# the printable set filter mode needs — a full 104-key table would be dead
+# weight in a binary that is size-budgeted.
+fn _ag_sc_to_key(sc) {
+    # Row: digits and their shifted symbols are not needed by any binding, so
+    # digits map to their ASCII forms for filter typing only.
+    if (sc == 2)  { return 49; }    # 1
+    if (sc == 3)  { return 50; }    # 2
+    if (sc == 4)  { return 51; }    # 3
+    if (sc == 5)  { return 52; }    # 4
+    if (sc == 6)  { return 53; }    # 5
+    if (sc == 7)  { return 54; }    # 6
+    if (sc == 8)  { return 55; }    # 7
+    if (sc == 9)  { return 56; }    # 8
+    if (sc == 10) { return 57; }    # 9
+    if (sc == 11) { return 48; }    # 0
+
+    if (sc == 14) { return 127; }   # Backspace -> DEL, what filter mode expects
+    if (sc == 15) { return 9; }     # Tab
+    if (sc == 28) { return 13; }    # Enter
+    if (sc == 1)  { return 27; }    # Esc
+    if (sc == 57) { return 32; }    # Space
+
+    # Letters, in Set-1 scancode order (QWERTY rows).
+    if (sc == 16) { return _ag_letter(113); }   # q
+    if (sc == 17) { return _ag_letter(119); }   # w
+    if (sc == 18) { return _ag_letter(101); }   # e
+    if (sc == 19) { return _ag_letter(114); }   # r
+    if (sc == 20) { return _ag_letter(116); }   # t
+    if (sc == 21) { return _ag_letter(121); }   # y
+    if (sc == 22) { return _ag_letter(117); }   # u
+    if (sc == 23) { return _ag_letter(105); }   # i
+    if (sc == 24) { return _ag_letter(111); }   # o
+    if (sc == 25) { return _ag_letter(112); }   # p
+    if (sc == 30) { return _ag_letter(97);  }   # a
+    if (sc == 31) { return _ag_letter(115); }   # s
+    if (sc == 32) { return _ag_letter(100); }   # d
+    if (sc == 33) { return _ag_letter(102); }   # f
+    if (sc == 34) { return _ag_letter(103); }   # g
+    if (sc == 35) { return _ag_letter(104); }   # h
+    if (sc == 36) { return _ag_letter(106); }   # j
+    if (sc == 37) { return _ag_letter(107); }   # k
+    if (sc == 38) { return _ag_letter(108); }   # l
+    if (sc == 44) { return _ag_letter(122); }   # z
+    if (sc == 45) { return _ag_letter(120); }   # x
+    if (sc == 46) { return _ag_letter(99);  }   # c
+    if (sc == 47) { return _ag_letter(118); }   # v
+    if (sc == 48) { return _ag_letter(98);  }   # b
+    if (sc == 49) { return _ag_letter(110); }   # n
+    if (sc == 50) { return _ag_letter(109); }   # m
+
+    # Punctuation filter mode may legitimately receive.
+    if (sc == 52) { return 46; }    # .
+    if (sc == 53) { return 47; }    # /   (shifted: '?', the explain key)
+    if (sc == 12) { return 45; }    # -
+    if (sc == 51) { return 44; }    # ,
+    if (sc == 39) { return 59; }    # ;
+    if (sc == 43) { return 92; }    # backslash
+
+    # Arrows. On a real Set-1 keyboard these arrive as an 0xE0 prefix followed
+    # by the code; agnos's kbscan reports the prefix as its own byte, which
+    # _ag_drain handles by remembering it. These are the POST-prefix codes.
+    return 0 - 1;
+}
+
+# Apply shift to a letter: chakshu's filter accepts printable ASCII, so a
+# shifted letter is simply the uppercase form.
+fn _ag_letter(lower) {
+    if (_ag_shift == 1) { return lower - 32; }
+    return lower;
+}
+
+# Extended (0xE0-prefixed) codes: the arrow cluster.
+fn _ag_sc_ext_to_key(sc) {
+    if (sc == 72) { return KEY_UP; }
+    if (sc == 80) { return KEY_DOWN; }
+    if (sc == 75) { return KEY_LEFT; }
+    if (sc == 77) { return KEY_RIGHT; }
+    return 0 - 1;
+}
+
+# Decoded-key ring, filled by _ag_drain and consumed by _ag_next_key. A drain
+# can yield several keys at once (the kernel batches), and the dispatcher wants
+# them one at a time.
+var AG_KEYQ_MAX = 32;
+var _ag_keyq[32];
+var _ag_keyq_n = 0;
+var _ag_keyq_pos = 0;
+
+fn _ag_keyq_push(k) {
+    if (_ag_keyq_n >= AG_KEYQ_MAX) { return 0; }
+    store64(&_ag_keyq + _ag_keyq_n * 8, k);
+    _ag_keyq_n = _ag_keyq_n + 1;
+    return 0;
+}
+
+# Drain the kernel scancode ring and decode into the key queue. Returns the
+# number of keys decoded. Non-blocking: zero simply means nothing was typed.
+fn _ag_drain() {
+    var sc[64];
+    var n = sys_kbscan(&sc, 64);
+    if (n <= 0) { return 0; }
+
+    var got = 0;
+    var ext = 0;
+    var i = 0;
+    while (i < n) {
+        var b = load8(&sc + i);
+
+        if (b == 224) { ext = 1; i = i + 1; continue; }     # 0xE0 prefix
+
+        # Break codes carry bit 7. Shift needs its release tracked; everything
+        # else is discarded, or every keypress would register twice.
+        if (b >= _AG_SC_RELEASE) {
+            var made = b - _AG_SC_RELEASE;
+            if (made == 42) { _ag_shift = 0; }
+            if (made == 54) { _ag_shift = 0; }
+            ext = 0;
+            i = i + 1;
+            continue;
+        }
+
+        if (b == 42) { _ag_shift = 1; i = i + 1; continue; }   # LShift make
+        if (b == 54) { _ag_shift = 1; i = i + 1; continue; }   # RShift make
+
+        var k = 0 - 1;
+        if (ext == 1) { k = _ag_sc_ext_to_key(b); }
+        else          { k = _ag_sc_to_key(b); }
+        ext = 0;
+
+        # '/' with shift is '?', which is the explain binding.
+        if (k == 47) { if (_ag_shift == 1) { k = 63; } }
+
+        if (k >= 0) { _ag_keyq_push(k); got = got + 1; }
+        i = i + 1;
+    }
+    return got;
+}
+
+# Next decoded key, or -1 when the queue is empty. Drains the kernel ring first
+# when the queue has been consumed.
+fn _ag_next_key() {
+    if (_ag_keyq_pos >= _ag_keyq_n) {
+        _ag_keyq_n = 0;
+        _ag_keyq_pos = 0;
+        _ag_drain();
+    }
+    if (_ag_keyq_pos >= _ag_keyq_n) { return 0 - 1; }
+    var k = load64(&_ag_keyq + _ag_keyq_pos * 8);
+    _ag_keyq_pos = _ag_keyq_pos + 1;
+    return k;
+}
+
+fn _ag_key_pending() {
+    if (_ag_keyq_pos < _ag_keyq_n) { return 1; }
+    return 0;
+}

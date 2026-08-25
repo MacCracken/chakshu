@@ -4,6 +4,129 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.3] — 2026-08-24 — AGNOS parity: the TUI runs there now
+
+The roadmap recorded `shu -p` as "the working AGNOS path". It was not. On a real
+AGNOS boot `shu -p` printed three lines and died:
+
+```
+host: agnos  up: 0d 00:00  load: chakshu: cannot read /proc/loadavg
+run: exit 1
+```
+
+Fixing that surfaced a second failure — `run: exit 142` — that turned out not to be
+a chakshu bug at all. Both are closed here.
+
+### Requires AGNOS with the ring-3 stack fix
+
+`exit 142` is AGNOS's `128 + 14` — a page-fault kill. Both of the kernel's ELF
+loaders map a full 2 MB page for the user stack, then set the entry `rsp` near the
+**bottom** of it (`stack_base + 0x3000` / `+ 0x4000`), so a program got 12–16 KB of
+downward growth while ~2.03 MB of the same mapped page sat unused above `rsp`.
+chakshu's `-p` snapshot nests an 8 KB buffer inside another 8 KB frame, ran off the
+bottom into the guard page, and was killed with no other diagnostic.
+
+Measured on AGNOS before the fix: a probe with a 8 KB single-frame local returns;
+16 KB is `exit 142`. After: 16 KB, 64 KB, 256 KB and 1 MB all return.
+
+The fix is upstream in `agnos kernel/core/elf.cyr` (cycle 1.56.46) — the SysV init
+block moves to the top of the page, giving 0x1FF000 (2,093,056 B) of stack with
+argv/envp capacity byte-identical. **chakshu 0.9.3 on AGNOS requires that kernel.**
+Nothing changed on the Linux side; this was never reachable there.
+
+### Added — an AGNOS-native TUI input path (`src/tui_agnos.cyr`)
+
+The Linux TUI stands on three things AGNOS does not have: termios raw mode,
+SIGWINCH, and epoll with a per-fd data tag. darshana's AGNOS `tty_raw` returns -1
+*by design*, and chakshu's bail on that return sat **before** the render loop — so
+the TUI was unreachable on AGNOS rather than merely degraded.
+
+AGNOS offers a different shape, and it maps cleanly onto a poll loop:
+
+| Linux | AGNOS |
+|---|---|
+| termios raw + `read(0)` byte stream | `kbscan` #42 — non-blocking drain of raw **Set-1 scancodes** |
+| SIGWINCH → re-read winsize | `winsize` #60 polled each tick |
+| epoll on signalfd + stdin | 30 ms tick: drain keys, poll size, render |
+
+Scancodes are not characters. A press yields a code; a **release** yields the same
+code with bit 7 set — decoding a release as a press would double every keystroke,
+so releases are discarded except for shift, whose make/break is tracked across
+drains (Set-1 reports shift as its own key rather than modifying the letter). The
+`0xE0` prefix for the arrow cluster is carried between bytes of one drain. Only the
+keys chakshu actually dispatches on are mapped, plus the printable set filter mode
+needs — a full 104-key table would be dead weight in a size-budgeted binary.
+
+Verified under QEMU with HMP `sendkey`: the TUI enters the alt screen, paints, and
+`q` exits cleanly (`?25h` / `?1049l`, terminal restored). Pressing `f` then `a`
+yields `filter: a_  (Enter: apply, Esc: clear)` — a command key and a letter
+decoded independently, so `q` is not passing by coincidence.
+
+### Fixed — `SYS_IOCTL` broke the AGNOS build outright
+
+The v0.7.13 sweep added a kernel-tty-queue flush on the kill path. AGNOS's frozen
+syscall surface has no `ioctl` at all, so `SYS_IOCTL` did not resolve and the
+`--agnos` target stopped compiling. Now gated behind `#ifndef CYRIUS_TARGET_AGNOS`;
+the userspace flush still runs on both.
+
+### Fixed — missing data is now reported as missing, not as zero
+
+AGNOS has no procfs, so every `/proc` read fails there. chakshu's response was
+inconsistent and, in one place, dishonest:
+
+- `-p` **aborted** on `/proc/loadavg` (`cannot read`, exit 1). Now prints `n/a`.
+- `-p` aborted when `/proc/stat`, `diskstats` or `net/dev` were unreadable. Now
+  prints `cpu:  n/a   disk: n/a   net: n/a` and continues via a new
+  `snapshot_finish_no_delta()` — the memory line and process table do not depend
+  on a delta window and are still worth printing.
+- The TUI header rendered an **empty** load field. Now `n/a`, matching `-p`.
+- The TUI rendered `cpu: 0%  disk: rd 0 B/s  net: rx 0 B/s` — asserting a
+  *measured* idle where nothing was measured, because the `if (sn > 0)` guards left
+  the counters at zero and the row printed them. It now follows `-p`'s rule
+  exactly: if any of the three sources is unreadable the whole line is `n/a`.
+
+This is a Linux-visible improvement too — a sandbox that hides one of those files
+got the same false zeros.
+
+### Fixed — the AGNOS console has no UTF-8 decoder
+
+The footer's `↑↓` are 3-byte UTF-8 and came out as mojibake (`ââ`). On AGNOS the
+hint line reads `[up/dn] move` instead; same bindings, legible glyphs. Linux is
+unchanged.
+
+### Added — `tests/agnos_qemu.py`, so the AGNOS claim is reproducible
+
+Every other suite here runs on Linux, which is exactly why the AGNOS defects went
+unnoticed long enough to be written into the roadmap as working. This harness
+builds a GPT/ESP image, boots gnoboot + AGNOS under QEMU with `shu` seeded at
+`/bin/shu`, drives the agnsh prompt through the QEMU monitor's `sendkey`, and
+asserts on the serial transcript — 17 checks across `-p`, the `n/a` degradation,
+the TUI lifecycle, and scancode decoding.
+
+It **skips** cleanly when the host lacks QEMU/OVMF/mtools or the sibling
+`agnos`/`agnoshi`/`gnoboot` builds, and is not a CI gate (CI has none of them).
+Run it before tagging anything that touches the AGNOS path:
+
+```bash
+cyrius build --agnos src/main.cyr build/shu-agnos
+python3 tests/agnos_qemu.py build/shu-agnos
+```
+
+Half its assertions are negative ("no page-fault kill", "no fabricated zero
+rate"), and those pass vacuously against an empty transcript — so a boot that
+never reaches the prompt now aborts the run instead of scoring green. Verified
+non-vacuous by mutation: reverting the kernel's three stack constants to the old
+layout turns 10 checks red, `no page-fault kill` among them by name.
+
+### Known limitation — the process table is empty on AGNOS
+
+Not a chakshu gap: AGNOS has no procfs and no process-enumeration syscall (the
+surface offers `getpid`/`spawn`/`waitpid`/`kill` only), so a process table cannot
+be built there by any means. Header, memory, identity and the key bindings all
+work; the table renders its column header and no rows. Closing this needs a kernel
+enumeration primitive upstream.
+
+
 ## [0.9.2] — 2026-08-24 — theming, and `--color auto` that actually decides
 
 ### Added — `--theme dark|light|auto`

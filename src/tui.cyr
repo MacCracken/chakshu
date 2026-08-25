@@ -458,6 +458,12 @@ var TUI_MIN_SAMPLE_MS = 200;
 var _tui_id_done      = 0;
 var _tui_mem_total_b  = 0;
 var _tui_have_prev    = 0;
+# v0.9.3: set when a delta source could not be read at all — no procfs (agnos),
+# or a sandbox that hides one of the three files. Without it the `if (sn > 0)`
+# guards below leave every counter at zero and row 4 renders "cpu: 0%  disk: rd
+# 0 B/s ...", which asserts a MEASURED idle where nothing was measured. `-p`
+# already prints "n/a" for this case (snapshot.cyr); the TUI now agrees.
+var _tui_delta_na     = 0;
 var _tui_prev_ms      = 0;
 var _tui_prev_cpu_act = 0;
 var _tui_prev_cpu_tot = 0;
@@ -493,7 +499,15 @@ fn _tui_enter_confirm_kill(pid) {
     _tui_mode     = TUI_MODE_CONFIRM_KILL;
     # Drop anything already typed, in both buffers.
     _tui_input_pos = _tui_input_n;
+    #ifndef CYRIUS_TARGET_AGNOS
+    # Kernel tty queue. Linux-only: agnos's frozen syscall surface has no
+    # ioctl at all, so SYS_IOCTL does not resolve there. The userspace flush
+    # above still runs, and the dwell guard below is the portable half of the
+    # typeahead defence — so the agnos build is protected, just not belt-and-
+    # braces. (agnos also runs its own line discipline on the kernel console,
+    # so there is no termios queue of ours to flush in the first place.)
     syscall(SYS_IOCTL, 0, TUI_TCFLSH, TUI_TCIFLUSH);
+    #endif
     _tui_confirm_at = clock_now_ms();
     tui_render_frame();
     return 0;
@@ -711,6 +725,11 @@ fn tui_render_focus_frame() {
     if (la_n > 0) {
         var prefix = proc_loadavg_prefix_len(&hbuf, la_n);
         syscall(1, 1, &hbuf, prefix);
+    } else {
+        # v0.9.3: no procfs (agnos) — say so, the way `-p` does. An empty
+        # field after the "load: " label reads as a render bug; "n/a" reads
+        # as the honest answer, and the two modes now agree.
+        syscall(1, 1, "n/a", 3);
     }
     tty_clear_to_eol();
 
@@ -907,6 +926,11 @@ fn tui_render_table_frame() {
     if (la_n > 0) {
         var prefix = proc_loadavg_prefix_len(&buf, la_n);
         syscall(1, 1, &buf, prefix);
+    } else {
+        # v0.9.3: no procfs (agnos) — say so, the way `-p` does. An empty
+        # field after the "load: " label reads as a render bug; "n/a" reads
+        # as the honest answer, and the two modes now agree.
+        syscall(1, 1, "n/a", 3);
     }
     tty_clear_to_eol();
 
@@ -1005,6 +1029,13 @@ fn tui_render_table_frame() {
         if (nn > 0) { proc_netdev_agg   (nb1, nn, &rx, &tx); }
         if (sn > 0) { _tui_ncores = proc_stat_ncores(sb1, sn); }
 
+        # Mirror `-p`'s rule exactly: the line is n/a if ANY of the three
+        # sources is missing, since a partial line is harder to read than none.
+        _tui_delta_na = 0;
+        if (sn <= 0) { _tui_delta_na = 1; }
+        if (dn <= 0) { _tui_delta_na = 1; }
+        if (nn <= 0) { _tui_delta_na = 1; }
+
         if (_tui_have_prev == 1) {
             var win_ms = now_ms - _tui_prev_ms;
             if (win_ms < 1) { win_ms = 1; }
@@ -1065,18 +1096,22 @@ fn tui_render_table_frame() {
 
     # ----- row 4: cpu / disk / net (delta line) -----
     tty_move(4, 1);
-    _tui_color_bold(); syscall(1, 1, "cpu:  ", 6); _tui_color_reset();
-    _tui_color_pct_band(cpu_pct, 25, 70);
-    print_num(cpu_pct);
-    _tui_color_reset();
-    _tui_color_bold(); syscall(1, 1, "%   disk: rd ", 13); _tui_color_reset();
-    _snap_print_rate_bps(disk_rd_bps);
-    _tui_color_bold(); syscall(1, 1, " wr ", 4); _tui_color_reset();
-    _snap_print_rate_bps(disk_wr_bps);
-    _tui_color_bold(); syscall(1, 1, "   net: rx ", 11); _tui_color_reset();
-    _snap_print_rate_bps(net_rx_bps);
-    _tui_color_bold(); syscall(1, 1, " tx ", 4); _tui_color_reset();
-    _snap_print_rate_bps(net_tx_bps);
+    if (_tui_delta_na == 1) {
+        syscall(1, 1, "cpu:  n/a   disk: n/a   net: n/a", 32);
+    } else {
+        _tui_color_bold(); syscall(1, 1, "cpu:  ", 6); _tui_color_reset();
+        _tui_color_pct_band(cpu_pct, 25, 70);
+        print_num(cpu_pct);
+        _tui_color_reset();
+        _tui_color_bold(); syscall(1, 1, "%   disk: rd ", 13); _tui_color_reset();
+        _snap_print_rate_bps(disk_rd_bps);
+        _tui_color_bold(); syscall(1, 1, " wr ", 4); _tui_color_reset();
+        _snap_print_rate_bps(disk_wr_bps);
+        _tui_color_bold(); syscall(1, 1, "   net: rx ", 11); _tui_color_reset();
+        _snap_print_rate_bps(net_rx_bps);
+        _tui_color_bold(); syscall(1, 1, " tx ", 4); _tui_color_reset();
+        _snap_print_rate_bps(net_tx_bps);
+    }
     tty_clear_to_eol();
 
     # One cache generation per rendered frame — bounds how long a cmdline can
@@ -1337,7 +1372,14 @@ fn _tui_render_status() {
             }
         }
         if (shown == 0) {
+            #ifdef CYRIUS_TARGET_AGNOS
+            # The agnos console draws bytes, not UTF-8 — the 3-byte arrows
+            # come out as mojibake ("aa"), so the hint line says which keys
+            # to press in ASCII instead. Same bindings, legible glyphs.
+            pos = pos + _tui_status_append(&sbuf, pos, max, "[up/dn] move  [s] sort  [f] filter  [k] kill  [?] explain  [q] quit");
+            #else
             pos = pos + _tui_status_append(&sbuf, pos, max, "[\xe2\x86\x91\xe2\x86\x93] move  [s] sort  [f] filter  [k] kill  [?] explain  [q] quit");
+            #endif
         }
         if (_tui_filter_n > 0) {
             pos = pos + _tui_status_append(&sbuf, pos, max, "  filter: ");
@@ -1467,29 +1509,113 @@ fn _tui_dispatch_key(k) {
 #              view for that pid. Caller (main.cyr) validates the
 #              pid exists before invoking. (Slice G.3)
 fn tui_run(refresh_ms, sort_key, top_n, color_mode, focus_pid) {
+    #ifndef CYRIUS_TARGET_AGNOS
     # tty_raw fails if the ioctl can't get termios — typically
     # because the fd isn't a TTY. Surface a clear error and steer
     # the user toward the always-pipeable `-p` mode.
+    #
+    # Linux-only gate (v0.9.3). On agnos darshana's tty_raw returns -1
+    # UNCONDITIONALLY and by design — there is no termios to switch, because the
+    # kernel console runs its own line discipline. Leaving this ungated made the
+    # agnos branch below unreachable: every agnos run bailed here with "stdin is
+    # not a TTY" before it could start. Raw mode is not a precondition there;
+    # kbscan reads scancodes regardless of line discipline.
     if (tty_raw(0) < 0) {
         eprintln("chakshu: stdin is not a TTY (use -p for plain mode)");
         return EXIT_ERR;
     }
+    #endif
 
     #ifdef CYRIUS_TARGET_AGNOS
-    # AGNOS has no raw-TTY input: darshana's `tty_raw` returns -1 on agnos (the
-    # kernel console runs its own line discipline — no termios), so control
-    # never reaches here and the interactive epoll/signalfd input-mux below is
-    # unreachable. It is also NOT portable to agnos — the cyrius stdlib epoll
-    # surface it uses (EPOLLIN / EPOLL_CTL_ADD / epoll_event_new + the 4-arg
-    # sys_epoll_ctl / sys_epoll_wait) is Linux-only, and mirshi's epoll#19-21
-    # carries no per-fd `data` tag this loop dispatches on. So the whole block
-    # is gated out of the agnos build; interactive `shu` degrades to the `-p`
-    # snapshot path (snapshot_print). This return mirrors the tty_raw bail above
-    # (unreachable, present so the agnos compile has a return path). darshana
-    # DOES provide the agnos signalfd peers (tty_open_signalfd / TTY_SIGMASK_*),
-    # so this stays a chakshu-side gate on the Linux-only epoll wiring, not a
-    # darshana gap.
-    return EXIT_ERR;
+    # agnos has no isatty-equivalent for the framebuffer console, but it also
+    # has no pipe case to guard against: if the grid cannot be read the console
+    # is not up, and there is nothing to render to.
+    var ag_r = 0;
+    var ag_c = 0;
+    if (tty_winsize(0, &ag_r, &ag_c) < 0) {
+        eprintln("chakshu: no framebuffer console (use -p for plain mode)");
+        return EXIT_ERR;
+    }
+    #endif
+
+    #ifdef CYRIUS_TARGET_AGNOS
+    # AGNOS render loop (v0.9.3). Everything the Linux path below relies on is
+    # absent here — termios raw mode, SIGWINCH, epoll with a per-fd data tag —
+    # so this is a poll loop rather than a port of that one:
+    #
+    #   input   sys_kbscan #42, a NON-BLOCKING drain of raw Set-1 scancodes,
+    #           decoded by src/tui_agnos.cyr. There is no blocking read to wait
+    #           on, so the loop paces itself with sleep_ms instead.
+    #   resize  darshana's agnos tty_winsize (winsize #60) polled every tick.
+    #           No SIGWINCH exists; the framebuffer grid is simply read again.
+    #   exit    'q' / Ctrl-C from the decoded key stream. No signalfd is opened,
+    #           so nothing needs unblocking on the way out — which is also why
+    #           this path cannot strand a signal mask the way the Linux one
+    #           could before v0.7.12.
+    #
+    # The tty_raw() call above returns -1 on agnos by design, so the bail that
+    # follows it is skipped for this target: raw mode is meaningless where the
+    # console has no line discipline to switch off.
+    _tui_sort_key     = sort_key;
+    _tui_top_n        = top_n;
+    _tui_selected_idx = 0;
+    _tui_view_offset  = 0;
+    _tui_focus_pid    = focus_pid;
+    _tui_filter_n     = 0;
+    _tui_mode         = TUI_MODE_NORMAL;
+
+    _tui_update_winsize();
+    tty_alt_enter();
+    tty_cursor_hide();
+    tty_clear();
+    tui_render_frame();
+
+    # Poll cadence. Deliberately finer than the refresh interval: the frame
+    # only repaints every refresh_ms, but input must feel responsive, and a
+    # non-blocking drain is cheap. AG_POLL_MS is the keystroke latency ceiling.
+    var AG_POLL_MS = 30;
+    var since = 0;
+    var rows_was = _tui_rows;
+    var cols_was = _tui_cols;
+
+    var loop = 1;
+    while (loop == 1) {
+        # Drain every key the kernel batched, not just one — a fast typist or a
+        # paste would otherwise take one poll tick per character.
+        var k = _ag_next_key();
+        while (k >= 0) {
+            if (_tui_dispatch_key(k) == 1) { loop = 0; break; }
+            k = _ag_next_key();
+        }
+        if (loop == 0) { break; }
+
+        sleep_ms(AG_POLL_MS);
+        since = since + AG_POLL_MS;
+
+        # Resize is a poll here. Repaint immediately on a geometry change rather
+        # than waiting for the refresh tick, so a resize feels like the Linux
+        # SIGWINCH path even though no signal was involved.
+        _tui_update_winsize();
+        if (_tui_rows != rows_was) {
+            rows_was = _tui_rows;
+            cols_was = _tui_cols;
+            tty_clear();
+            tui_render_frame();
+            since = 0;
+        } elif (_tui_cols != cols_was) {
+            rows_was = _tui_rows;
+            cols_was = _tui_cols;
+            tty_clear();
+            tui_render_frame();
+            since = 0;
+        } elif (since >= refresh_ms) {
+            tui_render_frame();
+            since = 0;
+        }
+    }
+
+    _tui_teardown();
+    return EXIT_OK;
     #endif
 
     #ifndef CYRIUS_TARGET_AGNOS

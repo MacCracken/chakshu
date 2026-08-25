@@ -13,6 +13,10 @@ calls for a manual TUI check after TUI changes — this is that checklist.
 cyrius build src/main.cyr build/shu && ./build/shu
 ```
 
+**The AGNOS target is not on this list.** It has its own automated harness —
+`tests/agnos_qemu.py` boots the `--agnos` build on a real AGNOS kernel under QEMU
+and drives it with `sendkey`. Add AGNOS checks there, not here.
+
 ---
 
 ## 1. Colour actually looks right

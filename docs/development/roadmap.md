@@ -5,7 +5,7 @@
 > [`state.md`](state.md). This file answers one question: *what is left to reach
 > v1.0, and in which release does it land?*
 >
-> **Current: v0.9.2.** | **Last Updated**: 2026-08-24
+> **Current: v0.9.3.** | **Last Updated**: 2026-08-24
 
 ---
 
@@ -24,24 +24,8 @@ inside it are additive or corrective only.
 | ~~0.9.0~~ | ~~Perf + size close-out~~ | **shipped 2026-08-24.** All §8 targets met; the size target formally revised 256 KB → 768 KB with the reason recorded |
 | ~~0.9.1~~ | ~~GPU telemetry depth~~ | **shipped 2026-08-24.** Live busy%/VRAM/temp from DRM sysfs, matched to devices by PCI id |
 | ~~0.9.2~~ | ~~Theming + display polish~~ | **shipped 2026-08-24.** `--theme dark\|light\|auto`; `--color auto` now honours NO_COLOR/TERM/isatty instead of aliasing `always` |
-| **0.9.3** | AGNOS parity | `--agnos` TUI runs, not just `-p` |
+| ~~0.9.3~~ | ~~AGNOS parity~~ | **shipped 2026-08-24.** TUI runs on AGNOS via `kbscan`/`winsize` polling. Root-caused an AGNOS kernel bug (12 KB usable of a 2 MB stack page) and fixed it upstream in cycle 1.56.46 |
 | **1.0.0** | Ship as the AGNOS default monitor | Registry promotion, ISO default, announce |
-
----
-
----
-
-## 0.9.3 — AGNOS parity
-
-Today `shu -p` is the working AGNOS path; the TUI is not agnos-ready. It is built
-on the Linux signalfd + epoll model — SIGWINCH-driven resize and signal
-multiplexing via darshana's `TTY_SIGMASK_*` / `tty_open_signalfd` / `epoll`, all
-Linux-only, with ~18 signal-path references in `src/tui.cyr`.
-
-- [ ] Agnos-native resize/signal handling: either gate the signalfd/epoll path
-      off under `CYRIUS_TARGET_AGNOS` (poll `winsize`#60 for size, `kbscan` for
-      input, no SIGWINCH and no signalfd), or wait on an agnos signal primitive.
-- [ ] Verify the `--agnos` build runs the TUI, not just `-p`.
 
 ---
 
@@ -52,6 +36,15 @@ Linux-only, with ~18 signal-path references in `src/tui.cyr`.
 - [ ] zugot recipe → AGNOS ISO default.
 - [ ] Keep the Bazaar `htop` / `btop` recipes available — don't break user choice.
 - [ ] Announce: AGNOS ships its own AI-augmented system monitor.
+
+---
+
+## Blocked upstream (not schedulable here)
+
+- **Process table on AGNOS.** AGNOS exposes no procfs and no process-enumeration
+  syscall (`getpid`/`spawn`/`waitpid`/`kill` only), so `shu` on AGNOS renders the
+  column header and no rows. Needs a kernel enumeration primitive first; there is
+  no chakshu-side workaround.
 
 ---
 

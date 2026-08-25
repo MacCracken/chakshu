@@ -91,6 +91,25 @@ fn snapshot_print_uptime(secs) {
 # `sort_key` is a SORT_* constant from processes.cyr; `top_n` is the
 # row count for the process table. Both come from main.cyr after CLI
 # flag parsing.
+# Finish a snapshot on a host with no usable /proc delta sources.
+#
+# v0.9.3. Split out so the three "source vanished" paths in snapshot_print can
+# all end the same way instead of each aborting. The process table is still
+# attempted: on Linux a transiently-unreadable /proc/stat says nothing about
+# /proc/<pid>, and on AGNOS the walk simply finds no pids and renders an empty
+# table — which is the honest output, because agnos exposes no process
+# enumeration syscall at all (getpid/spawn/waitpid/kill only). An empty table
+# is information; an aborted snapshot is not.
+fn snapshot_finish_no_delta(sort_key, top_n) {
+    var mi[8192];
+    var mem_total_b = mihi_mem_total(&mi, 8192);
+    var mem_total_kb = 0;
+    if (mem_total_b > 0) { mem_total_kb = mem_total_b / 1024; }
+    processes_sample2(0, 1, sort_key);
+    processes_render(top_n, mem_total_kb);
+    return EXIT_OK;
+}
+
 fn snapshot_print(sort_key, top_n) {
     var buf[8192];
 
@@ -109,13 +128,19 @@ fn snapshot_print(sort_key, top_n) {
     snapshot_print_uptime(mihi_uptime_secs(&buf, 8192));
 
     syscall(1, 1, "  load: ", 8);
+    # v0.9.3: a missing /proc is a DEGRADED field, not a fatal error. On AGNOS
+    # there is no procfs at all — verified by booting `shu -p` under QEMU, where
+    # this exact read returned -1 and took the whole snapshot down with exit 1,
+    # despite the host/uptime line above it having rendered correctly from
+    # mihi's uname/sysinfo. A monitor that can show four of its six fields must
+    # show four, not none.
     var la_n = proc_read("/proc/loadavg", &buf, 8192);
     if (la_n < 0) {
-        eprint("chakshu: cannot read /proc/loadavg\n", 35);
-        return EXIT_ERR;
+        syscall(1, 1, "n/a", 3);
+    } else {
+        var la_prefix = proc_loadavg_prefix_len(&buf, la_n);
+        syscall(1, 1, &buf, la_prefix);
     }
-    var la_prefix = proc_loadavg_prefix_len(&buf, la_n);
-    syscall(1, 1, &buf, la_prefix);
     syscall(1, 1, "\n", 1);
 
     # Line 2: kernel + distro ------------------------------------------
@@ -233,9 +258,18 @@ fn snapshot_print(sort_key, top_n) {
     var s1n = proc_read("/proc/stat",      sb1, PROC_BUF_CAP);
     var d1n = proc_read("/proc/diskstats", db1, PROC_BUF_CAP);
     var n1n = proc_read("/proc/net/dev",   nb1, PROC_BUF_CAP);
-    if (s1n < 0) { eprint("chakshu: cannot read /proc/stat\n", 32);      return EXIT_ERR; }
-    if (d1n < 0) { eprint("chakshu: cannot read /proc/diskstats\n", 37); return EXIT_ERR; }
-    if (n1n < 0) { eprint("chakshu: cannot read /proc/net/dev\n", 35);   return EXIT_ERR; }
+    # v0.9.3: same posture as the load field. Where there is no procfs the
+    # delta line simply cannot be computed, and printing "n/a" beats aborting a
+    # snapshot whose identity and memory lines are perfectly good. Each source
+    # is independent, so a host missing only one of them still shows the rest.
+    var have_delta = 1;
+    if (s1n < 0) { have_delta = 0; }
+    if (d1n < 0) { have_delta = 0; }
+    if (n1n < 0) { have_delta = 0; }
+    if (have_delta == 0) {
+        syscall(1, 1, "cpu:  n/a   disk: n/a   net: n/a\n", 33);
+        return snapshot_finish_no_delta(sort_key, top_n);
+    }
 
     var cpu_active1 = 0;
     var cpu_total1  = 0;
@@ -263,9 +297,11 @@ fn snapshot_print(sort_key, top_n) {
     # vs 43/48/46), silently truncating the trailing newline off the diagnostic —
     # a design-spec §9 violation, and the same hand-counting trap cli.cyr already
     # warns has "bitten us twice". eprintln() computes the length with strlen().
-    if (s2n < 0) { eprintln("chakshu: cannot read /proc/stat (resample)");      return EXIT_ERR; }
-    if (d2n < 0) { eprintln("chakshu: cannot read /proc/diskstats (resample)"); return EXIT_ERR; }
-    if (n2n < 0) { eprintln("chakshu: cannot read /proc/net/dev (resample)");   return EXIT_ERR; }
+    # A source that vanished BETWEEN the two samples (a rotated file, an
+    # unmounted procfs) is the same degraded case, not a fatal one.
+    if (s2n < 0) { syscall(1, 1, "cpu:  n/a   disk: n/a   net: n/a\n", 33); return snapshot_finish_no_delta(sort_key, top_n); }
+    if (d2n < 0) { syscall(1, 1, "cpu:  n/a   disk: n/a   net: n/a\n", 33); return snapshot_finish_no_delta(sort_key, top_n); }
+    if (n2n < 0) { syscall(1, 1, "cpu:  n/a   disk: n/a   net: n/a\n", 33); return snapshot_finish_no_delta(sort_key, top_n); }
 
     var cpu_active2 = 0;
     var cpu_total2  = 0;
