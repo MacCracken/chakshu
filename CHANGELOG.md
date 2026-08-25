@@ -4,6 +4,76 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-08-24 — AI hardening: the live path actually worked, chakshu was misreading it
+
+The last `continue-on-error` step in either workflow is now a **hard gate**. Getting
+there meant discovering the reason it never passed was not the reason recorded.
+
+### The recorded blocker was wrong
+
+`ci.yml` carried this for five releases: *"sandhi resolves DNS via fdlopen→libc
+getaddrinfo, which does NOT work in a no-libc/sandboxed context."* Verified directly,
+and every part of it is false:
+
+- **sandhi never needed libc here.** It has an IPv4-literal fast path
+  (`sandhi_net_parse_ipv4`) plus its own UDP DNS resolver, written precisely because
+  `fdlopen`/`getaddrinfo` was blocked — there is an archived post-mortem in sandhi
+  for exactly this. A numeric `127.0.0.1` URL never touches libc.
+- **The transport worked the whole time.** Probing `sandhi_http_post` directly
+  against a local stub: connection succeeds, `sandhi_http_status` returns **200**,
+  body 78 bytes. A recording stub confirmed `shu-ai` genuinely connects and POSTs.
+
+### The real defect
+
+**`_ai_extract_content` was whitespace-intolerant.** It searched for the fixed
+literal `"content":"` — no space. A gateway emitting `"content": "..."` therefore
+failed to parse, and that is not an exotic shape: it is Python `json.dumps`' default
+output, so it is what the test stub emits, and it is common in pretty-printed
+responses.
+
+**And the failure was reported as a transport error.** The extraction miss returned
+`-1`, which is `ai_hoosh_explain`'s *transport* code, so a request that connected
+and returned 200 printed **"hoosh unreachable"**. That is the most misleading error
+this module could produce — it sends you to inspect the network when the gateway
+answered correctly. It is also why the true cause went unfound for five releases.
+
+### Fixed
+
+- **`_ai_extract_content` now skips whitespace** around the colon: it locates the
+  `"content"` key, skips spaces/tabs/newlines/CRs, expects `:`, skips again, then
+  expects the opening quote. Compact and spaced forms both parse.
+- **Extraction failure maps to `-3` ("no content field"), not `-1`.** A 200 response
+  with an unexpected shape now says exactly that instead of blaming the network.
+
+### Changed — CI
+
+- **`tests/hoosh_stub_smoke.py` promoted from `continue-on-error` to a hard gate.**
+  It passes: *"answer surfaced; Bearer + model + path verified"*. **No step in
+  either workflow is `continue-on-error` any more.**
+
+### Added — tests
+
+- Five assertions in `ai/tests/chakshu-ai.tcyr` pinning whitespace tolerance:
+  space after the colon, compact form, padding on both sides, a newline-and-indent
+  after the colon, and an absent `content` field still reported absent.
+  Mutation-checked — restoring the old fixed-literal needle fails all of them.
+
+### Note on the runtime-libc posture
+
+The roadmap's second 0.8.2 item — "decide the runtime-libc posture, the fallback
+being a chakshu-local raw-HTTP-over-TCP client" — **needs no decision now**. It was
+predicated on sandhi being unable to reach a gateway without libc, and that premise
+is false: sandhi's literal path and own DNS resolver already cover it. `shu-ai` still
+links a sandhi that *can* `dlopen` libc, so it remains not-a-pure-no-libc binary and
+the lean `shu` remains pure — but that is a property, not a blocker, and no fallback
+client is warranted.
+
+### Verified
+
+- Lean `shu`: **116/116**, smoke **PASS**, PTY **12/12**, DCE parity PASS, fmt clean,
+  lint 0 non-cosmetic.
+- AI `shu-ai`: **39/39** (was 30), with-logs smoke **PASS**, **hoosh-stub smoke PASS**.
+
 ## [0.8.1] — 2026-08-24 — `--with-logs`: log + anomaly context in AI prompts
 
 Opt-in, off by default, `shu-ai` only. When set, `--explain` and the `?` overlay

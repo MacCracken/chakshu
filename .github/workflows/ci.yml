@@ -151,12 +151,23 @@ jobs:
         # model-shaped" gate): exercises the sandhi HTTP POST, content
         # extraction, and the bearer-token header for real.
         #
-        # continue-on-error for now: sandhi resolves DNS via fdlopen→libc
-        # getaddrinfo, which does NOT work in a no-libc/sandboxed context
-        # (it can't be validated on the maintainer's dev box). This gate is
-        # pending its first green on a CI runner with libc; promote to a hard
-        # gate (drop continue-on-error) once it's seen passing here.
-        continue-on-error: true
+        # PROMOTED TO A HARD GATE at v0.8.2 — this was the last
+        # continue-on-error step in either workflow.
+        #
+        # It carried this note for five releases: "sandhi resolves DNS via
+        # fdlopen→libc getaddrinfo, which does NOT work in a no-libc/sandboxed
+        # context". That diagnosis was wrong on every count. sandhi has an
+        # IPv4-literal fast path (sandhi_net_parse_ipv4) and its own UDP DNS
+        # resolver — written precisely because fdlopen/getaddrinfo was blocked —
+        # so a numeric localhost URL never touches libc. Verified directly: the
+        # POST connects, the stub receives it, and it returns 200.
+        #
+        # The real defect was in chakshu: _ai_extract_content searched for the
+        # fixed literal `"content":"` and so could not parse `"content": "..."`
+        # — which is Python json.dumps' default output, i.e. exactly what the
+        # stub emits. The parse failure was then returned as -1, the TRANSPORT
+        # code, so a 200 response printed "hoosh unreachable" and sent everyone
+        # looking at the network. Both are fixed at v0.8.2; the gate passes.
         run: python3 tests/hoosh_stub_smoke.py ai/build/shu-ai
 
       - name: DCE parity check

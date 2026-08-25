@@ -158,6 +158,36 @@ fn main() {
     _ai_json_escape(j2, strlen(j2), &jb, 256);
     assert_eq(streq(&jb, "x\\ny"), 1, "escapes newline to backslash-n");
 
+    # v0.8.2: extraction must tolerate whitespace around the colon. It used to
+    # search for the fixed literal `"content":"`, so ANY gateway that emits
+    # `"content": "..."` — which is Python json.dumps' default, and common in
+    # pretty-printed output — failed to parse. Worse, the failure was reported
+    # as a TRANSPORT error, so the user saw "hoosh unreachable" for a request
+    # that connected and returned 200. That misdiagnosis is why the hoosh-stub
+    # CI gate sat on continue-on-error for five releases.
+    test_group("ai.cyr — content extraction tolerates JSON whitespace");
+    var xb[512];
+    var r1 = "{\"choices\": [{\"message\": {\"role\": \"assistant\", \"content\": \"spaced out\"}}]}";
+    assert(_ai_extract_content(r1, strlen(r1), &xb, 512) > 0, "space after colon parses");
+    assert_eq(streq(&xb, "spaced out"), 1, "spaced value extracted exactly");
+
+    var r2 = "{\"choices\":[{\"message\":{\"content\":\"compact\"}}]}";
+    assert(_ai_extract_content(r2, strlen(r2), &xb, 512) > 0, "compact form still parses");
+    assert_eq(streq(&xb, "compact"), 1, "compact value extracted exactly");
+
+    var r3 = "{\"content\"   :   \"lots of space\"}";
+    assert(_ai_extract_content(r3, strlen(r3), &xb, 512) > 0, "space both sides of colon parses");
+    assert_eq(streq(&xb, "lots of space"), 1, "value extracted across padding");
+
+    var r4 = "{\"content\":\n  \"newline padded\"}";
+    assert(_ai_extract_content(r4, strlen(r4), &xb, 512) > 0, "newline/indent after colon parses");
+    assert_eq(streq(&xb, "newline padded"), 1, "value extracted across a newline");
+
+    # A response with no content field must still be reported as absent, not
+    # silently yield garbage.
+    var r5 = "{\"error\":{\"message\":\"nope\"}}";
+    assert_eq(_ai_extract_content(r5, strlen(r5), &xb, 512), 0 - 1, "absent content reported absent");
+
     test_group("ai.cyr — content extraction (response parsing)");
     var cb[256];
     var resp_ok = "{\"choices\":[{\"message\":{\"content\":\"Hello\\nworld\"}}]}";

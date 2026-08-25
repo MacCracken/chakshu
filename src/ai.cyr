@@ -538,12 +538,46 @@ fn _ai_json_escape(in_buf, in_len, out, cap) {
 # Best-effort; full JSON parsing is sandhi's job if a richer path is needed.
 # Pure — unit-tested.
 fn _ai_extract_content(body, body_len, out, cap) {
-    var needle = "\"content\":\"";
-    var nlen = strlen(needle);
+    # Locate the `"content"` KEY, then skip whitespace around the colon before
+    # the opening quote.
+    #
+    # v0.8.2: this used to search for the fixed literal `"content":"` — with no
+    # space. That made extraction whitespace-INTOLERANT, and JSON with a space
+    # after the colon is not exotic: Python's json.dumps emits `": "` by
+    # default, and plenty of gateways pretty-print. Any such response failed to
+    # parse, and because the failure was reported as -1 the user was told
+    # "hoosh unreachable" — for a request that connected fine and returned 200.
+    # That misdiagnosis is why the hoosh-stub CI gate sat on continue-on-error
+    # for five releases, blamed on libc/DNS that was never involved.
+    var key = "\"content\"";
+    var klen = strlen(key);
     var start = 0 - 1;
     var i = 0;
-    while (i + nlen <= body_len) {
-        if (memeq(body + i, needle, nlen) == 1) { start = i + nlen; break; }
+    while (i + klen <= body_len) {
+        if (memeq(body + i, key, klen) == 1) {
+            var p = i + klen;
+            while (p < body_len) {
+                var w = load8(body + p);
+                if (w != 32) { if (w != 9) { if (w != 10) { if (w != 13) { break; } } } }
+                p = p + 1;
+            }
+            if (p < body_len) {
+                if (load8(body + p) == 58) {           # ':'
+                    p = p + 1;
+                    while (p < body_len) {
+                        var w2 = load8(body + p);
+                        if (w2 != 32) { if (w2 != 9) { if (w2 != 10) { if (w2 != 13) { break; } } } }
+                        p = p + 1;
+                    }
+                    if (p < body_len) {
+                        if (load8(body + p) == 34) {   # opening quote
+                            start = p + 1;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         i = i + 1;
     }
     if (start < 0) { return 0 - 1; }
@@ -624,7 +658,14 @@ fn ai_hoosh_explain(prompt, plen, out, cap) {
     var st = sandhi_http_status(resp);
     if (st == 0)   { return 0 - 1; }   # no HTTP status → transport failure
     if (st != 200) { return 0 - 2; }
-    return _ai_extract_content(sandhi_http_body(resp), sandhi_http_body_len(resp), out, cap);
+    # v0.8.2: map an extraction miss to -3 ("no content field"), NOT -1. -1 is
+    # the transport code, and returning it here made a 200 response with an
+    # unexpected shape print "hoosh unreachable" — the single most misleading
+    # error this module could produce, because it sends you to look at the
+    # network when the gateway answered fine.
+    var ex = _ai_extract_content(sandhi_http_body(resp), sandhi_http_body_len(resp), out, cap);
+    if (ex < 0) { return 0 - 3; }
+    return ex;
 }
 
 # --- `--explain <pid>` one-shot ---------------------------------------

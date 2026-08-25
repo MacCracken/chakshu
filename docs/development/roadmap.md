@@ -5,7 +5,7 @@
 > [`state.md`](state.md). This file answers one question: *what is left to reach
 > v1.0, and in which release does it land?*
 >
-> **Current: v0.8.1.** | **Last Updated**: 2026-08-24
+> **Current: v0.8.2.** | **Last Updated**: 2026-08-24
 
 ---
 
@@ -20,7 +20,7 @@ inside it are additive or corrective only.
 |---|---|---|
 | ~~0.8.0~~ | ~~`--watch` anomaly stream~~ | **shipped 2026-08-24 — M3 closed.** Consumer in the lean `shu`; producer is aegis 1.1.7's NDJSON sink |
 | ~~0.8.1~~ | ~~`--with-logs` log + anomaly context~~ | **shipped 2026-08-24.** Per-pid attribution proved impossible (sakshi carries no pid); ships system-level context + the anomaly ring |
-| **0.8.2** | AI hardening + hoosh gate promotion | The stub smoke is a *hard* CI gate |
+| ~~0.8.2~~ | ~~AI hardening + hoosh gate promotion~~ | **shipped 2026-08-24.** The blocker was a whitespace-intolerant JSON parse misreported as a transport error, not libc |
 | **0.9.0** | Perf + size close-out | §8 targets either met or formally revised |
 | **0.9.1** | GPU telemetry depth | Per-device stats beyond count/name/memory |
 | **0.9.2** | Theming + display polish | Dark/light configurable; no layout regressions |
@@ -28,18 +28,6 @@ inside it are additive or corrective only.
 | **1.0.0** | Ship as the AGNOS default monitor | Registry promotion, ISO default, announce |
 
 ---
-
-## 0.8.2 — AI hardening
-
-- [ ] Promote `tests/hoosh_stub_smoke.py` from `continue-on-error` to a hard CI
-      gate. It is currently the **only** ungated step in either workflow. Blocked
-      on a libc CI runner: sandhi's `fdlopen`→libc `getaddrinfo` cannot run in a
-      no-libc/sandboxed context, which is also why the maintainer's box can't
-      exercise it.
-- [ ] Decide the runtime-libc posture. `shu-ai` is **not** a pure no-libc binary
-      because sandhi dlopens libc; the lean `shu` is. If that becomes a problem,
-      the fallback is a chakshu-local raw-HTTP-over-TCP client with no sandhi and
-      no dlopen.
 
 ---
 
