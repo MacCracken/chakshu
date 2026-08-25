@@ -56,28 +56,57 @@ candidate findings refuted and dropped. See CHANGELOG `[0.7.13]`.
 - [x] **Coverage**: lean 64→77, AI 13→21, PTY 7→9 — every addition mutation-checked.
   Deleted a proven-vacuous version-string test.
 
-**Deferred out of this cut** (each specified with a verified fix in the sweep plan):
+**Also landed (the sweep's second pass — no P-1 finding was left deferred):**
 
-- [ ] **`R10` — line-anchored `/proc/<pid>/status` parsing.** `proc_meminfo_field` uses
-  an unanchored `strstr`, so `prctl(PR_SET_NAME, "Uid:0")` spoofs the focus panel **and
-  the AI prompt** into reporting an unprivileged process as uid 0. Security-adjacent;
-  needs both call sites repointed together.
-- [ ] **`R7(b,c)`** — distinguish a truncated `/proc` read from a complete one, and move
-  the scratch buffers to the heap. The naive form makes `shu -p` refuse to run on a
-  big-core host, so it needs the degraded-but-marked treatment.
-- [ ] **`R14`/`R15`** — signal disposition: the `?` overlay parks in a blocking read with
-  signals blocked (`kill` is inert until a keystroke), and signalfds opened before a
-  failed `epoll_create` are never unblocked.
-- [ ] **`R16`** — `mihi_mem_free()` −1 renders `mem: 61192 MiB used / 61192 MiB total`.
-  Needs the fatal-vs-degraded decision.
-- [ ] **`R19`/`R20`** — CI: the AI-privacy grep is wrapped in `if [ -d src/ai ]` and has
-  **never run** (the AI landed as the file `src/ai.cyr`); the large-buffer gate compares
-  element counts against a byte threshold and prints `NR` instead of `FNR`.
-- [ ] **`R21`** — `avail = _tui_cols - 21` assumes a 6-digit PID; 7-digit PIDs overflow
-  the row by one column.
-- [ ] **Binary size** — 861 448 B against §8's 256 KB (~3.4×). The measured plan reaches
-  424 784 B but its biggest item is upstream-blocked on ai-hwaccel's `bayan` dependency,
-  and even the full sweep leaves ~1.66× over. Either revise §8 or take it upstream.
+- [x] **`R10` — line-anchored `/proc/<pid>/status` parsing.** `proc_meminfo_field` used
+  an unanchored `strstr`, so a process renamed to `Uid:0` via `prctl(PR_SET_NAME)` planted
+  a match at offset 6 that beat the real `Uid:` line at offset 98 — chakshu reported an
+  unprivileged process as **uid 0**, in the focus panel *and* in the prompt sent to hoosh.
+  Reproduced live; now line-anchored, which fixes every caller at once.
+- [x] **`R7(b,c)`** — 64 KiB heap scratch + truncation detection. Measured: at the old
+  8 KiB cap a 200-interface `/proc/net/dev` aggregated only 65 interfaces
+  (rx 65,000,000 of 200,000,000 — a 67% undercount, silently reported as success).
+  Callers consume partial data and can check `proc_truncated()`; they never fail, since
+  refusing to run on a big host is strictly worse than an approximate rate.
+- [x] **`R14`** — the `?` overlay parked in a blocking `read(0,…)` with HUP/INT/TERM
+  SIG_BLOCKed and the signalfd undrained, so `kill` was inert until a keypress. Now polls
+  stdin *and* the signalfd, and returns a sentinel so teardown runs through `tui_run`
+  rather than stranding the mask. Verified: pre-fix ignored SIGTERM, post-fix exits.
+- [x] **`R15`** — signalfds opened before a failed `epoll_create` were never unblocked,
+  leaving the degraded launch unkillable. Reproduced at `ulimit -n 5`: pre-fix needed
+  SIGKILL, post-fix honours SIGTERM.
+- [x] **`R16`** — `mihi_mem_free()` −1 rendered `61192 MiB used / 61192 MiB total`.
+  Guarded at all three sites; the `ai.cyr` one mattered most, where the sentinel became a
+  fabricated OOM premise in the model's prompt.
+- [x] **`R19`/`R20`** — CI. The AI-privacy grep was wrapped in `if [ -d src/ai ]` and had
+  **never executed** — the AI shipped as the *file* `src/ai.cyr`, so the most
+  privacy-critical gate in the repo was dead scaffolding for five releases. Re-pointed,
+  plus a new binary-level AI-opt-in gate (the lean manifest must declare no transport
+  module — and note `sandhi` is a stdlib entry, so scanning `[deps.*]` tables misses it).
+  `R20`'s large-buffer gate is now scope-aware (module-scope is 8 bytes/element, locals
+  1) with `FNR` instead of `NR`, plus a visible `# bigbuf-ok:` escape hatch — it
+  immediately caught `_tui_filtered_idx` at exactly 65,536 B, which is now an annotated,
+  reviewed exemption rather than a silently loosened threshold.
+- [x] **`R21`** — `avail = _tui_cols - 21` hardcoded a 6-digit PID column; this box ships
+  `pid_max = 4194304` (7 digits), making the row one column too wide, wrapping it, and
+  scrolling the header off. Now derived per row.
+
+**Binary size — upstream fixed and consumed (v0.7.14, 2026-08-24):**
+
+- [x] **ai-hwaccel 2.3.19** — 11 `json_v_*` call sites moved to canonical
+  `bayan_json_v_*`; `bayan` swapped out of `[deps].stdlib` for a focused
+  `[deps.bayan] modules = ["dist/bayan-json.cyr"]`. Sidecar 19 → 18 leaves. 13/13 green.
+- [x] **mihi 1.2.5** — dropped the `bayan` entry it carried as cover for ai-hwaccel's
+  bundle (mihi's own source references zero bayan/json symbols). 143/143 green.
+- [x] **chakshu 0.7.14** — pins both, drops `"bayan"` from the lean stdlib list.
+  **861,536 B → 571,480 B, −290,056 B (−33.7%).** §8 goes ~3.4× → **~2.2× over**.
+
+- [ ] **Remaining size gap.** 571,480 B against §8's 256 KB. The safe chakshu-side drops
+  (`bench`, `freelist`, `tagged`, `slice`) total only ~25 KB, and `CYRIUS_DCE=1` has been
+  a parity check rather than an optimizer since cycc 6.5.16 — it NOPs dead code in place
+  and emits a byte-identical binary. So closing the rest means either revising §8's target
+  or further upstream work on what the mihi/ai-hwaccel bundles pull in. Not a chakshu-side
+  lever today.
 
 ---
 
@@ -126,13 +155,26 @@ The substantive case for first-party. `chakshu` becomes the panel where the AGNO
 
 ## M4 — Polish + perf (v0.9.0)
 
-- [ ] Performance audit against design-spec §8 targets
-- [ ] Memory: `< 8 MB` resident at steady state
-- [ ] CPU: `< 0.5%` at 1 Hz on a 4-core box
-- [ ] Cold start `< 5ms`
+- [x] **Performance audit against design-spec §8 targets — run 2026-08-24 (v0.7.14).**
+  Measured under a real PTY at `--rate 1` over 20 s, 281 processes on a 16-core box.
+- [x] Memory: `< 8 MB` resident at steady state — **MET: 4.49 MB (4,600 kB) and flat.**
+  Was unbounded before v0.7.13 fixed the ~44 KB/frame `dir_list` leak (RSS climbed
+  4,556 → 12,748 kB over 400 frames and breached this budget in ~90 s).
+- [x] Cold start `< 5 ms` — **MET: ~1.6 ms** (`shu --version`, median of 5: 1,523–1,747 µs).
+- [ ] CPU: `< 0.5%` at 1 Hz — **OVER: 0.650%.** Diagnosed, not mysterious: every TUI frame
+  runs `processes_sample1()` → `sleep_ms(100)` → `processes_sample2()`, i.e. **two full
+  `/proc` walks per frame**, each reading `/proc/<pid>/stat` for every process (~562 stat
+  reads/sec here). The fix is to stop taking two fresh samples per frame and instead use
+  the *previous frame's* sample as the baseline: it halves the `/proc` work, removes the
+  100 ms per-frame sleep entirely, and widens the CPU% delta window from 100 ms to the
+  full refresh interval — which is both cheaper and more accurate (htop samples over its
+  whole interval for the same reason). **It does change what CPU% means**, so it wants a
+  deliberate decision rather than a drive-by optimization; `shu -p` should keep its
+  100 ms window, since a one-shot snapshot has no previous frame to difference against.
 - [ ] Manual TTY checks documented in `tests/`
-- [ ] Binary size budget — **target `< 1 MB` for now** (interim relaxation; design-spec §8's `< 256 KB` stays the long-term aspiration). **Currently ~1.38 MB — over budget** as of 0.7.2: niyama's re2 pulls the `unicode` tables (~350 KB) + its unused engines (~248 KB), on top of ai-hwaccel's DCE-NOPed backend stack. Decide here: pursue real codegen `--strip-dead` of the unused niyama engines + unicode data, or revert redaction to a chakshu-local matcher (drops the niyama dep entirely).
-- [ ] Deepen GPU telemetry — basic GPU panel shipped at M2.5; richer per-device stats means **updating the `ai-hwaccel` dep** (currently held at 2.2.6 to match mihi's own pin, so this may need a coordinated mihi bump).
+- [x] Binary size budget — **interim target `< 1 MB`: MET at v0.7.14.** Lean `shu` is **571,480 B (0.57 MB)**, comfortably under. (History: ~1.38 MB at 0.7.2 → 861,536 B at 0.7.13 → 571,480 B once ai-hwaccel 2.3.19 / mihi 1.2.5 took the 641 KB bayan monolith out of the lean closure.) The 0.7.2 note about niyama's re2 pulling unicode tables no longer applies to the lean build — niyama is AI-only and lives in `ai/cyrius.cyml`.
+- [ ] Binary size — design-spec §8's `< 256 KB` long-term target: still **~2.2× over**. Not a chakshu-side lever any more: the safe remaining stdlib drops (`bench`, `freelist`, `tagged`, `slice`) total ~25 KB, and `CYRIUS_DCE=1` has been a parity check rather than an optimizer since cycc 6.5.16 (it NOPs dead code in place and emits a byte-identical binary). Closing the rest means revising §8 or further upstream work on what the mihi/ai-hwaccel bundles pull in. See [`p1-sweep-findings.md`](p1-sweep-findings.md).
+- [ ] Deepen GPU telemetry — basic GPU panel shipped at M2.5; richer per-device stats means picking up more of the `ai-hwaccel` surface. **The old blocker is gone:** the pin is no longer held at 2.2.6 — v0.7.14 moved it to **2.3.19** in lockstep with mihi 1.2.5, so the coordinated bump this item was waiting on has already happened. What remains is choosing which per-device stats to surface and where in the layout.
 - [ ] Theme support (dark / light, configurable)
 
 **Gate to v1.0**: all design-spec performance targets met; documentation complete; one external test user (non-author) runs chakshu for a week without filing showstopper bugs.

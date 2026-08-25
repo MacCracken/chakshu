@@ -352,12 +352,22 @@ fn _ai_system_summary(out, cap) {
     var scratch[8192];
     var mt = mihi_mem_total(&scratch, 8192);
     var mf = mihi_mem_free(&scratch, 8192);
-    var used_mib  = (mt - mf) / 1048576;
-    var total_mib = mt / 1048576;
-    pos = _ai_app_n(out, pos, cap, used_mib);
-    pos = _ai_app(out, pos, cap, "/");
-    pos = _ai_app_n(out, pos, cap, total_mib);
-    pos = _ai_app(out, pos, cap, " MiB");
+    # R16 (v0.7.13): the worst of the three sites. An unguarded -1 from
+    # mihi_mem_free made the prompt state that the box was at 100% memory, and
+    # the model would then confidently explain the process in terms of an OOM
+    # condition that does not exist. Never hand the model a fabricated premise.
+    var mem_ok = 0;
+    if (mt > 0) { if (mf >= 0) { mem_ok = 1; } }
+    if (mem_ok == 1) {
+        var used_mib  = (mt - mf) / 1048576;
+        var total_mib = mt / 1048576;
+        pos = _ai_app_n(out, pos, cap, used_mib);
+        pos = _ai_app(out, pos, cap, "/");
+        pos = _ai_app_n(out, pos, cap, total_mib);
+        pos = _ai_app(out, pos, cap, " MiB");
+    } else {
+        pos = _ai_app(out, pos, cap, "unavailable");
+    }
     store8(out + pos, 0);
     return pos;
 }
@@ -634,16 +644,43 @@ fn _ai_overlay_print(buf, n) {
     return 0;
 }
 
-# Block for one keypress from stdin (raw mode is already set by the TUI).
+# Wait for one keypress from stdin, OR for an exit signal on the TUI's
+# signalfd (raw mode is already set by the TUI).
+#
+# R14 (v0.7.13 P-1 sweep): this was a bare read(0,..,1). While the overlay was
+# open, HUP/INT/TERM were SIG_BLOCKed by the TUI's signalfd and nothing was
+# draining it, so `kill <pid>` did nothing at all until a key was pressed — the
+# process appeared hung and only SIGKILL ended it. Returns 1 if an exit signal
+# arrived so the caller can unwind through tui_run's normal teardown (tearing
+# down here would skip tty_close_signalfd and strand the mask).
 fn _ai_overlay_wait_key() {
-    var kb[4];
-    syscall(0, 0, &kb, 1);      # read(fd=0, buf, 1)
+    if (_tui_sfd_exit < 0) {
+        var kb0[4];
+        syscall(0, 0, &kb0, 1);
+        return 0;
+    }
+    var pfd[16];
+    store64(&pfd,     4294967296);                  # { fd=0,   events=POLLIN }
+    store64(&pfd + 8, _tui_sfd_exit + 4294967296);  # { fd=sfd, events=POLLIN }
+    var r = syscall(7, &pfd, 2, 0 - 1);             # poll(fds, 2, timeout=-1)
+    if (r > 0) {
+        if (load16(&pfd + 8 + 6) != 0) { return 1; }
+        var kb[4];
+        syscall(0, 0, &kb, 1);
+    }
     return 0;
 }
 
 # Non-blocking check for a cancel keypress (Esc or q) on stdin. poll(2)
 # with a 0 ms timeout so it never blocks the stream. Returns 1 to cancel.
 fn _ai_stream_check_cancel() {
+    # R14: also watch the exit signalfd, so `kill` cancels a long streamed
+    # answer instead of being ignored until the stream ends.
+    if (_tui_sfd_exit >= 0) {
+        var spfd[8];
+        store64(&spfd, _tui_sfd_exit + 4294967296);
+        if (syscall(7, &spfd, 1, 0) > 0) { return 1; }
+    }
     var pfd[8];
     store64(&pfd, 4294967296);          # pollfd { fd=0, events=POLLIN(1)<<32, revents=0 }
     var r = syscall(7, &pfd, 1, 0);     # poll(fds, nfds=1, timeout=0)

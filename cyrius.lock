@@ -1,9 +1,10 @@
 commit	5badca76c8f44c81c1a8d93973281ae7997046bb	darshana	https://github.com/MacCracken/darshana.git	1.0.0
-commit	96e6a1ba73970f48d5a25e77e4831217ce8413d8	mihi	https://github.com/MacCracken/mihi.git	1.2.4
-commit	c2404c1bf97b071c283b5fbcbbda9292dcf0eb6d	ai-hwaccel	https://github.com/MacCracken/ai-hwaccel.git	2.3.18
+commit	be45b1fa4f53597c634dddd9b6abc48c7a53b408	mihi	https://github.com/MacCracken/mihi.git	1.2.5
+commit	156522834d0ceff3fff9c81b716440d1c2a380c0	ai-hwaccel	https://github.com/MacCracken/ai-hwaccel.git	2.3.19
+commit	b4cb1d80d6d39ed2217346d561775854dea0642b	bayan	https://github.com/MacCracken/bayan.git	1.5.2
 7240760b1260fa06c53c5a139d1a2086fb439e21ac90e53eacd4bf486ac0e9ca  lib/tagged.cyr
 2dd564a6351f9897ba90f17a108d70d5db676be3ee2764075a03edb9c38e01ed  lib/syscalls_macos.cyr
-16c17d999ba6d02599c14a79b4138758a7b418bdad3d3ad262ed836ec5739ddb  lib/bayan.cyr
+a8dc8df3ea0731ebc099df304b4d8b8f35d9006ed219f5e78a7684e83874881c  lib/bayan-json.cyr
 072725897707e6cc38c67510f972807c07e04cd8ba69d6881c9648f74055c8a5  lib/mmap.cyr
 8a3e4378e75eefbf7e6d8d098449dbe909f9b9b80a2a72624adb250eb4335c09  lib/str.cyr
 69e92cc4b67f1a936f94c92ce8a4c66673758b84dba385e96fbeaa46fa692b4c  lib/alloc_agnos.cyr
@@ -12,7 +13,7 @@ f9d4d9f58fb1b177f90cfdd72172000567600b3e74dcf76024316681811d12e5  lib/thread_agn
 c7b3bf5beebddc082d4fa643a7113deaf26d0fd80dd5cd70ba0e3c21671107d0  lib/fs_win.cyr
 27c9752b70e797b43d30204e5077749526144495ba7021b1272067f3236d81f9  lib/args_agnos.cyr
 e77b2d5e3744c8f7f2e4bb69710df8888211ca9fb1947cf9408bbc0d66820cd7  lib/freelist.cyr
-434539b9421b4ff5db2c6b22d46c929b5cb8ad5b1c1e1aa757ae322e492f2148  lib/ai-hwaccel.cyr
+85b47b624946b1ea9bb5ed34814adc8fb726aad54a759aa7c1fcf92fed372f49  lib/ai-hwaccel.cyr
 ac55a4ff22d49ccf6c44893be077e1c824825aed845d82c04767f4f87c29d6da  lib/sync_macos.cyr
 585037b71567b54f99d3e2b90565432069fc37e5abe6bdd08d19df2081af7237  lib/sakshi.cyr
 096eabc580c807f3e378fbe56058780a28cdf95b9c70b44672bca0a71cf969f6  lib/ct.cyr
@@ -26,7 +27,7 @@ cecaebeadd86c25bd2bbdc5996a3c6e8c48f220146bb8533a25e2e7b0bb51ea9  lib/syscalls_x
 2a1cc4eb61916fe2bf1228456435a8fe970faafd6fbb8134d7f51ae21806af9a  lib/thread_macos.cyr
 09cf81bf4f10758da7967a5f6628b2feed53b0fb5e6e11cac0b273725465e6d8  lib/assert.cyr
 c88c2ab7f87fdbf63d8e8cb12d43471e7863315f8053341f295b2237788e6d78  lib/args.cyr
-3969242543d925e713574bbf28de95b99105c354bb2c793285cc37002f1ebca7  lib/mihi.cyr
+1e09f1a0be78faffcee09838df04300309ba7ac4c7e3910fbe813df20aa5316f  lib/mihi.cyr
 af3dc72c3e2d0f94ea4d4a6bdeb60963cd36e7849b7ccf06299bf5c616de7100  lib/sync_windows.cyr
 65c97b05e22533d24bfd844646d530480b79973fa5b0277ad3f759f4398a328c  lib/chrono.cyr
 942c760a65fc50f61dfedac20eb5f4f2032b8a955e13450835acff775824b811  lib/syscalls.cyr

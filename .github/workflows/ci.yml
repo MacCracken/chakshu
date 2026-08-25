@@ -166,38 +166,88 @@ jobs:
             FAIL=1
           fi
 
-          # CLAUDE.md "heap-allocate large data". Static `var X[N]`
-          # at N >= 64 KiB lives on the stack and risks overflow on
-          # the kernel's 8 MB default stack ulimit. Same threshold
-          # owl/cyim use.
-          awk -F: '
-            /var [A-Za-z_][A-Za-z0-9_]*\[[0-9]+\]/ {
+          # CLAUDE.md "heap-allocate large data", threshold 64 KiB.
+          #
+          # R20 (v0.7.13 P-1 sweep): this compared the BRACKET LITERAL against
+          # 65536 while calling it "bytes". Element size in Cyrius is
+          # scope-dependent — measured on 6.5.35:
+          #   module-scope `var X[N]`  -> N x 8 bytes (.bss)
+          #   function-local `var X[N]` -> N x 1 byte  (stack)
+          # so the old rule was 8x too lenient for globals and correct for
+          # locals. A blanket x8 would be worse: it flags 17 sites of which 16
+          # are legitimate stack buffers and would red the first push. Two rules
+          # instead, distinguished by column-1 anchoring (`var` at the start of
+          # a line is module scope; indented is a local).
+          #
+          # Also NR -> FNR: NR is cumulative across the whole glob, so every
+          # reported line number after the first file was wrong.
+          # Escape hatch: a line carrying `# bigbuf-ok:` plus a reason is skipped.
+          # Deliberate exceptions stay VISIBLE and reviewed in the diff rather
+          # than being hidden by quietly loosening the threshold.
+          awk '
+            /bigbuf-ok:/ { next }
+            /^var [A-Za-z_][A-Za-z0-9_]*\[[0-9]+\]/ {
               match($0, /\[[0-9]+\]/); s=substr($0,RSTART+1,RLENGTH-2); n=s+0;
-              if (n >= 65536) print FILENAME":"NR": large stack buffer ("n" bytes): "$0
+              if (n * 8 >= 65536) print FILENAME":"FNR": large module-scope buffer ("n" elems = "n*8" bytes): "$0
+              next
+            }
+            /^[ \t]+var [A-Za-z_][A-Za-z0-9_]*\[[0-9]+\]/ {
+              match($0, /\[[0-9]+\]/); s=substr($0,RSTART+1,RLENGTH-2); n=s+0;
+              if (n >= 65536) print FILENAME":"FNR": large stack buffer ("n" bytes): "$0
             }' src/*.cyr > /tmp/bigbuf.txt
           if [ -s /tmp/bigbuf.txt ]; then
             cat /tmp/bigbuf.txt
             FAIL=1
           fi
 
-          # M3+ AI-privacy guards (inert until src/ai/ exists).
-          # When the AI module lands, the prompt-assembly path must
-          # not reach for /home/, getenv(), or unredacted cmdline.
-          # Scaffold the rule here so adding it is a one-line flip.
-          if [ -d src/ai ]; then
-            home_hits=$(grep -rn '"/home/' src/ai/ 2>/dev/null || true)
+          # M3+ AI-privacy guards. CLAUDE.md: prompts carry only what the user
+          # can already see in the TUI — no /home contents, no env vars, no
+          # unredacted cmdline.
+          #
+          # R19 (v0.7.13 P-1 sweep): this was guarded by `if [ -d src/ai ]` and
+          # had therefore NEVER EXECUTED — the AI module landed at M3 as the
+          # FILE src/ai.cyr, not a directory, so the most privacy-critical gate
+          # in the repo was dead scaffolding for five releases. Re-pointed at the
+          # real paths.
+          AI_SRC=""
+          [ -f src/ai.cyr ] && AI_SRC="$AI_SRC src/ai.cyr"
+          [ -f src/ai_stub.cyr ] && AI_SRC="$AI_SRC src/ai_stub.cyr"
+          for f in ai/*.cyr; do [ -f "$f" ] && AI_SRC="$AI_SRC $f"; done
+          if [ -n "$AI_SRC" ]; then
+            echo "AI privacy scan over:$AI_SRC"
+            home_hits=$(grep -n '"/home/' $AI_SRC 2>/dev/null || true)
             if [ -n "$home_hits" ]; then
               echo "FAIL: AI prompt path references /home/"
               echo "$home_hits"
               FAIL=1
             fi
-            # getenv-equivalent in cyrius is `env` lib — same rule.
-            env_hits=$(grep -rn 'env_get\|getenv' src/ai/ 2>/dev/null || true)
+            # getenv-equivalent in cyrius is the `env` lib. chakshu legitimately
+            # reads three CHAKSHU_* settings through one helper, so allowlist by
+            # ARGUMENT rather than by name: the generic body is `getenv(name)`,
+            # and every caller passes a CHAKSHU_* literal. Anything reading a
+            # different env var is a finding.
+            env_hits=$(grep -n 'env_get\|getenv' $AI_SRC 2>/dev/null \
+              | grep -v 'getenv(name)' \
+              | grep -v 'CHAKSHU_' || true)
             if [ -n "$env_hits" ]; then
-              echo "FAIL: AI prompt path reads env vars"
+              echo "FAIL: AI prompt path reads a non-CHAKSHU_ env var"
               echo "$env_hits"
               FAIL=1
             fi
+          else
+            echo "FAIL: AI privacy scan found no AI sources — the gate is dead again"
+            FAIL=1
+          fi
+
+          # CLAUDE.md "AI is opt-in at the BINARY level": the lean `shu` must not
+          # be able to reach the network at all. The root manifest must carry no
+          # transport module. Note sandhi is consumed as a STDLIB entry, not a
+          # [deps.sandhi] table, so scanning for dep tables alone misses it.
+          lean_net=$(sed -n '/^\[deps\]/,/^\[/p' cyrius.cyml \
+            | grep -oE '"(sandhi|net|http|tls|ws|dynlib|fdlopen|niyama)"' || true)
+          if [ -n "$lean_net" ]; then
+            echo "FAIL: lean cyrius.cyml declares a network/AI module: $lean_net"
+            FAIL=1
           fi
 
           # Signal-mask hygiene. darshana's `tty_open_signalfd` does a

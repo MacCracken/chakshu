@@ -86,7 +86,6 @@ stdlib = [
     "thread",
     "freelist",
     "ct",
-    "bayan",
     "bench",
 ]
 # NOTE: this is the LEAN `shu` build — monitor only. The AI transport chain
@@ -201,7 +200,7 @@ modules = ["dist/darshana.cyr"]
 # permanent -1 that `shu -p --agnos` had been subtracting in its used-mem line.
 [deps.mihi]
 git = "https://github.com/MacCracken/mihi.git"
-tag = "1.2.4"
+tag = "1.2.5"
 modules = ["dist/mihi.cyr"]
 
 # ai-hwaccel — transitive from mihi/gpu.cyr (references
@@ -224,7 +223,7 @@ modules = ["dist/mihi.cyr"]
 # [deps].stdlib entry added above.
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel.git"
-tag = "2.3.18"
+tag = "2.3.19"
 modules = ["dist/ai-hwaccel.cyr"]
 
 # niyama (re2 redaction) is an AI-only dep — it lives in ai/cyrius.cyml,

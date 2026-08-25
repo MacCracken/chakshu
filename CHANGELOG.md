@@ -4,6 +4,54 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.14] — 2026-08-24 — the bayan monolith comes out: lean `shu` drops 33.7%
+
+Dependency-pin cut, no chakshu source change. Picks up the two upstream releases that
+close the P-1 sweep's last open item — the lean binary was linking all **641 KB** of the
+bayan bundle (json + toml + cyml + csv + base64 + bigint + u128 + yaml + pdf) to satisfy
+**seven JSON calls** it never reaches.
+
+**Lean `shu`: 861,536 B → 571,480 B — −290,056 B (−33.7%).** `.bss` 145,144 → 142,072.
+`shu-ai`: 3,179,096 B → 3,175,000 B.
+
+### Changed
+
+- **ai-hwaccel `2.3.18` → `2.3.19`** (both manifests). Upstream moved its 11 `json_v_*`
+  call sites onto the canonical `bayan_json_v_*` names and swapped `bayan` in
+  `[deps].stdlib` for a focused `[deps.bayan] modules = ["dist/bayan-json.cyr"]`
+  (100,309 B vs 641,083 B). The bare aliases it had been calling ship **only** in the
+  monolith, which is what forced every consumer to link the whole bundle.
+- **mihi `1.2.4` → `1.2.5`** (both manifests). Dropped `bayan` from `[deps].stdlib` —
+  it was cover for ai-hwaccel's bundled `registry_to_json` path; mihi's own source
+  references zero bayan/json symbols.
+- **`"bayan"` removed from the lean `[deps].stdlib`** (23 → 22 modules). With both
+  sidecars clean, nothing asks for the monolith any more, and a clean `cyrius deps`
+  vendors only `lib/bayan-json.cyr`. chakshu declares **no** bayan dep of its own — it
+  arrives transitively through ai-hwaccel and is commit-pinned in `cyrius.lock`.
+
+### Added
+
+- **`[deps.bayan]` pinned to the FULL bundle in `ai/cyrius.cyml` only.** The AI chain is
+  the one place that genuinely needs the monolith: cyrius auto-resolves it for `ws` /
+  `sigil` / `tls`, which call functions carved out of the stdlib at v6.1.25. Without a
+  direct declaration the AI build vendored **both** `bayan.cyr` (for the TLS chain) and
+  `bayan-json.cyr` (transitively from ai-hwaccel), producing five duplicate-symbol
+  warnings and a **+62 KB** binary. Declaring bayan directly at `dist/bayan.cyr`
+  overrides ai-hwaccel's transitive sublib pin, so exactly one bayan lands.
+
+### Verified
+
+- Lean `shu`: build clean, `tests/chakshu.tcyr` **81/81**, `scripts/smoke.sh` **PASS**,
+  `tests/integration_smoke.py` **11/11**, DCE parity PASS, `-p` stderr **0 bytes**, GPU
+  line intact, `shu --version` reports `chakshu 0.7.14`.
+- AI `shu-ai`: build clean (only the two pre-existing benign warnings — sigil's
+  `uname_release` duplicate and the unreachable `random_bytes`), `chakshu-ai.tcyr`
+  **21/21**.
+- Design-spec §8 (`< 256 KB`): now **~2.2× over**, down from ~3.4×. The remaining safe
+  chakshu-side drops (`bench`, `freelist`, `tagged`, `slice`) total only ~25 KB, so §8
+  still needs revising or further upstream work — see
+  [`docs/development/p1-sweep-findings.md`](docs/development/p1-sweep-findings.md).
+
 ## [0.7.13] — 2026-08-24 — P-1 sweep: audit, hardening, optimization, security
 
 A **P-1 audit, refactor, hardening, optimization and security sweep** with repairs —
@@ -127,20 +175,58 @@ PTY **7 → 9**.
   could never see `CHAKSHU_VERSION` (the suite includes only `proc.cyr` + `darshana.cyr`).
   The real cross-file invariant is already enforced by `ci.yml`'s version-consistency step.
 
-### Known / carried forward
+### Fixed — second pass (every remaining P-1 finding)
 
-- **Lean `shu` is 861,448 B** against design-spec §8's `< 256 KB` (~3.4× over). The
-  measured size plan lands at 424,784 B (−50.4%) but its single largest item — dropping
-  `bayan`, −353,624 B — is **upstream-blocked**: `cyrius deps` re-vendors it from
-  ai-hwaccel's `dist/*.deps` sidecar regardless of this manifest, and ai-hwaccel would
-  need to move `profile_from_json*` behind a profile first. Even the full sweep leaves
-  the lean monitor ~1.66× over, so §8's target needs revising or taking upstream.
-- Not yet applied from the sweep: `R7(b,c)` (truncation detection + heap scratch),
-  `R10` (line-anchored `/proc/status` field parsing — `prctl(PR_SET_NAME,"Uid:0")` can
-  currently spoof the focus panel *and* the AI prompt into reporting uid 0), `R14`/`R15`
-  (signal disposition in the `?` overlay and on degraded launch), `R16` (`mihi_mem_free`
-  sentinel), `R19`/`R20` (CI gates), `R21` (7-digit-PID row width). Each is specified with
-  a verified fix in the sweep plan.
+- **uid spoofing into the focus panel *and* the AI prompt.** `proc_meminfo_field` used an
+  unanchored `strstr`, and `/proc/<pid>/status` opens with `Name:\t<comm>` where comm is
+  attacker-controlled via `prctl(PR_SET_NAME)`. A process renamed `Uid:0` planted a match
+  at offset 6 that beat the real `Uid:` line at offset 98 — reproduced live against a
+  running process. Now line-anchored (`proc_line_field`), fixing every caller at once,
+  including the prompt that would otherwise have told the model a normal process was root.
+- **Silent `/proc` truncation.** `file_read_all` stops at the cap and returns the short
+  count as *success*, so an oversized file was half-parsed with no indication. **Measured**:
+  a 200-interface `/proc/net/dev` aggregated only 65 interfaces at the old 8 KiB cap —
+  rx 65,000,000 against a true 200,000,000, a 67% undercount. Scratch buffers moved to
+  64 KiB heap allocations made once (locals are 1 byte/element, so a 64 KiB local would be
+  64 KiB of *stack* per frame and trip the CI gate), plus a `proc_truncated()` mark.
+  Callers consume partial data and never fail — refusing to run on a big host would be
+  strictly worse than an approximate rate.
+- **`kill` was inert while the `?` overlay was open.** The overlay parked in a bare
+  `read(0,…,1)` while the TUI's signalfd had HUP/INT/TERM `SIG_BLOCK`ed and nothing drained
+  it, so the process looked hung and only SIGKILL ended it. Now polls stdin *and* the
+  signalfd, returning a sentinel so teardown runs through `tui_run` — tearing down inside
+  the overlay would skip `tty_close_signalfd` and strand the mask. A signal also now
+  cancels an in-flight streamed answer. Verified: pre-fix ignored SIGTERM, post-fix exits.
+- **Degraded launch was unkillable.** The signalfds are opened *before* `epoll_create`; if
+  that failed we fell through to the blocking-stdin loop with signals still blocked.
+  Reproduced at `ulimit -n 5`: pre-fix required SIGKILL and left the terminal raw and in
+  the alt-screen, post-fix honours SIGTERM.
+- **`mihi_mem_free()` −1 rendered `61192 MiB used / 61192 MiB total`** — a fully-consumed
+  machine, exit 0, empty stderr. Guarded at all three sites. The `ai.cyr` site was the
+  worst: the sentinel became a fabricated OOM premise for the model's answer.
+- **7-digit PIDs overflowed the table row.** `avail = _tui_cols - 21` hardcoded a 6-digit
+  pid column, but `_proc_print_int_pad` pads without truncating and this box ships
+  `pid_max = 4194304`. The row came out one column too wide, wrapped, and scrolled the
+  header off — the exact failure the hardcoded 21 was introduced to fix, one `pid_max`
+  bump later. Now derived per row.
+
+### Fixed — CI gates that were not gating
+
+- **The AI-privacy scan had never executed.** It was wrapped in `if [ -d src/ai ]`, but the
+  AI module landed at M3 as the *file* `src/ai.cyr` — so the most privacy-critical gate in
+  the repo was dead scaffolding for five releases. Re-pointed at the real paths, with the
+  env allowlist keyed on the *argument* (`getenv(name)` + `CHAKSHU_*`) rather than on
+  function names, which a clean tree would have failed.
+- **Added a binary-level AI-opt-in gate.** CLAUDE.md's "the lean `shu` cannot reach the
+  network at all" had zero enforcement. The lean manifest is now scanned for transport
+  modules — note `sandhi` is consumed as a **stdlib** entry, so scanning `[deps.*]` tables
+  alone misses it entirely.
+- **The large-buffer gate compared element counts against a byte threshold** and printed
+  `NR` (cumulative across the glob) instead of `FNR`, so every reported line number after
+  the first file was wrong. Now scope-aware — module-scope `var X[N]` is N×8 bytes,
+  function-local is N×1, measured on 6.5.35 — with a visible `# bigbuf-ok:` escape hatch.
+  It immediately caught `_tui_filtered_idx` at exactly 65,536 B, now an annotated reviewed
+  exemption rather than a quietly raised threshold.
 
 ### Fixed
 
@@ -183,6 +269,24 @@ PTY **7 → 9**.
   *mechanism* rather than the call site, `ci.yml`'s pattern scan also now fails on
   `file_close(sfd…)` anywhere in `src/` — verified to fire on the pre-fix line and
   to pass on the fixed source.
+
+### Known / carried forward
+
+- **Lean `shu` is 861,536 B** against design-spec §8's `< 256 KB` (~3.4× over). The
+  biggest lever is **−290,040 B (−33.7%)** → **571,496 B**, measured by substituting
+  bayan's `dist/bayan-json.cyr` (100,309 B) for the monolithic `bayan.cyr` (641,083 B),
+  with 81/81 still green. **bayan already ships nine focused sublibs**, so no refactor is
+  required — what blocks it is that (a) mihi's sidecar declares `bayan` while referencing
+  zero bayan symbols, and (b) ai-hwaccel calls the bare compat aliases (`json_v_*`) that
+  only the monolith exports, not the namespaced `bayan_json_v_*` the sublib provides.
+  Two small upstream fixes, detailed in
+  [`docs/development/p1-sweep-findings.md`](docs/development/p1-sweep-findings.md).
+  Note chakshu's own manifest is a red herring: dropping `"bayan"` from `[deps].stdlib`
+  saves **16 bytes**, since the sidecars re-vendor it regardless.
+- **Nothing else from the sweep is deferred.** Every P-1 finding that chakshu can fix
+  from this repo is fixed; the full verified plan, including the "deliberately not doing"
+  list so a future sweep does not re-litigate closed items, is checked in at
+  [`docs/development/p1-sweep-findings.md`](docs/development/p1-sweep-findings.md).
 
 ## [0.7.12] — 2026-08-24 — Interim refresh: Cyrius 6.5.35 + darshana 1.0.0 + mihi 1.2.4 + ai-hwaccel 2.3.18
 

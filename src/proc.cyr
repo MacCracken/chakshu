@@ -27,8 +27,54 @@ fn proc_read(path, buf, maxlen) {
     var n = file_read_all(path, buf, maxlen - 1);
     if (n < 0) { return n; }
     store8(buf + n, 0);
+    if (n >= maxlen - 1) { _proc_truncated = 1; }
     return n;
 }
+
+# --- R7 (v0.7.13 P-1 sweep): truncation detection + heap scratch -------
+#
+# file_read_all() stops at the cap and returns the short count as a SUCCESS,
+# so a /proc file larger than the buffer was silently half-parsed. With the
+# old 8 KiB locals that was reachable in ordinary operation: a host with ~100
+# veth interfaces overflows /proc/net/dev and undercounts rx by ~47%, and a
+# many-core box overflows /proc/stat. Worse, the delta between a truncated and
+# an untruncated sample produced garbage rates (R13 now clamps the negative
+# half of that, but the number was still wrong).
+#
+# Two halves:
+#  (b) proc_read() sets _proc_truncated when the read exactly filled the
+#      buffer. Callers CONSUME the partial data and may surface the mark —
+#      they must never turn it into EXIT_ERR, which would make `shu -p` refuse
+#      to run on precisely the big hosts that trigger it: strictly worse than
+#      a slightly-off rate.
+#  (c) the scratch buffers move from 8 KiB function locals to 64 KiB heap
+#      allocations, made once and reused. Heap, not locals: a function-scope
+#      `var X[65536]` is 64 KiB of STACK per frame (locals are 1 byte per
+#      element in cyrius) and trips the CI large-buffer gate. Raising the
+#      maxlen without enlarging the array is an immediate SIGSEGV.
+var PROC_BUF_CAP = 65536;
+var _proc_truncated = 0;
+var _proc_buf_a = 0;
+var _proc_buf_b = 0;
+var _proc_buf_c = 0;
+
+# Lazily allocate the three shared /proc scratch buffers. Returns the one
+# selected by `which` (0/1/2), or 0 on allocation failure.
+fn proc_scratch(which) {
+    if (_proc_buf_a == 0) { _proc_buf_a = alloc(PROC_BUF_CAP); }
+    if (_proc_buf_b == 0) { _proc_buf_b = alloc(PROC_BUF_CAP); }
+    if (_proc_buf_c == 0) { _proc_buf_c = alloc(PROC_BUF_CAP); }
+    if (which == 0) { return _proc_buf_a; }
+    if (which == 1) { return _proc_buf_b; }
+    return _proc_buf_c;
+}
+
+# Clear the truncation mark before a sampling pass.
+fn proc_truncated_reset() { _proc_truncated = 0; return 0; }
+
+# Did any proc_read() since the last reset hit its cap? Render paths use this
+# to flag the sample as approximate rather than to fail.
+fn proc_truncated() { return _proc_truncated; }
 
 # Find a "Key:" line in a /proc/meminfo-style buffer and return its
 # integer value (in kB for meminfo). The scan keys on "<key>" + skip
@@ -37,16 +83,50 @@ fn proc_read(path, buf, maxlen) {
 # (MemTotal, MemAvailable, SwapTotal, etc.), so 0 is an unambiguous
 # "not found" sentinel without needing an out-param error channel.
 fn proc_meminfo_field(buf, key) {
-    var off = strstr(buf, key);
-    if (off < 0) { return 0; }
-    var i = off + strlen(key);
-    # Skip spaces and tabs after the colon.
+    return proc_line_field(buf, key);
+}
+
+# Find `key` at the START OF A LINE in a /proc-style "Key:<ws><int>" buffer
+# and return the integer that follows. Returns 0 if the key is not present on
+# any line — /proc fields chakshu reads (MemTotal, MemAvailable, PPid, Uid,
+# Threads) are never legitimately zero in a way that matters, so 0 doubles as
+# an unambiguous not-found sentinel without an out-param error channel.
+#
+# R10 (v0.7.13 P-1 sweep): this used to be a bare `strstr(buf, key)`, which
+# matches ANYWHERE — including inside another field's VALUE. That is a security
+# defect, not just sloppiness: /proc/<pid>/status opens with "Name:\t<comm>",
+# and comm is attacker-controlled via prctl(PR_SET_NAME). A process that renames
+# itself to "Uid:0" plants a matching substring at offset 6 that beats the real
+# "Uid:" line at offset 98, so chakshu reported an unprivileged process as
+# **uid 0** — in the focus panel and, worse, in the prompt sent to hoosh, where
+# it became a false premise for the model's answer. Reproduced against a live
+# prctl-renamed process during the sweep.
+#
+# Anchoring to line starts closes it for every caller at once: both call sites
+# in src/tui.cyr and src/ai.cyr go through here, as does the meminfo path, and
+# every field these read is line-anchored in the kernel's format anyway.
+fn proc_line_field(buf, key) {
+    var klen = strlen(key);
+    var cursor = 0;
     while (1 == 1) {
-        var c = load8(buf + i);
-        if (c != 32) { if (c != 9) { break; } }
-        i = i + 1;
+        if (load8(buf + cursor) == 0) { break; }
+        if (memeq(buf + cursor, key, klen) == 1) {
+            # Skip spaces and tabs between the colon and the value.
+            var j = cursor + klen;
+            while (1 == 1) {
+                var c = load8(buf + j);
+                if (c != 32) { if (c != 9) { break; } }
+                j = j + 1;
+            }
+            return atoi(buf + j);
+        }
+        var prev = cursor;
+        _proc_skip_line(buf, &cursor);
+        # _proc_skip_line stops without advancing at end-of-buffer; bail rather
+        # than spin.
+        if (cursor == prev) { break; }
     }
-    return atoi(buf + i);
+    return 0;
 }
 
 # Parse the integer second-count from /proc/uptime, which is shaped

@@ -293,6 +293,14 @@ var _tui_msg_until = 0;
 var TUI_TCFLSH   = 0x540B;
 var TUI_TCIFLUSH = 0;
 
+# R14 (v0.7.13 P-1 sweep): the exit signalfd, published so the `?` overlay can
+# wait on it alongside stdin. The overlay parks in a blocking read(0,..,1) while
+# HUP/INT/TERM are SIG_BLOCKed by that very signalfd and nothing is draining it,
+# so `kill <pid>` was completely inert until someone pressed a key — the process
+# looked hung and only SIGKILL ended it. -1 when no signalfd is active (degraded
+# launch), in which case the overlay falls back to the plain blocking read.
+var _tui_sfd_exit = 0 - 1;
+
 # Arm the kill confirmation. Single entry point so both the focus-mode and
 # table-mode 'k' handlers get the same typeahead protection.
 fn _tui_enter_confirm_kill(pid) {
@@ -341,7 +349,7 @@ var _tui_filter_n  = 0;
 # save 57 344 B of .bss and silence the compiler's large-static-data warning;
 # that was weighed against R5 at the sweep and correctness won — chakshu
 # targets AGNOS servers, where >1024 processes is ordinary.)
-var _tui_filtered_idx[8192];
+var _tui_filtered_idx[8192];  # bigbuf-ok: .bss not stack; sized to PROC_MAX by the v0.7.13 R5-vs-R11 decision
 var _tui_filtered_n = 0;
 
 # Substring search: returns 1 if `haystack[0..hay_len)` contains the
@@ -721,11 +729,25 @@ fn tui_render_table_frame() {
     var mem_total_kb  = mem_total_b / 1024;
     var mem_used_mib  = (mem_total_b - mem_avail_b) / 1048576;
     var mem_total_mib = mem_total_b / 1048576;
+    # R16 (v0.7.13): mihi_mem_free() returns -1 when /proc/meminfo is
+    # unreadable (and pre-3.14 kernels have no MemAvailable at all). Unguarded,
+    # `mem_total_b - (-1)` renders "61192 MiB used / 61192 MiB total" — a
+    # fully-consumed machine — with exit 0 and empty stderr. Degraded field, not
+    # a fatal error: same posture as the uptime and core-count sentinels.
+    var mem_ok = 0;
+    if (mem_total_b > 0) { if (mem_avail_b >= 0) { mem_ok = 1; } }
+
     _tui_color_bold(); syscall(1, 1, "mem:  ", 6); _tui_color_reset();
-    print_num(mem_used_mib);
-    syscall(1, 1, " MiB used / ", 12);
-    print_num(mem_total_mib);
-    syscall(1, 1, " MiB total", 10);
+    if (mem_ok == 1) {
+        print_num(mem_used_mib);
+        syscall(1, 1, " MiB used / ", 12);
+        print_num(mem_total_mib);
+        syscall(1, 1, " MiB total", 10);
+    } else {
+        # No trailing newline: this row is cursor-addressed and a \n would
+        # scroll the frame.
+        syscall(1, 1, "unavailable", 11);
+    }
     tty_clear_to_eol();
 
     # ----- row 3: GPU / accelerators (reserved slot) -----
@@ -754,33 +776,35 @@ fn tui_render_table_frame() {
     tty_clear_to_eol();
 
     # ----- row 3: cpu / disk / net (delta-based, 100ms window) -----
-    var sb1[8192];
-    var db1[8192];
-    var nb1[8192];
-    var s1n = proc_read("/proc/stat",      &sb1, 8192);
-    var d1n = proc_read("/proc/diskstats", &db1, 8192);
-    var n1n = proc_read("/proc/net/dev",   &nb1, 8192);
+    # R7c (v0.7.13): shared 64 KiB heap scratch — see src/proc.cyr.
+    proc_truncated_reset();
+    var sb1 = proc_scratch(0);
+    var db1 = proc_scratch(1);
+    var nb1 = proc_scratch(2);
+    var s1n = proc_read("/proc/stat",      sb1, PROC_BUF_CAP);
+    var d1n = proc_read("/proc/diskstats", db1, PROC_BUF_CAP);
+    var n1n = proc_read("/proc/net/dev",   nb1, PROC_BUF_CAP);
     var cpu_active1 = 0; var cpu_total1 = 0;
     var sec_r1 = 0; var sec_w1 = 0;
     var rx1 = 0; var tx1 = 0;
-    if (s1n > 0) { proc_stat_cpu_agg(&sb1, &cpu_active1, &cpu_total1); }
-    if (d1n > 0) { proc_diskstats_agg(&db1, d1n, &sec_r1, &sec_w1); }
-    if (n1n > 0) { proc_netdev_agg(&nb1, n1n, &rx1, &tx1); }
+    if (s1n > 0) { proc_stat_cpu_agg (sb1, &cpu_active1, &cpu_total1); }
+    if (d1n > 0) { proc_diskstats_agg(db1, d1n, &sec_r1, &sec_w1); }
+    if (n1n > 0) { proc_netdev_agg   (nb1, n1n, &rx1, &tx1); }
     var ncores = 1;
-    if (s1n > 0) { ncores = proc_stat_ncores(&sb1, s1n); }
+    if (s1n > 0) { ncores = proc_stat_ncores(sb1, s1n); }
     processes_sample1();
 
     sleep_ms(SNAP_SAMPLE_MS);
 
-    var s2n = proc_read("/proc/stat",      &sb1, 8192);
-    var d2n = proc_read("/proc/diskstats", &db1, 8192);
-    var n2n = proc_read("/proc/net/dev",   &nb1, 8192);
+    var s2n = proc_read("/proc/stat",      sb1, PROC_BUF_CAP);
+    var d2n = proc_read("/proc/diskstats", db1, PROC_BUF_CAP);
+    var n2n = proc_read("/proc/net/dev",   nb1, PROC_BUF_CAP);
     var cpu_active2 = 0; var cpu_total2 = 0;
     var sec_r2 = 0; var sec_w2 = 0;
     var rx2 = 0; var tx2 = 0;
-    if (s2n > 0) { proc_stat_cpu_agg(&sb1, &cpu_active2, &cpu_total2); }
-    if (d2n > 0) { proc_diskstats_agg(&db1, d2n, &sec_r2, &sec_w2); }
-    if (n2n > 0) { proc_netdev_agg(&nb1, n2n, &rx2, &tx2); }
+    if (s2n > 0) { proc_stat_cpu_agg (sb1, &cpu_active2, &cpu_total2); }
+    if (d2n > 0) { proc_diskstats_agg(db1, d2n, &sec_r2, &sec_w2); }
+    if (n2n > 0) { proc_netdev_agg   (nb1, n2n, &rx2, &tx2); }
 
     var cpu_pct = 0;
     var total_delta = cpu_total2 - cpu_total1;
@@ -901,18 +925,24 @@ fn tui_render_table_frame() {
         _tui_color_pct_band(cpu, 25, 70); _proc_print_int_pad(cpu, 6); _tui_color_reset();
         _tui_color_pct_band(mem, 50, 80); _proc_print_int_pad(mem, 6); _tui_color_reset();
         syscall(1, 1, " ", 1);
-        # cmdline read (top-N only — same as plain mode). Clip to
-        # terminal width: the per-row prefix (pid 6 + space + state
-        # 1 + cpu 6 + mem 6 + space) is exactly 21 columns, so
-        # avail = _tui_cols - 21 is what we have for cmdline. If the
-        # text exceeds that and the terminal auto-wraps, the cursor
-        # advances past row `_tui_rows` and the alt-screen scrolls
-        # the top header off — which is the bug report this fixes.
+        # cmdline read (top-N only — same as plain mode). Clip to terminal
+        # width: the per-row prefix is pid + space + state 1 + cpu 6 + mem 6 +
+        # space, i.e. pid_w + 15 columns.
+        #
+        # R21 (v0.7.13 P-1 sweep): this used a hardcoded 21, which assumes the
+        # pid column is exactly 6 wide. _proc_print_int_pad only PADS to 6 — it
+        # does not truncate — so on a host with pid_max above 999999 (this box
+        # ships 4194304, i.e. 7 digits) a 7-digit pid makes the prefix 22 and
+        # the row _tui_cols + 1 wide. The terminal then auto-wraps, the cursor
+        # advances past row _tui_rows, and the alt-screen scrolls the header
+        # off — the exact failure the original 21 was introduced to fix, just
+        # one pid_max bump later. Derived per row so it cannot drift again.
         var pid_str[24];
-        _proc_int_to_cstr(pid, &pid_str);
+        var pid_w = _proc_int_to_cstr(pid, &pid_str);
+        if (pid_w < 6) { pid_w = 6; }
         var cmd_buf[256];
         var cmd_n = _proc_read_cmdline(&pid_str, &cmd_buf, PROC_CMDLINE_MAX);
-        var avail = _tui_cols - 21;
+        var avail = _tui_cols - (pid_w + 15);
         if (avail < 0) { avail = 0; }
         if (cmd_n > 0) {
             var to_print = cmd_n;
@@ -1137,7 +1167,11 @@ fn _tui_dispatch_key(k) {
             if (sel_e >= _tui_filtered_n) { sel_e = _tui_filtered_n - 1; }
             var abs_e = load64(&_tui_filtered_idx + sel_e * 8);
             var epid = load64(_proc_recs + abs_e * PROC_REC_SIZE + 0);
-            ai_tui_explain(epid);
+            # R14: a non-zero return means an exit signal arrived while the
+            # overlay was open. Propagate it as a normal loop exit so tui_run's
+            # teardown runs — tearing down from inside the overlay would skip
+            # tty_close_signalfd and strand the signal mask.
+            if (ai_tui_explain(epid) == 1) { return 1; }
             tui_render_frame();
         }
     }
@@ -1217,6 +1251,7 @@ fn tui_run(refresh_ms, sort_key, top_n, color_mode, focus_pid) {
     # fails, drop to direct stdin (Slice A behavior). Better to
     # launch with reduced signal handling than refuse to launch.
     var sfd_exit  = tty_open_signalfd(TTY_SIGMASK_EXIT);
+    _tui_sfd_exit = sfd_exit;
     var sfd_winch = tty_open_signalfd(TTY_SIGMASK_WINCH);
     var epfd = 0 - 1;
     if (sfd_exit >= 0) {
@@ -1234,6 +1269,26 @@ fn tui_run(refresh_ms, sort_key, top_n, color_mode, focus_pid) {
                 var ev_winch = epoll_event_new(EPOLLIN, 2);
                 sys_epoll_ctl(epfd, EPOLL_CTL_ADD, sfd_winch, ev_winch);
             }
+        }
+    }
+
+    # R15 (v0.7.13 P-1 sweep): the signalfds are opened BEFORE epoll_create, and
+    # opening one SIG_BLOCKs its signals. If epoll_create fails — reproduced at
+    # `ulimit -n 5` with EMFILE — we fall through to the degraded blocking-stdin
+    # loop while HUP/INT/TERM stay blocked for the whole session, with nothing
+    # draining the signalfd. The result was a process that ignored `kill`
+    # entirely: only SIGKILL ended it, and it left the terminal raw and in the
+    # alt-screen. Unblock and close them, so the degraded path runs with normal
+    # signal disposition and Ctrl-C/kill work again.
+    if (epfd < 0) {
+        if (sfd_exit >= 0) {
+            tty_close_signalfd(sfd_exit, TTY_SIGMASK_EXIT);
+            sfd_exit = 0 - 1;
+            _tui_sfd_exit = 0 - 1;
+        }
+        if (sfd_winch >= 0) {
+            tty_close_signalfd(sfd_winch, TTY_SIGMASK_WINCH);
+            sfd_winch = 0 - 1;
         }
     }
 

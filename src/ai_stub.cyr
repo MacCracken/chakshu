@@ -27,7 +27,30 @@ fn ai_tui_explain(pid) {
     syscall(1, 1, m1, strlen(m1));
     syscall(1, 1, m2, strlen(m2));
     syscall(1, 1, m3, strlen(m3));
-    var kb[4];
-    syscall(0, 0, &kb, 1);
+    return _ai_stub_wait_key();
+}
+
+# R14 (v0.7.13): wait for a key OR an exit signal. A bare read(0,..,1) here left
+# `kill` inert for as long as the overlay was open, because the TUI's signalfd
+# has HUP/INT/TERM blocked and nothing drains it while we sit in read().
+# Returns 1 if an exit signal arrived (caller should unwind), 0 on a keypress.
+fn _ai_stub_wait_key() {
+    if (_tui_sfd_exit < 0) {
+        # Degraded launch: no signalfd, signals have normal disposition, so a
+        # plain blocking read is already interruptible.
+        var kb0[4];
+        syscall(0, 0, &kb0, 1);
+        return 0;
+    }
+    var pfd[16];
+    store64(&pfd,     4294967296);                          # { fd=0,  events=POLLIN }
+    store64(&pfd + 8, _tui_sfd_exit + 4294967296);          # { fd=sfd, events=POLLIN }
+    var r = syscall(7, &pfd, 2, 0 - 1);                     # poll(fds, 2, timeout=-1)
+    if (r > 0) {
+        # revents live in the high 16 bits of each 8-byte pollfd.
+        if (load16(&pfd + 8 + 6) != 0) { return 1; }        # signal arrived
+        var kb[4];
+        syscall(0, 0, &kb, 1);
+    }
     return 0;
 }

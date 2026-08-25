@@ -30,7 +30,7 @@ test = "tests/chakshu-ai.tcyr"
 stdlib = [
     "syscalls", "alloc", "fmt", "io", "fs", "str", "string", "slice", "vec",
     "args", "chrono", "hashmap", "process", "tagged", "assert", "sys",
-    "fnptr", "thread", "freelist", "ct", "bayan", "bench",
+    "fnptr", "thread", "freelist", "ct", "bench",
     "unicode",
     "async", "atomic", "regression", "mmap", "dynlib", "fdlopen",
     "net", "http", "tls", "ws", "sakshi", "sigil", "keccak", "thread_local",
@@ -52,7 +52,7 @@ modules = ["dist/darshana.cyr"]
 # clamps ai-hwaccel's detect logging to SK_WARN. See root cyrius.cyml.
 [deps.mihi]
 git = "https://github.com/MacCracken/mihi.git"
-tag = "1.2.4"
+tag = "1.2.5"
 modules = ["dist/mihi.cyr"]
 
 # ai-hwaccel — tracks mihi's transitive pin, NOT ai-hwaccel's latest. mihi 1.2.4
@@ -62,7 +62,7 @@ modules = ["dist/mihi.cyr"]
 # rationale and the list of renamed symbols chakshu does not reference.
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel.git"
-tag = "2.3.18"
+tag = "2.3.19"
 modules = ["dist/ai-hwaccel.cyr"]
 
 # niyama — re2 redaction engine (AI-only; design-spec §6.2). Git dep here,
@@ -86,3 +86,13 @@ modules = ["dist/ai-hwaccel.cyr"]
 git = "https://github.com/MacCracken/niyama.git"
 tag = "1.0.7"
 modules = ["dist/niyama.cyr"]
+
+# bayan — the AI chain's ws/sigil/tls modules call functions carved into bayan,
+# so the resolver pulls the monolith regardless. Declaring it DIRECTLY here (at
+# the full bundle, not a sublib) overrides ai-hwaccel's transitive
+# `[deps.bayan] modules = ["dist/bayan-json.cyr"]`, so exactly one bayan lands
+# instead of monolith + sublib with duplicate symbols.
+[deps.bayan]
+git = "https://github.com/MacCracken/bayan.git"
+tag = "1.5.2"
+modules = ["dist/bayan.cyr"]

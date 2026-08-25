@@ -98,6 +98,21 @@ fn main() {
     assert_eq(proc_meminfo_field(mi, "Buffers:"),          2664, "Buffers parsed (single-digit-leading)");
     assert_eq(proc_meminfo_field(mi, "SwapTotal:"),           0, "missing key returns 0 sentinel");
 
+    # R10 regression (v0.7.13 P-1 sweep) — the lookup must be LINE-ANCHORED.
+    # /proc/<pid>/status's first line is "Name:\t<comm>", and comm is
+    # attacker-controlled via prctl(PR_SET_NAME). With an unanchored strstr, a
+    # process named "Uid:0" plants a matching substring at offset 6 that wins
+    # over the real "Uid:" line at offset 98 — so chakshu reported an
+    # unprivileged process as uid 0, in the focus panel AND in the prompt sent
+    # to hoosh. Reproduced against a live prctl-renamed process during the sweep.
+    var spoof = "Name:\tUid:0\nUmask:\t0022\nState:\tS (sleeping)\nPPid:\t42\nUid:\t1000\t1000\t1000\t1000\nThreads:\t7\n";
+    assert_eq(proc_meminfo_field(spoof, "Uid:"),     1000, "Uid: read from its own line, not a spoofed comm");
+    assert_eq(proc_meminfo_field(spoof, "PPid:"),      42, "PPid: still parsed correctly alongside the spoof");
+    assert_eq(proc_meminfo_field(spoof, "Threads:"),    7, "Threads: still parsed correctly alongside the spoof");
+    # A key that only ever appears mid-line must NOT match.
+    var midline = "Name:\tSwapTotal:9999\nUid:\t1000\n";
+    assert_eq(proc_meminfo_field(midline, "SwapTotal:"), 0, "mid-line occurrence does not match");
+
     test_group("proc.cyr — uptime");
     assert_eq(proc_uptime_secs("3413.71 53493.88\n"), 3413, "fractional seconds truncated");
     assert_eq(proc_uptime_secs("0.05 0.10\n"),           0, "sub-second uptime → 0");

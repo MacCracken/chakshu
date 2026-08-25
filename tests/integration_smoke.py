@@ -145,6 +145,61 @@ def expect_rc(label, rc, want, failures):
         failures.append(label)
 
 
+def _overlay_signal_exits(shu_path):
+    """Open the `?` overlay, send SIGTERM, and report whether the process
+    exited on its own. Gates on the alt-screen escape so it does not race
+    startup. Returns True if SIGTERM was honoured."""
+    import signal
+
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execv(shu_path, [shu_path])
+        os._exit(1)
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+    buf = b""
+    deadline = time.time() + 5.0
+    while b"\x1b[?1049h" not in buf and time.time() < deadline:
+        try:
+            buf += os.read(fd, 65536)
+        except (BlockingIOError, OSError):
+            time.sleep(0.05)
+    time.sleep(0.5)
+    try:
+        os.write(fd, b"?")
+    except OSError:
+        pass
+    time.sleep(0.8)
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    died = False
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
+        try:
+            w, _ = os.waitpid(pid, os.WNOHANG)
+            if w == pid:
+                died = True
+                break
+        except (ChildProcessError, OSError):
+            died = True
+            break
+        time.sleep(0.1)
+    if not died:
+        try:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+        except (ProcessLookupError, ChildProcessError, OSError):
+            pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    return died
+
+
 def _kill_scenario(shu_path, burst):
     """Drive `shu --pid <victim>` and answer the kill confirm.
 
@@ -304,9 +359,27 @@ def main():
     else:
         passed("human-paced k,y killed the target")
 
+    # ---------------- 10: '?' overlay closes on a keypress ----------------
+    print("[10] '?' overlay opens and closes on a key")
+    out, rc = drive([b"?", b"x", b"q"], shu_path=shu)
+    expect_rc("? + key + q exits 0", rc, 0, failures)
+
+    # ---------------- 11: signal reaches the '?' overlay (R14) ----------
+    # v0.7.13 P-1 sweep. The overlay used to park in a bare read(0,..,1) while
+    # the TUI's signalfd had HUP/INT/TERM SIG_BLOCKed and nothing drained it,
+    # so `kill` was completely inert for as long as the overlay was open — the
+    # process looked hung and only SIGKILL ended it. Verified against the
+    # pre-fix binary, which ignored SIGTERM here.
+    print("[11] SIGTERM reaches the '?' overlay")
+    if _overlay_signal_exits(shu):
+        passed("SIGTERM with '?' open tears down cleanly")
+    else:
+        fail("SIGTERM ignored while '?' overlay open", "")
+        failures.append("SIGTERM ignored while '?' overlay open")
+
     # ---------------- summary ----------------
     print()
-    total = 9
+    total = 11
     if failures:
         print(f"PTY smoke: FAIL ({len(failures)} of {total} tests)")
         for f in failures:

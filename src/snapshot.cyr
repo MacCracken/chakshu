@@ -197,20 +197,36 @@ fn snapshot_print(sort_key, top_n) {
     var mem_used_mib  = (mem_total_b - mem_avail_b) / 1048576;
     var mem_total_mib = mem_total_b / 1048576;
 
+    # R16 (v0.7.13): mihi_mem_free() returns -1 when /proc/meminfo is
+    # unreadable (and pre-3.14 kernels have no MemAvailable at all). Unguarded,
+    # `mem_total_b - (-1)` renders "61192 MiB used / 61192 MiB total" — a
+    # fully-consumed machine — with exit 0 and empty stderr. Degraded field, not
+    # a fatal error: same posture as the uptime and core-count sentinels.
+    var mem_ok = 0;
+    if (mem_total_b > 0) { if (mem_avail_b >= 0) { mem_ok = 1; } }
+
     syscall(1, 1, "mem:  ", 6);
-    print_num(mem_used_mib);
-    syscall(1, 1, " MiB used / ", 12);
-    print_num(mem_total_mib);
-    syscall(1, 1, " MiB total\n", 11);
+    if (mem_ok == 1) {
+        print_num(mem_used_mib);
+        syscall(1, 1, " MiB used / ", 12);
+        print_num(mem_total_mib);
+        syscall(1, 1, " MiB total\n", 11);
+    } else {
+        syscall(1, 1, "unavailable\n", 12);
+    }
 
     # Line 3: cpu + disk + net (delta-based) ---------------------------
     # Sample 1
-    var sb1[8192];
-    var db1[8192];
-    var nb1[8192];
-    var s1n = proc_read("/proc/stat",      &sb1, 8192);
-    var d1n = proc_read("/proc/diskstats", &db1, 8192);
-    var n1n = proc_read("/proc/net/dev",   &nb1, 8192);
+    # R7c (v0.7.13): 64 KiB heap scratch, allocated once, instead of 8 KiB
+    # stack locals — /proc/net/dev and /proc/stat both overflow 8 KiB on hosts
+    # with many interfaces or many cores, and the overflow was silent.
+    proc_truncated_reset();
+    var sb1 = proc_scratch(0);
+    var db1 = proc_scratch(1);
+    var nb1 = proc_scratch(2);
+    var s1n = proc_read("/proc/stat",      sb1, PROC_BUF_CAP);
+    var d1n = proc_read("/proc/diskstats", db1, PROC_BUF_CAP);
+    var n1n = proc_read("/proc/net/dev",   nb1, PROC_BUF_CAP);
     if (s1n < 0) { eprint("chakshu: cannot read /proc/stat\n", 32);      return EXIT_ERR; }
     if (d1n < 0) { eprint("chakshu: cannot read /proc/diskstats\n", 37); return EXIT_ERR; }
     if (n1n < 0) { eprint("chakshu: cannot read /proc/net/dev\n", 35);   return EXIT_ERR; }
@@ -221,10 +237,10 @@ fn snapshot_print(sort_key, top_n) {
     var sec_w1 = 0;
     var rx1 = 0;
     var tx1 = 0;
-    proc_stat_cpu_agg (&sb1, &cpu_active1, &cpu_total1);
-    proc_diskstats_agg(&db1, d1n, &sec_r1, &sec_w1);
-    proc_netdev_agg   (&nb1, n1n, &rx1, &tx1);
-    var ncores = proc_stat_ncores(&sb1, s1n);
+    proc_stat_cpu_agg (sb1, &cpu_active1, &cpu_total1);
+    proc_diskstats_agg(db1, d1n, &sec_r1, &sec_w1);
+    proc_netdev_agg   (nb1, n1n, &rx1, &tx1);
+    var ncores = proc_stat_ncores(sb1, s1n);
 
     # Slice C — sample 1 of /proc/[pid]/stat (utime+stime per pid).
     # Same 100ms window as the aggregate cpu/disk/net sampling, so the
@@ -234,9 +250,9 @@ fn snapshot_print(sort_key, top_n) {
     sleep_ms(SNAP_SAMPLE_MS);
 
     # Sample 2 (reuse the same buffers — sample 1's parsed ints are safe)
-    var s2n = proc_read("/proc/stat",      &sb1, 8192);
-    var d2n = proc_read("/proc/diskstats", &db1, 8192);
-    var n2n = proc_read("/proc/net/dev",   &nb1, 8192);
+    var s2n = proc_read("/proc/stat",      sb1, PROC_BUF_CAP);
+    var d2n = proc_read("/proc/diskstats", db1, PROC_BUF_CAP);
+    var n2n = proc_read("/proc/net/dev",   nb1, PROC_BUF_CAP);
     # R22 (v0.7.13): these three hand-counted lengths were each one short (42/47/45
     # vs 43/48/46), silently truncating the trailing newline off the diagnostic —
     # a design-spec §9 violation, and the same hand-counting trap cli.cyr already
@@ -251,9 +267,9 @@ fn snapshot_print(sort_key, top_n) {
     var sec_w2 = 0;
     var rx2 = 0;
     var tx2 = 0;
-    proc_stat_cpu_agg (&sb1, &cpu_active2, &cpu_total2);
-    proc_diskstats_agg(&db1, d2n, &sec_r2, &sec_w2);
-    proc_netdev_agg   (&nb1, n2n, &rx2, &tx2);
+    proc_stat_cpu_agg (sb1, &cpu_active2, &cpu_total2);
+    proc_diskstats_agg(db1, d2n, &sec_r2, &sec_w2);
+    proc_netdev_agg   (nb1, n2n, &rx2, &tx2);
 
     # CPU% = 100 * active_delta / total_delta. Guard div-by-zero on the
     # off-chance both samples capture the exact same tick (USER_HZ is
