@@ -68,11 +68,32 @@ links a sandhi that *can* `dlopen` libc, so it remains not-a-pure-no-libc binary
 the lean `shu` remains pure — but that is a property, not a blocker, and no fallback
 client is warranted.
 
+### Fixed — the release-blocking smoke assertion (0.8.1 and 0.8.2 both failed on this)
+
+`scripts/smoke.sh` asserted `--with-logs` exits **2**. That is true only of the lean
+`shu`, which refuses the flag. `shu-ai` **accepts** it, falls through to the default
+TUI mode, and exits **1** on the non-TTY guard — also correct.
+
+`release.yml` drives that script over **both** binaries (`build/shu`, then
+`build/shu-ai` from inside `ai/`), while `ci.yml` only ever ran it against the lean
+one. So an assertion true for `shu` and false for `shu-ai` could not fail until a tag
+had already been pushed — which is exactly what happened to 0.8.1 and again to 0.8.2.
+
+- The assertion is now **build-aware**: it dispatches on the stderr message
+  ("needs the AI build" → expect 2; "not a TTY" → expect 1) and fails loudly if it
+  matches neither, rather than hardcoding one binary's exit code.
+- **`ci.yml` now runs `scripts/smoke.sh build/shu-ai` too**, mirroring release.
+  Whatever release runs, CI runs first. Verified parity across all five gates:
+  smoke-on-`shu`, smoke-on-`shu-ai`, PTY, with-logs, hoosh-stub — CI is now a
+  superset of release.
+
 ### Verified
 
 - Lean `shu`: **116/116**, smoke **PASS**, PTY **12/12**, DCE parity PASS, fmt clean,
   lint 0 non-cosmetic.
 - AI `shu-ai`: **39/39** (was 30), with-logs smoke **PASS**, **hoosh-stub smoke PASS**.
+- **Release run simulated locally**: both binaries built with `CYRIUS_DCE=1` exactly as
+  `release.yml` does, and `scripts/smoke.sh` passed against **each** of them.
 
 ## [0.8.1] — 2026-08-24 — `--with-logs`: log + anomaly context in AI prompts
 

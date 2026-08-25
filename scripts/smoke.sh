@@ -68,19 +68,31 @@ grep -q "unknown flag" "$TMPDIR/err"           || fail "--bogus stderr missing '
 [ ! -s "$TMPDIR/out" ]                         || fail "--bogus wrote to stdout (should be stderr-only)"
 pass "unknown flag → exit 2, stderr only"
 
-# AI-only modifier on a build with no AI → EXIT_USAGE (2), stderr message.
-# --watch became a real mode at v0.8.0 and --with-logs at v0.8.1, so there is no
-# "unimplemented flag" left to test here. The lean build must REFUSE
-# --with-logs rather than accept a flag that cannot do anything: it assembles no
-# prompts at all.
+# --with-logs is an AI-only MODIFIER, and this script runs against BOTH
+# binaries (release.yml drives it over build/shu and, separately, build/shu-ai),
+# so the assertion has to be build-aware rather than hardcode one exit code:
+#
+#   lean `shu`   → refuses it outright: exit 2, "needs the AI build".
+#   `shu-ai`     → accepts it, then falls through to the default TUI mode and
+#                  hits the non-TTY guard: exit 1, "not a TTY".
+#
+# Both are correct; asserting only the lean code is what broke the 0.8.1 and
+# 0.8.2 release runs while CI stayed green — CI only ran this script against the
+# lean binary, so the shu-ai path was never exercised until release.
 set +e
 "$BIN" --with-logs >"$TMPDIR/out" 2>"$TMPDIR/err"
 rc=$?
 set -e
-[ "$rc" -eq 2 ]                                || fail "--with-logs exit was $rc, want 2"
 [ ! -s "$TMPDIR/out" ]                         || fail "--with-logs wrote to stdout"
-grep -q "needs the AI build" "$TMPDIR/err"     || fail "--with-logs stderr missing 'needs the AI build'"
-pass "lean --with-logs → exit 2, stderr only"
+if grep -q "needs the AI build" "$TMPDIR/err"; then
+    [ "$rc" -eq 2 ]                            || fail "lean --with-logs exit was $rc, want 2"
+    pass "lean --with-logs → exit 2, stderr only"
+elif grep -q "not a TTY" "$TMPDIR/err"; then
+    [ "$rc" -eq 1 ]                            || fail "shu-ai --with-logs exit was $rc, want 1"
+    pass "shu-ai --with-logs accepted → falls through to TUI, exit 1"
+else
+    fail "--with-logs stderr matched neither build's expected message: $(head -1 "$TMPDIR/err")"
+fi
 
 # ============================================================
 # v0.8.0 — --watch anomaly stream

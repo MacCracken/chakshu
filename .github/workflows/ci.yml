@@ -134,6 +134,16 @@ jobs:
           cyrius build main.cyr build/shu-ai
           xxd -l 4 build/shu-ai | grep -q "7f45 4c46"
           cyrius test tests/chakshu-ai.tcyr
+          # Run the SAME smoke script against shu-ai that release.yml does.
+          #
+          # Added at v0.8.2 after this exact gap broke two release runs while CI
+          # stayed green: release.yml drives scripts/smoke.sh over BOTH binaries
+          # (build/shu, then build/shu-ai), but CI only ever ran it against the
+          # lean one. Any assertion that is true for `shu` and false for
+          # `shu-ai` — e.g. `--with-logs`, which lean refuses and shu-ai accepts
+          # — therefore could not fail until a tag was already pushed.
+          # Whatever release runs, CI must run first.
+          bash ../scripts/smoke.sh build/shu-ai
 
       - name: with-logs privacy smoke (shu-ai)
         # v0.8.1. --with-logs widens what reaches an AI prompt, so it is exactly
