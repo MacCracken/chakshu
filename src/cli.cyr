@@ -7,7 +7,7 @@
 # logic lives here once. `ai_explain` resolves to whichever is included.
 
 # Keep CHAKSHU_VERSION in sync with the VERSION file.
-var CHAKSHU_VERSION = "chakshu 0.8.0";
+var CHAKSHU_VERSION = "chakshu 0.8.1";
 
 # Exit codes per design-spec §9
 var EXIT_OK    = 0;
@@ -42,7 +42,9 @@ fn print_help() {
     println("                            then $CHAKSHU_WATCH_PATH, then");
     println("                            /var/log/aegis/events.jsonl. Non-TTY prints a");
     println("                            plain dump; a TTY gets the live panel.");
-    println("  --with-logs               Allow AI prompts to include sakshi log context (0.8.1)");
+    println("  --with-logs               Fold recent log + anomaly context into AI prompts");
+    println("                            (shu-ai only; off by default). Log path:");
+    println("                            $CHAKSHU_LOG_PATH, else /var/log/aegis/aegis.log.");
     println("  -h, --help                Show this help");
     println("  -V, --version             Show version");
     println("");
@@ -87,6 +89,27 @@ fn chakshu_main() {
     args_init();
 
     var n = argc();
+
+    # v0.8.1: --with-logs is resolved in a PRE-SCAN, before the main arg loop.
+    # It has to be: `--explain` returns from inside that loop, so a modifier
+    # applied at dispatch time would never reach it — `shu-ai --explain 1
+    # --with-logs` would silently drop the flag. Pre-scanning also makes the
+    # modifier order-independent, so `--with-logs --explain 1` and
+    # `--explain 1 --with-logs` behave identically. (This is the same
+    # early-return trap that made `-p --watch` drop the -p before v0.8.0.)
+    var wl = 0;
+    var wi = 1;
+    while (wi < n) {
+        if (streq(argv(wi), "--with-logs") == 1) { wl = 1; }
+        wi = wi + 1;
+    }
+    if (wl == 1) {
+        if (ai_set_with_logs(1) != 0) {
+            eprintln("chakshu: --with-logs needs the AI build.");
+            eprintln("chakshu: run `shu-ai` for --explain / ? with log context.");
+            return EXIT_USAGE;
+        }
+    }
 
     # Bare `shu` (no args) falls through to the dispatch at the
     # bottom — the args loop just doesn't iterate, no mode flag gets
@@ -271,16 +294,17 @@ fn chakshu_main() {
             continue;
         }
 
-        # Recognized flags that are not yet implemented — emit a
-        # clear placeholder rather than a generic "unknown flag".
-        if (streq(a, "--with-logs") == 1) { return print_unimplemented("--with-logs"); }
+        # Already applied by the pre-scan above; just consume it here so it is
+        # not mistaken for an unknown flag.
+        if (streq(a, "--with-logs") == 1) { i = i + 1; continue; }
 
         return print_unknown_flag(a);
     }
 
-    # Dispatch. Mode precedence: help > version > -p > default-help.
+    # Dispatch. Mode precedence: help > version > watch > -p > default-help.
     if (mode_help    == 1) { return print_help(); }
     if (mode_version == 1) { return print_version(); }
+
     # R24 (v0.7.13): --pid is TUI-only, but `-p --pid N` used to discard it
     # silently — while a *bad* pid still exited 1 via the parse-time probe, so the
     # flag was half-honoured. Reject the combination explicitly instead.

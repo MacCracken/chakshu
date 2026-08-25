@@ -9,6 +9,11 @@
 include "lib/ai-hwaccel.cyr"
 include "lib/mihi.cyr"
 include "lib/niyama.cyr"
+# v0.8.1: ai.cyr's --with-logs context reads the anomaly ring, so the suite
+# needs watch.cyr in scope. It is the transport-free half of the watch module
+# (the TUI-dependent render lives in watch_render.cyr), so including it here
+# costs no TUI dependency.
+include "../src/watch.cyr"
 include "../src/proc.cyr"
 include "../src/processes.cyr"
 include "../src/ai.cyr"
@@ -99,6 +104,43 @@ fn main() {
     var u8 = "myapp --keyring-path /etc/app --port 8080";
     ai_redact_cmdline(u8, strlen(u8), &rbuf, 256);
     assert_eq(streq(&rbuf, "myapp --keyring-path *** --port 8080"), 1, "lookback fires once, next flag pair intact");
+
+    # ----- --with-logs context (v0.8.1) -------------------------------
+    # The opt-in must be genuinely OFF by default: a prompt built without it
+    # must carry no anomaly section even when the ring has events. This is the
+    # privacy-critical half — an opt-in that leaks when unset is worse than no
+    # opt-in, because the user believes it is off.
+    test_group("ai.cyr — --with-logs opt-in");
+    watch_reset();
+    watch_ingest_line("{\"timestamp\":\"2026-08-25T04:00:00Z\",\"event_type\":\"SandboxEscape\",\"threat_level\":\"Critical\",\"description\":\"escape attempt\"}");
+    assert_eq(watch_count(), 1, "ring seeded for the opt-in test");
+
+    ai_set_with_logs(0);
+    var pbuf_off[2048];
+    ai_build_prompt(&pbuf_off, 2048, 1234, "nginx", 83, 1, 33, 4096, "--token=***", "load 0.1 0.2 0.3  mem 100/200 MiB");
+    assert_eq(strstr(&pbuf_off, "recent anomalies"), 0 - 1, "no anomaly section when opt-in is off");
+    assert_eq(strstr(&pbuf_off, "escape attempt"), 0 - 1, "no event text leaks when opt-in is off");
+
+    ai_set_with_logs(1);
+    var pbuf_on[2048];
+    ai_build_prompt(&pbuf_on, 2048, 1234, "nginx", 83, 1, 33, 4096, "--token=***", "load 0.1 0.2 0.3  mem 100/200 MiB");
+    assert(strstr(&pbuf_on, "recent anomalies") >= 0, "anomaly section present when opt-in is on");
+    assert(strstr(&pbuf_on, "escape attempt") >= 0, "event text reaches the prompt when opted in");
+    assert(strstr(&pbuf_on, "CRIT") >= 0, "severity label reaches the prompt");
+    assert(strstr(&pbuf_on, "process: nginx") >= 0, "process facts still present alongside the context");
+
+    # A secret inside a daemon-authored event must be redacted on the way into
+    # the prompt — the event text is NOT trusted just because it came from a
+    # local daemon.
+    watch_reset();
+    watch_ingest_line("{\"event_type\":\"PolicyViolation\",\"threat_level\":\"Low\",\"description\":\"spawned psql --password hunter2\"}");
+    var pbuf_red[2048];
+    ai_build_prompt(&pbuf_red, 2048, 1, "x", 83, 1, 0, 0, "-", "-");
+    assert_eq(strstr(&pbuf_red, "hunter2"), 0 - 1, "secret in an event is redacted before the prompt");
+    assert(strstr(&pbuf_red, "psql") >= 0, "surrounding event context survives redaction");
+
+    ai_set_with_logs(0);
+    watch_reset();
 
     test_group("ai.cyr — prompt assembly");
     var pbuf[2048];

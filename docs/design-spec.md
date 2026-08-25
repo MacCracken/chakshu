@@ -126,7 +126,7 @@ For "explain process N", the prompt includes:
 
 - Basic process metadata: name, pid, ppid, uid (resolved to username), state, start time, cpu%, mem%
 - The first 256 bytes of `/proc/[pid]/cmdline` with a redaction pass (drop anything matching common secret patterns: `--password=`, `--token=`, `*KEY*`, etc. — niyama-driven once M3 lands)
-- The last N lines from sakshi for that pid (if sakshi is running and the user has opted in via `--with-logs`)
+- Recent log context, if the user opted in via `--with-logs` (v0.8.1). **Not per-pid**: sakshi tags no line with a pid (its text target emits `[ts] [LEVEL] msg` and has zero pid references), so this is system-level recent log context plus the newest anomaly events. Every line is redacted exactly as cmdline is.
 - The current system snapshot: load avg, mem pressure, top 5 processes by cpu/mem
 
 Excluded: env vars, /home paths, file contents, network packets.
@@ -177,9 +177,12 @@ Path resolution: `--watch <path>` argument, then `$CHAKSHU_WATCH_PATH`, then
 `/var/log/aegis/events.jsonl`. Non-TTY renders a deterministic escape-free dump (the `-p`
 posture of §2.2); a TTY gets the live panel.
 
-- `--with-logs`: opt-in to fold the last N `sakshi` log lines for the focused pid into the
-  `--explain`/`?` prompt (§6.2). Off by default; privacy rules in §6.2 still apply. Still
-  pending — this one **does** land in `shu-ai`, since it feeds a prompt.
+- `--with-logs` (shipped v0.8.1, `shu-ai` only): opt-in to fold recent log lines and
+  recent anomaly events into the `--explain`/`?` prompt (§6.2). Off by default; every
+  line passes the same redactor as cmdline. **Corrected from the original wording**
+  ("last N sakshi lines *for that pid*"): sakshi carries no pid on a log line, so
+  per-pid attribution is impossible — this is system-level log context, plus the
+  per-event anomaly ring that `--watch` already maintains.
 
 
 ---

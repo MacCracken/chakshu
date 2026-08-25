@@ -68,15 +68,19 @@ grep -q "unknown flag" "$TMPDIR/err"           || fail "--bogus stderr missing '
 [ ! -s "$TMPDIR/out" ]                         || fail "--bogus wrote to stdout (should be stderr-only)"
 pass "unknown flag → exit 2, stderr only"
 
-# Recognized but unimplemented flag → EXIT_ERR (1), stderr message.
-# --watch became a real mode at v0.8.0; --with-logs is still the placeholder.
+# AI-only modifier on a build with no AI → EXIT_USAGE (2), stderr message.
+# --watch became a real mode at v0.8.0 and --with-logs at v0.8.1, so there is no
+# "unimplemented flag" left to test here. The lean build must REFUSE
+# --with-logs rather than accept a flag that cannot do anything: it assembles no
+# prompts at all.
 set +e
 "$BIN" --with-logs >"$TMPDIR/out" 2>"$TMPDIR/err"
 rc=$?
 set -e
-[ "$rc" -eq 1 ]                                || fail "--with-logs exit was $rc, want 1"
-grep -q "not implemented" "$TMPDIR/err"        || fail "--with-logs stderr missing 'not implemented'"
-pass "unimplemented flag → exit 1, stderr only"
+[ "$rc" -eq 2 ]                                || fail "--with-logs exit was $rc, want 2"
+[ ! -s "$TMPDIR/out" ]                         || fail "--with-logs wrote to stdout"
+grep -q "needs the AI build" "$TMPDIR/err"     || fail "--with-logs stderr missing 'needs the AI build'"
+pass "lean --with-logs → exit 2, stderr only"
 
 # ============================================================
 # v0.8.0 — --watch anomaly stream

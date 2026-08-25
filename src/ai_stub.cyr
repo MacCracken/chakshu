@@ -9,6 +9,14 @@
 # Keep this in signature-sync with the entry points cli.cyr / tui.cyr call:
 # only ai_explain(pid) is referenced from the shared CLI path today.
 
+# Lean-build peer of ai.cyr's ai_set_with_logs. Returns non-zero so the CLI can
+# refuse `--with-logs` outright rather than accepting a flag that could not
+# possibly do anything here — the lean build assembles no prompts at all.
+fn ai_set_with_logs(on) {
+    if (on == 1) { return 1; }
+    return 0;
+}
+
 fn ai_explain(pid) {
     eprintln("chakshu: AI explain is not in this build.");
     eprintln("chakshu: run the `shu-ai` build for --explain (hoosh-backed AI).");

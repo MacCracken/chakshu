@@ -329,7 +329,126 @@ fn ai_build_prompt(out, cap, pid, comm, state_ch, ppid, uid, rss_kb, redacted, s
     pos = _ai_app(out, pos, cap, "system:  ");
     pos = _ai_app(out, pos, cap, sysinfo);
     pos = _ai_app(out, pos, cap, "\n");
+    pos = _ai_append_log_context(out, pos, cap);
     store8(out + pos, 0);
+    return pos;
+}
+
+# --- `--with-logs` context (v0.8.1) -----------------------------------
+#
+# Off by default (design-spec §6.4: "opt-in"). When enabled, the prompt gains
+# two extra sections so the model can reason about what the machine was doing
+# around the process, not just the process itself.
+#
+# WHAT THE SPEC ASKED FOR, AND WHY THIS DIFFERS
+#
+# §6.2 says "the last N lines from sakshi FOR THAT PID". That is not
+# achievable: sakshi tags no line with a pid — its text target emits
+# "[<ts_ns>] [LEVEL] <message>" and contains zero pid/getpid references — and
+# each process writes its own log anyway. Rather than fake per-pid attribution
+# by string-matching the pid number (which collides with any number that
+# happens to match), this ships SYSTEM-level recent log context and says so.
+# The per-event half of the intent is served better by the anomaly ring below,
+# which chakshu already parses for `--watch` and which carries a real severity.
+#
+# PRIVACY
+#
+# Both sections are daemon-authored text that can quote paths, agent ids and
+# rule names, so every line goes through ai_redact_cmdline — the SAME widened
+# redactor `--explain` uses for cmdline (v0.7.13: case-folded, cross-token
+# lookback, JWT/AWS/URL-userinfo shapes). Adding a second, weaker path here
+# would quietly reopen the hole that sweep closed. Both are also hard-capped:
+# prompt space is a fixed 2048-byte buffer, and an unbounded log tail would
+# both blow it and inflate token cost.
+var AI_LOG_LINES   = 6;      # most recent log lines folded in
+var AI_ANOM_EVENTS = 3;      # most recent anomaly events folded in
+var _ai_with_logs  = 0;
+
+# Enable/disable the opt-in. Returns 0 — the lean stub returns non-zero so the
+# CLI can refuse `--with-logs` on a build that has no AI at all.
+fn ai_set_with_logs(on) {
+    _ai_with_logs = on;
+    return 0;
+}
+
+# Resolve the sakshi-format log path into `out`: $CHAKSHU_LOG_PATH, else the
+# default. Note _ai_env_or writes into a caller buffer and returns a LENGTH —
+# it does not return a string.
+fn _ai_log_path(out, cap) {
+    return _ai_env_or(out, cap, "CHAKSHU_LOG_PATH", "/var/log/aegis/aegis.log");
+}
+
+# Append the opt-in sections. Returns the new position; a no-op (and zero cost)
+# when --with-logs was not passed.
+fn _ai_append_log_context(out, pos, cap) {
+    if (_ai_with_logs == 0) { return pos; }
+
+    # --- anomalies, newest first, from the ring src/watch.cyr already fills ---
+    var an = watch_count();
+    if (an > AI_ANOM_EVENTS) { an = AI_ANOM_EVENTS; }
+    if (an > 0) {
+        pos = _ai_app(out, pos, cap, "\nrecent anomalies:\n");
+        var i = 0;
+        while (i < an) {
+            var red[256];
+            var raw = watch_text_at(i);
+            ai_redact_cmdline(raw, strlen(raw), &red, 256);
+            pos = _ai_app(out, pos, cap, "  [");
+            pos = _ai_app(out, pos, cap, watch_threat_label(watch_threat_at(i)));
+            pos = _ai_app(out, pos, cap, "] ");
+            pos = _ai_app(out, pos, cap, &red);
+            pos = _ai_app(out, pos, cap, "\n");
+            i = i + 1;
+        }
+    }
+
+    # --- recent system log lines (sakshi text format) ---
+    var lpath[512];
+    _ai_log_path(&lpath, 512);
+    var lbuf[8192];
+    var ln = file_read_all(&lpath, &lbuf, 8191);
+    if (ln <= 0) { return pos; }
+    store8(&lbuf + ln, 0);
+
+    # Walk back from the end to the start of the Nth-from-last line, so the
+    # tail is bounded without scanning the file twice.
+    var seen = 0;
+    var start = ln;
+    if (load8(&lbuf + ln - 1) == 10) { start = ln - 1; }
+    var k = start;
+    while (k > 0) {
+        if (load8(&lbuf + k - 1) == 10) {
+            seen = seen + 1;
+            if (seen >= AI_LOG_LINES) { break; }
+        }
+        k = k - 1;
+    }
+
+    pos = _ai_app(out, pos, cap, "\nrecent log:\n");
+    var lineb[256];
+    var red2[256];
+    while (k < ln) {
+        var e = k;
+        while (e < ln) {
+            if (load8(&lbuf + e) == 10) { break; }
+            e = e + 1;
+        }
+        var len = e - k;
+        if (len > 255) { len = 255; }
+        if (len > 0) {
+            var c = 0;
+            while (c < len) {
+                store8(&lineb + c, load8(&lbuf + k + c));
+                c = c + 1;
+            }
+            store8(&lineb + len, 0);
+            ai_redact_cmdline(&lineb, len, &red2, 256);
+            pos = _ai_app(out, pos, cap, "  ");
+            pos = _ai_app(out, pos, cap, &red2);
+            pos = _ai_app(out, pos, cap, "\n");
+        }
+        k = e + 1;
+    }
     return pos;
 }
 

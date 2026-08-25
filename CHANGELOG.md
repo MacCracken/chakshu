@@ -4,6 +4,91 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-08-24 — `--with-logs`: log + anomaly context in AI prompts
+
+Opt-in, off by default, `shu-ai` only. When set, `--explain` and the `?` overlay
+fold recent log lines and recent anomaly events into the prompt, so the model can
+reason about what the machine was doing around a process rather than only the
+process itself.
+
+### The spec asked for something sakshi cannot do
+
+design-spec §6.2 said "the last N lines from sakshi **for that pid**". That is not
+achievable and the spec now says so: sakshi tags no line with a pid — its text
+target emits `[<ts_ns>] [LEVEL] <message>` and contains **zero** pid/getpid
+references — and each process writes its own log anyway. Rather than fake per-pid
+attribution by string-matching the pid number (which collides with any number that
+happens to match), this ships **system-level** recent log context and labels it
+honestly. The per-event half of the intent is served better by the anomaly ring,
+which is genuinely per-event and carries a real severity.
+
+### Added
+
+- **`--with-logs`** — a *modifier*, not a mode. Adds two sections to the prompt:
+  - `recent anomalies:` — the newest 3 events from the same ring `--watch` renders
+    (v0.8.0), each with its severity label.
+  - `recent log:` — the newest 6 lines of a sakshi-format log. Path:
+    `$CHAKSHU_LOG_PATH`, else `/var/log/aegis/aegis.log`.
+- **`tests/with_logs_smoke.py`** — a **hard** CI gate (not `continue-on-error`).
+  It needs no gateway and no libc networking: with hoosh unreachable, `--explain`
+  prints the redacted context it *would* have sent, so the prompt is inspectable
+  offline. Asserts five secret shapes are stripped, that surrounding context
+  survives, and that the flag is genuinely off by default.
+
+### Privacy
+
+Both sections are daemon-authored text that can quote paths, agent ids and rule
+names, so **every line passes `ai_redact_cmdline`** — the same widened redactor
+`--explain` uses for cmdline (v0.7.13: case-folded, cross-token lookback,
+JWT/AWS-key/URL-userinfo shapes). Adding a second, weaker path here would have
+quietly reopened the hole that sweep closed. Both sections are hard-capped: the
+prompt is a fixed 2048-byte buffer and an unbounded tail would blow it and inflate
+token cost.
+
+Verified end-to-end: `--password=hunter2` → `--password=***`,
+`postgres://bob:s3cret@db.internal/app` → `postgres://bob:***@db.internal/app`,
+JWTs and `AKIA…` keys stripped by shape, `PASSWORD=` caught case-insensitively.
+
+**Known over-redaction, by design.** With the aggressive vocabulary chosen at
+v0.7.13, a bare secret-looking word (`token`, `auth`, `session`, …) arms a
+cross-token lookback that also redacts the *following* word — so
+`token rejected: <jwt>` renders as `token ***`, losing "rejected". That is the
+accepted trade from that cut (a redacted benign word costs prompt quality; a missed
+secret costs the secret), and the smoke test documents it rather than asserting the
+redactor is weaker than it is.
+
+### Fixed
+
+- **`--with-logs` after a mode flag was silently dropped.** `--explain` returns
+  from *inside* the arg loop, so a modifier applied at dispatch time never ran:
+  `shu-ai --explain 1 --with-logs` ignored the flag. The opt-in is now resolved in
+  a **pre-scan** before the main loop, which also makes it order-independent. This
+  is the same early-return trap that made `-p --watch` drop the `-p` before v0.8.0.
+- **A four-argument helper called with two arguments.** `_ai_env_or(out, cap, name,
+  fallback)` writes into a caller buffer and returns a *length*; it was called as
+  `_ai_env_or(name, fallback)`, so a string literal was used as the output buffer
+  with the fallback pointer as its capacity — an immediate **SIGSEGV** on every
+  `--with-logs` run. Caught by running the feature, not by the compiler.
+
+### Changed
+
+- **Lean `shu` refuses `--with-logs` with exit 2** rather than accepting a flag
+  that cannot do anything there — the lean build assembles no prompts at all.
+
+### Added — CI
+
+- **A format gate.** chakshu had none while its siblings did, and real drift had
+  accumulated unnoticed in `src/processes.cyr` and `src/tui.cyr` (both from the
+  v0.7.15 sampling rework). Now `cyrius fmt --check` runs over `src/`, `tests/`,
+  `ai/` and `ai/tests/`. Canonical continuation indent is 2 spaces per open paren —
+  *not* alignment to the open paren, which is the habit that produced the drift.
+
+### Verified
+
+- Lean `shu`: **116/116**, smoke **PASS**, PTY **12/12**, DCE parity PASS, lint 0
+  non-cosmetic, fmt clean.
+- AI `shu-ai`: **30/30** (was 21 — +9 opt-in assertions), with-logs smoke **PASS**.
+
 ## [0.8.0] — 2026-08-24 — `--watch`: the anomaly stream (closes M3)
 
 `shu --watch` tails aegis's security-event stream and renders it live. This closes

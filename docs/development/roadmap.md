@@ -5,7 +5,7 @@
 > [`state.md`](state.md). This file answers one question: *what is left to reach
 > v1.0, and in which release does it land?*
 >
-> **Current: v0.8.0.** | **Last Updated**: 2026-08-24
+> **Current: v0.8.1.** | **Last Updated**: 2026-08-24
 
 ---
 
@@ -19,7 +19,7 @@ inside it are additive or corrective only.
 | Release | Theme | Gate |
 |---|---|---|
 | ~~0.8.0~~ | ~~`--watch` anomaly stream~~ | **shipped 2026-08-24 — M3 closed.** Consumer in the lean `shu`; producer is aegis 1.1.7's NDJSON sink |
-| **0.8.1** | `--with-logs` sakshi context | Log lines reach the prompt, still redacted |
+| ~~0.8.1~~ | ~~`--with-logs` log + anomaly context~~ | **shipped 2026-08-24.** Per-pid attribution proved impossible (sakshi carries no pid); ships system-level context + the anomaly ring |
 | **0.8.2** | AI hardening + hoosh gate promotion | The stub smoke is a *hard* CI gate |
 | **0.9.0** | Perf + size close-out | §8 targets either met or formally revised |
 | **0.9.1** | GPU telemetry depth | Per-device stats beyond count/name/memory |
@@ -28,15 +28,6 @@ inside it are additive or corrective only.
 | **1.0.0** | Ship as the AGNOS default monitor | Registry promotion, ISO default, announce |
 
 ---
-
-## 0.8.1 — `--with-logs`
-
-- [ ] Opt-in sakshi log context in prompts.
-- [ ] Log lines pass the same niyama redaction as cmdline — do **not** add a
-      second, weaker path. The v0.7.13 sweep widened redaction to catch
-      space-separated values, JWTs, AWS key ids and URL userinfo; logs must
-      inherit that, not bypass it.
-- [ ] Cap the log volume that can enter a prompt (privacy + token cost).
 
 ## 0.8.2 — AI hardening
 

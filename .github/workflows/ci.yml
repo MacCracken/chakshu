@@ -49,6 +49,27 @@ jobs:
         # produced an actual Linux executable, not a partial output.
         run: xxd -l 4 build/shu | grep -q "7f45 4c46"
 
+      - name: Format check
+        # Added at v0.8.0. chakshu had no fmt gate while its siblings did, and
+        # real drift accumulated unnoticed in src/processes.cyr and src/tui.cyr
+        # — both from the v0.7.15 sampling rework, neither caught by anything.
+        #
+        # `cyrius fmt <file>` REWRITES IN PLACE and prints nothing; the
+        # non-mutating gate is `--check`, which exits non-zero and names the
+        # first differing line. (The older diff-against-stdout idiom reports
+        # every file as drifted under 6.5.x, because stdout is always empty.)
+        #
+        # Canonical continuation indent is 2 spaces per open paren (4 also
+        # accepted) — NOT alignment to the open paren, which is the habit that
+        # produced the drift this gate now catches.
+        run: |
+          fail=0
+          for f in src/*.cyr tests/*.tcyr ai/*.cyr ai/tests/*.tcyr; do
+            [ -f "$f" ] || continue
+            cyrius fmt --check "$f" || fail=1
+          done
+          [ $fail -eq 0 ] || { echo "fmt: drift detected"; exit 1; }
+
       - name: Lint
         # Every src file clean; the only tolerated warning is the
         # `exceeds 120 characters` rule on comment-divider lines
@@ -113,6 +134,16 @@ jobs:
           cyrius build main.cyr build/shu-ai
           xxd -l 4 build/shu-ai | grep -q "7f45 4c46"
           cyrius test tests/chakshu-ai.tcyr
+
+      - name: with-logs privacy smoke (shu-ai)
+        # v0.8.1. --with-logs widens what reaches an AI prompt, so it is exactly
+        # the change that could reopen the redaction holes closed in v0.7.13 —
+        # and it would do so silently, because nothing else asserts on prompt
+        # CONTENTS. This is a hard gate, not continue-on-error: unlike the
+        # hoosh-stub smoke it needs no gateway and no libc networking, since the
+        # unreachable-gateway fallback prints the prompt that would have been
+        # sent.
+        run: python3 tests/with_logs_smoke.py ai/build/shu-ai
 
       - name: hoosh-stub smoke (shu-ai --explain end-to-end)
         # Stands up a tiny OpenAI-shaped gateway and runs `shu-ai --explain`
