@@ -4,6 +4,65 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-08-24 — theming, and `--color auto` that actually decides
+
+### Added — `--theme dark|light|auto`
+
+The light theme is not a re-skin. On a white ground exactly three of the eight ANSI
+attributes chakshu uses genuinely fail to read, and the monitor's job is conveying
+state at a glance:
+
+| role | dark | light | why |
+|---|---|---|---|
+| mid band (CPU/MEM warn, `D`/`T` state) | yellow `33` | magenta `35` | yellow on white is the classic low-contrast pair |
+| idle state (`I`, kernel threads) | cyan `36` | blue `34` | cyan washes out on white; blue holds |
+| pid column | dim `2` | normal `0` | grey-on-white is the least legible combination here |
+
+**Green and red are deliberately identical in both themes**, so the low and high
+ends of every band mean the same thing whichever you run. Bold is
+background-independent and also unchanged.
+
+Default stays **dark** — it is what shipped, and re-tinting an existing user's
+monitor on upgrade would be worse than making them ask for light.
+
+`--theme auto` reads `$COLORFGBG` (`"<fg>;<bg>"`, set by rxvt/konsole and some
+others) and treats background 7 or 9-15 as light. Where it is absent — which is
+most terminals — it stays dark rather than guessing, which is why the explicit
+override exists.
+
+### Fixed — `--color auto` was a synonym for `always`
+
+The flag parsed three values but only two behaved differently: in the TUI, `auto`
+and `always` were identical. A user with `NO_COLOR` set, or on `TERM=dumb`, got
+escapes anyway. `auto` now disables colour when any of these hold:
+
+- **`NO_COLOR` is set** — presence alone, whatever the value (no-color.org).
+- **`TERM` is unset, empty, or `dumb`**.
+- **stdout is not a terminal.** Note *stdout*, not stdin: `shu | less -R` leaves
+  stdin a TTY while the output is a pipe.
+
+`--color always` still forces colour on, which is the escape hatch when detection
+is wrong.
+
+### Note — `--color never` still emits reverse video
+
+The selected row is highlighted with `CSI 7m`/`CSI 0m`, and that stays on with
+colour disabled: it is the only way selection is visible on a monochrome terminal.
+The contract is *no colour*, not *no escapes*. `tests/MANUAL.md` said otherwise and
+has been corrected.
+
+### Verified
+
+- **PTY scenarios 13 and 14** assert this on the wire, which is what makes theming
+  checkable at all: light emits blue and no cyan, drops dim, and keeps green
+  identical to dark; `NO_COLOR` and `TERM=dumb` emit no colour attribute at all
+  while `--color always` overrides both.
+- Lean **130/130**, AI **39/39**, smoke PASS on both binaries, PTY **14/14**,
+  DCE parity PASS, fmt clean, lint 0 non-cosmetic.
+- Whether the light palette *reads better* is a judgement a byte-level test cannot
+  make, so it is listed in `tests/MANUAL.md` alongside the assertion that proves
+  the palette changed.
+
 ## [0.9.1] — 2026-08-24 — GPU telemetry depth: live busy%, VRAM and temperature
 
 The gpu line went from static identity to live readings:

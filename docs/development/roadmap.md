@@ -5,7 +5,7 @@
 > [`state.md`](state.md). This file answers one question: *what is left to reach
 > v1.0, and in which release does it land?*
 >
-> **Current: v0.9.1.** | **Last Updated**: 2026-08-24
+> **Current: v0.9.2.** | **Last Updated**: 2026-08-24
 
 ---
 
@@ -23,18 +23,13 @@ inside it are additive or corrective only.
 | ~~0.8.2~~ | ~~AI hardening + hoosh gate promotion~~ | **shipped 2026-08-24.** The blocker was a whitespace-intolerant JSON parse misreported as a transport error, not libc |
 | ~~0.9.0~~ | ~~Perf + size close-out~~ | **shipped 2026-08-24.** All §8 targets met; the size target formally revised 256 KB → 768 KB with the reason recorded |
 | ~~0.9.1~~ | ~~GPU telemetry depth~~ | **shipped 2026-08-24.** Live busy%/VRAM/temp from DRM sysfs, matched to devices by PCI id |
-| **0.9.2** | Theming + display polish | Dark/light configurable; no layout regressions |
+| ~~0.9.2~~ | ~~Theming + display polish~~ | **shipped 2026-08-24.** `--theme dark\|light\|auto`; `--color auto` now honours NO_COLOR/TERM/isatty instead of aliasing `always` |
 | **0.9.3** | AGNOS parity | `--agnos` TUI runs, not just `-p` |
 | **1.0.0** | Ship as the AGNOS default monitor | Registry promotion, ISO default, announce |
 
 ---
 
 ---
-
-## 0.9.2 — Theming + display polish
-
-- [ ] Dark / light themes, configurable.
-- [ ] Revisit `--color auto` (currently only always/never are meaningful).
 
 ## 0.9.3 — AGNOS parity
 

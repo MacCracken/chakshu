@@ -213,6 +213,34 @@ fn _tui_invert_off() { syscall(1, 1, "\x1b[0m", 4); return 0; }
 var _tui_color_enabled  = 1;
 var _tui_color_suppress = 0;
 
+# --- theme (v0.9.2) ---------------------------------------------------
+#
+# 0 = dark (default), 1 = light. The palette below is not decoration: on a
+# white background three of the eight ANSI colours are genuinely hard to read,
+# and the monitor's whole job is conveying state at a glance.
+#
+#   yellow (33) on white — the classic low-contrast pair; nearly invisible.
+#   cyan   (36) on white — washed out for the same reason.
+#   dim    (2)  on white — grey-on-white, the least legible combination here.
+#
+# So the light theme substitutes hues that hold contrast on a light ground
+# rather than merely "using different colours":
+#
+#   mid band   yellow 33 -> magenta 35   (readable; keeps low/mid/high distinct)
+#   idle state cyan   36 -> blue    34   (blue holds up on white, cyan does not)
+#   pid column dim    2  -> normal  0    (dim is what fails, not the hue)
+#
+# green (32) and red (31) are legible on both grounds and are deliberately
+# unchanged, so the low/high ends of every band mean the same thing in either
+# theme. Bold is background-independent and is also unchanged.
+var _tui_theme = 0;
+
+fn _tui_c_low()   { if (_tui_theme == 1) { return "\x1b[32m"; } return "\x1b[32m"; }
+fn _tui_c_mid()   { if (_tui_theme == 1) { return "\x1b[35m"; } return "\x1b[33m"; }
+fn _tui_c_high()  { if (_tui_theme == 1) { return "\x1b[31m"; } return "\x1b[31m"; }
+fn _tui_c_idle()  { if (_tui_theme == 1) { return "\x1b[34m"; } return "\x1b[36m"; }
+fn _tui_c_faint() { if (_tui_theme == 1) { return "\x1b[0m";  } return "\x1b[2m";  }
+
 # Emit a raw ANSI escape if color is on AND not suppressed. Single
 # choke point — keeps the apply sites readable (`_tui_color_red()`
 # rather than `if enabled && !suppress: write(...)` everywhere).
@@ -251,17 +279,17 @@ fn _tui_row_col(buf, pos, max, s) {
 }
 
 fn _tui_row_col_band(buf, pos, max, pct, low, mid) {
-    if (pct < low) { return _tui_row_col(buf, pos, max, "\x1b[32m"); }
-    if (pct < mid) { return _tui_row_col(buf, pos, max, "\x1b[33m"); }
-    return _tui_row_col(buf, pos, max, "\x1b[31m");
+    if (pct < low) { return _tui_row_col(buf, pos, max, _tui_c_low()); }
+    if (pct < mid) { return _tui_row_col(buf, pos, max, _tui_c_mid()); }
+    return _tui_row_col(buf, pos, max, _tui_c_high());
 }
 
 fn _tui_row_col_state(buf, pos, max, st) {
-    if (st == 82)  { return _tui_row_col(buf, pos, max, "\x1b[32m"); }   # R
-    if (st == 90)  { return _tui_row_col(buf, pos, max, "\x1b[31m"); }   # Z
-    if (st == 68)  { return _tui_row_col(buf, pos, max, "\x1b[33m"); }   # D
-    if (st == 84)  { return _tui_row_col(buf, pos, max, "\x1b[33m"); }   # T
-    if (st == 73)  { return _tui_row_col(buf, pos, max, "\x1b[36m"); }   # I
+    if (st == 82)  { return _tui_row_col(buf, pos, max, _tui_c_low());  }   # R running
+    if (st == 90)  { return _tui_row_col(buf, pos, max, _tui_c_high()); }   # Z zombie
+    if (st == 68)  { return _tui_row_col(buf, pos, max, _tui_c_mid());  }   # D uninterruptible
+    if (st == 84)  { return _tui_row_col(buf, pos, max, _tui_c_mid());  }   # T stopped
+    if (st == 73)  { return _tui_row_col(buf, pos, max, _tui_c_idle()); }   # I kernel idle
     return pos;
 }
 
@@ -282,6 +310,53 @@ fn _tui_row_pad(buf, pos, max, n, width) {
     return _tui_row_app(buf, pos, max, &digits);
 }
 
+# Decide colour for `--color auto`. Returns 1 to enable.
+# Apply the --theme selection. 0 dark, 1 light, 2 auto.
+fn tui_set_theme(mode) {
+    if (mode == 2) { _tui_theme = _tui_theme_auto(); }
+    else           { _tui_theme = mode; }
+    return 0;
+}
+
+fn _tui_color_auto() {
+    # NO_COLOR: presence alone disables, whatever the value.
+    if (getenv("NO_COLOR") != 0) { return 0; }
+
+    var term = getenv("TERM");
+    if (term == 0) { return 0; }
+    if (strlen(term) == 0) { return 0; }
+    if (streq(term, "dumb") == 1) { return 0; }
+
+    # stdout, not stdin: colour is about where the OUTPUT lands. `shu | less -R`
+    # keeps stdin a TTY while stdout is a pipe.
+    if (tty_isatty(1) == 0) { return 0; }
+    return 1;
+}
+
+# Resolve the theme for `--theme auto`. COLORFGBG is a de-facto convention
+# ("<fg>;<bg>", e.g. "15;0" light-on-dark, "0;15" dark-on-light) set by rxvt,
+# konsole and some others; where it is absent — which is most terminals — we
+# cannot know, and guessing wrong is worse than the status quo, so it stays
+# dark. That is why `--theme light` exists as an explicit override.
+fn _tui_theme_auto() {
+    var v = getenv("COLORFGBG");
+    if (v == 0) { return 0; }
+    var n = strlen(v);
+    if (n == 0) { return 0; }
+    # Read the LAST semicolon-separated field: the background.
+    var i = n;
+    while (i > 0) {
+        if (load8(v + i - 1) == 59) { break; }      # ';'
+        i = i - 1;
+    }
+    if (i >= n) { return 0; }
+    var bg = atoi(v + i);
+    # ANSI 0-6 and 8 are dark grounds; 7 and 9-15 are light.
+    if (bg == 7) { return 1; }
+    if (bg > 8)  { return 1; }
+    return 0;
+}
+
 fn _tui_color_emit(s) {
     if (_tui_color_enabled == 0) { return 0; }
     if (_tui_color_suppress == 1) { return 0; }
@@ -293,11 +368,11 @@ fn _tui_color_emit(s) {
 # render is structured so reset never fires inside reverse-video
 # regions (suppress flag), so we don't need a "fg-only reset" variant.
 fn _tui_color_red()    { _tui_color_emit("\x1b[31m"); return 0; }
-fn _tui_color_green()  { _tui_color_emit("\x1b[32m"); return 0; }
-fn _tui_color_yellow() { _tui_color_emit("\x1b[33m"); return 0; }
+fn _tui_color_green()  { _tui_color_emit(_tui_c_low());  return 0; }
+fn _tui_color_yellow() { _tui_color_emit(_tui_c_mid());  return 0; }
 fn _tui_color_blue()   { _tui_color_emit("\x1b[34m"); return 0; }
-fn _tui_color_cyan()   { _tui_color_emit("\x1b[36m"); return 0; }
-fn _tui_color_dim()    { _tui_color_emit("\x1b[2m");  return 0; }
+fn _tui_color_cyan()   { _tui_color_emit(_tui_c_idle()); return 0; }
+fn _tui_color_dim()    { _tui_color_emit(_tui_c_faint()); return 0; }
 fn _tui_color_bold()   { _tui_color_emit("\x1b[1m");  return 0; }
 fn _tui_color_reset()  { _tui_color_emit("\x1b[0m");  return 0; }
 
@@ -1103,7 +1178,7 @@ fn tui_render_table_frame() {
         # _tui_row_app above for why.
         var rowbuf[512];
         var rp = 0;
-        rp = _tui_row_col(&rowbuf, rp, 512, "\x1b[2m");
+        rp = _tui_row_col(&rowbuf, rp, 512, _tui_c_faint());
         rp = _tui_row_pad(&rowbuf, rp, 512, pid, 6);
         rp = _tui_row_col(&rowbuf, rp, 512, "\x1b[0m");
         rp = _tui_row_app(&rowbuf, rp, 512, " ");
@@ -1431,7 +1506,19 @@ fn tui_run(refresh_ms, sort_key, top_n, color_mode, focus_pid) {
     # Color: --color {auto, always} → enabled; never → disabled.
     # auto and always behave identically in TUI mode for now.
     _tui_color_enabled = 1;
+    # v0.9.2: `auto` now actually decides something. It used to be a synonym for
+    # `always` in the TUI — the flag parsed three values but only two behaved
+    # differently, so a user piping into a colour-blind consumer or running with
+    # NO_COLOR set got escapes anyway.
+    #
+    #   never  -> off
+    #   always -> on, unconditionally (the escape-hatch when detection is wrong)
+    #   auto   -> on unless something says otherwise:
+    #               NO_COLOR set (no-color.org convention: any value, even empty)
+    #               TERM unset, empty, or "dumb"
+    #               stdout is not a TTY
     if (color_mode == 0) { _tui_color_enabled = 0; }
+    if (color_mode == 1) { _tui_color_enabled = _tui_color_auto(); }
     _tui_color_suppress = 0;
 
     # --pid focus pid (0 = table mode). Validation happens in main.cyr;

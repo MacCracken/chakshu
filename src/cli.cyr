@@ -7,7 +7,7 @@
 # logic lives here once. `ai_explain` resolves to whichever is included.
 
 # Keep CHAKSHU_VERSION in sync with the VERSION file.
-var CHAKSHU_VERSION = "chakshu 0.9.1";
+var CHAKSHU_VERSION = "chakshu 0.9.2";
 
 # Exit codes per design-spec §9
 var EXIT_OK    = 0;
@@ -35,6 +35,11 @@ fn print_help() {
     println("  --top N                   Process-table row count (default 10)");
     println("  --rate <HZ>               TUI refresh rate (integer 1-10, default 1; fractional Hz later)");
     println("  --color <when>            auto | always | never (default auto; TUI only)");
+    println("                            auto honours $NO_COLOR, $TERM and whether");
+    println("                            stdout is a terminal.");
+    println("  --theme <name>            dark | light | auto (default dark; TUI only)");
+    println("                            light re-tints the colours that are unreadable");
+    println("                            on a white background; auto reads $COLORFGBG.");
     println("  --pid <PID>               Focus a single process (validates PID exists at startup)");
     println("  --explain <PID>           Ask hoosh to explain PID and exit (shu-ai build; redacted context)");
     println("  --watch [PATH]            Anomaly stream mode. Reads aegis's append-only");
@@ -132,6 +137,8 @@ fn chakshu_main() {
     # (TUI: on; plain: on — but plain mode currently ignores color
     # entirely per design-spec §2.2 deterministic-bytes rule).
     var color_mode  = 1;
+    # 0 = dark (default), 1 = light, 2 = auto (resolved in tui_run)
+    var theme_mode  = 0;
     # --pid N → 0 means default (table mode); else focus that pid.
     # Validation happens at flag-parse time below (must exist in /proc).
     var focus_pid   = 0;
@@ -209,6 +216,28 @@ fn chakshu_main() {
         # this entirely (deterministic bytes per design-spec §2.2);
         # TUI mode uses it to gate ANSI color escapes. "auto" currently
         # behaves as "always" in TUI mode — $TERM detection is M3 polish.
+        # --theme dark|light|auto (v0.9.2). Default dark: it is what shipped,
+        # and re-tinting an existing user's monitor on upgrade would be worse
+        # than making them ask for light.
+        if (streq(a, "--theme") == 1) {
+            if (i + 1 >= argc()) {
+                eprintln("chakshu: --theme requires a value (dark|light|auto)");
+                return EXIT_USAGE;
+            }
+            var tv = argv(i + 1);
+            if      (streq(tv, "dark")  == 1) { theme_mode = 0; }
+            elif    (streq(tv, "light") == 1) { theme_mode = 1; }
+            elif    (streq(tv, "auto")  == 1) { theme_mode = 2; }
+            else {
+                eprint_cstr("chakshu: --theme: unknown value '");
+                eprint_cstr(tv);
+                eprintln("' (want dark|light|auto)");
+                return EXIT_USAGE;
+            }
+            i = i + 2;
+            continue;
+        }
+
         if (streq(a, "--color") == 1) {
             if (i + 1 >= n) {
                 eprintln("chakshu: --color requires a value (auto|always|never)");
@@ -321,6 +350,7 @@ fn chakshu_main() {
             eprintln("chakshu: --watch cannot be combined with --pid");
             return EXIT_USAGE;
         }
+        tui_set_theme(theme_mode);
         return watch_run(_hz_to_ms(tui_rate_hz), color_mode, watch_path);
     }
 
@@ -335,6 +365,7 @@ fn chakshu_main() {
     # Default mode — launch the TUI. tui_run handles the not-a-TTY
     # case (stdin redirected) by exiting EXIT_ERR with a stderr
     # message pointing at `-p`.
+    tui_set_theme(theme_mode);
     return tui_run(_hz_to_ms(tui_rate_hz), sort_key, top_n, color_mode, focus_pid);
 }
 

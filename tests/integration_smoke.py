@@ -230,6 +230,48 @@ def _watch_scenario(shu_path):
     return (True, "")
 
 
+def _capture_escapes(shu_path, flags, env=None):
+    """Run the TUI briefly under a PTY and return the raw output, so a test can
+    assert on which SGR escapes actually reached the terminal."""
+    import signal
+
+    child_env = dict(os.environ)
+    child_env.setdefault("TERM", "xterm")
+    if env:
+        child_env.update(env)
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.environ.clear()
+        os.environ.update(child_env)
+        os.execv(shu_path, [shu_path] + flags + ["--rate", "2"])
+        os._exit(1)
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    flg = fcntl.fcntl(fd, fcntl.F_GETFL)
+    fcntl.fcntl(fd, fcntl.F_SETFL, flg | os.O_NONBLOCK)
+    buf = b""
+    deadline = time.time() + 2.5
+    while time.time() < deadline:
+        try:
+            buf += os.read(fd, 65536)
+        except (BlockingIOError, OSError):
+            time.sleep(0.05)
+    try:
+        os.write(fd, b"q")
+    except OSError:
+        pass
+    time.sleep(0.3)
+    try:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+    except (ProcessLookupError, ChildProcessError, OSError):
+        pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    return buf.decode("latin1")
+
+
 def _overlay_signal_exits(shu_path):
     """Open the `?` overlay, send SIGTERM, and report whether the process
     exited on its own. Gates on the alt-screen escape so it does not race
@@ -475,9 +517,58 @@ def main():
         fail("--watch panel", why)
         failures.append(f"--watch panel: {why}")
 
+    # ---------------- 13: --theme changes the palette ----------------
+    # v0.9.2. The light theme is not cosmetic: on a white ground, yellow, cyan
+    # and dim are the three ANSI attributes that genuinely fail to read, so
+    # light substitutes magenta, blue and normal-weight. Asserting on the WIRE
+    # is what makes this checkable — whether it looks better is in MANUAL.md.
+    print("[13] --theme light re-tints the unreadable colours")
+    dark = _capture_escapes(shu, [])
+    light = _capture_escapes(shu, ["--theme", "light"])
+    ok = True
+    why = []
+    if "\x1b[36m" not in dark:
+        ok = False; why.append("dark theme lost cyan (idle state)")
+    if "\x1b[36m" in light:
+        ok = False; why.append("light theme still emits cyan")
+    if "\x1b[34m" not in light:
+        ok = False; why.append("light theme missing blue substitute")
+    if "\x1b[2m" not in dark:
+        ok = False; why.append("dark theme lost dim (pid column)")
+    if "\x1b[2m" in light:
+        ok = False; why.append("light theme still emits dim")
+    if "\x1b[32m" not in dark or "\x1b[32m" not in light:
+        ok = False; why.append("green should be identical in both themes")
+    if ok:
+        passed("light theme swaps cyan->blue and drops dim; green unchanged")
+    else:
+        fail("--theme light", "; ".join(why))
+        failures.append("--theme light: " + "; ".join(why))
+
+    # ---------------- 14: --color auto actually decides ----------------
+    # It used to be a synonym for `always`: three values parsed, two behaviours.
+    print("[14] --color auto honours NO_COLOR and TERM")
+    plain = _capture_escapes(shu, [], env={"NO_COLOR": "1"})
+    dumb = _capture_escapes(shu, [], env={"TERM": "dumb"})
+    forced = _capture_escapes(shu, ["--color", "always"], env={"NO_COLOR": "1"})
+    ok = True
+    why = []
+    for label, cap in (("NO_COLOR", plain), ("TERM=dumb", dumb)):
+        for colour in ("\x1b[31m", "\x1b[32m", "\x1b[33m", "\x1b[35m", "\x1b[36m", "\x1b[2m"):
+            if colour in cap:
+                ok = False; why.append(f"{label} still emitted {colour!r}")
+                break
+    if "\x1b[32m" not in forced:
+        ok = False; why.append("--color always did not override NO_COLOR")
+    if ok:
+        passed("auto disables on NO_COLOR/TERM=dumb; always overrides")
+    else:
+        fail("--color auto", "; ".join(why))
+        failures.append("--color auto: " + "; ".join(why))
+
     # ---------------- summary ----------------
     print()
-    total = 12
+    total = 14
     if failures:
         print(f"PTY smoke: FAIL ({len(failures)} of {total} tests)")
         for f in failures:

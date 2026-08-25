@@ -1,6 +1,6 @@
 # Manual TTY checks
 
-Everything that can be automated **is** — `tests/integration_smoke.py` drives 12
+Everything that can be automated **is** — `tests/integration_smoke.py` drives 14
 scenarios under a real pseudo-terminal, and CI runs it on every push. This file
 lists only the checks that still need human eyes, and says *why* each one resists
 automation. If you find a way to automate one, delete it from here.
@@ -26,7 +26,14 @@ the severity bands read correctly against a real background, is a judgement.
 - Process states are distinguishable: `R` green, `D`/`T` yellow, `Z` red,
   `I` cyan (kernel idle threads — `[kworker/...]` rows).
 - The selected row's reverse-video block does not swallow the text inside it.
-- `--color=never` produces genuinely plain output with no stray escapes.
+- `--color=never` emits no colour. Note it *does* still emit reverse video
+  (`CSI 7m`/`CSI 0m`) for the selected row — that is deliberate, and is the only
+  way selection is visible on a monochrome terminal. Colour absence, not escape
+  absence, is the contract.
+- `--theme light` on an actually-light terminal: the mid band (magenta) and idle
+  state (blue) must be readable, and the pid column must not vanish. This is the
+  half a byte-level test cannot judge — scenario 13 proves the *palette changed*,
+  only your eyes can confirm it changed for the better.
 
 ## 2. Resize behaves under a real window manager
 
