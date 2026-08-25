@@ -52,6 +52,12 @@ var PROC_CMDLINE_MAX = 256;
 var _proc_recs  = 0;
 var _proc_n     = 0;
 var _proc_map   = 0;
+# Second tick map, for the TUI's single-walk delta path. `_proc_map` holds the
+# PREVIOUS frame's ticks while `_proc_map_b` accumulates this frame's; the two
+# swap at the end of every sample so the baseline is always exactly one frame
+# old and dead pids age out instead of accumulating. See
+# processes_sample_delta().
+var _proc_map_b = 0;
 # R4 (v0.7.13): preallocated once, reused every frame. See _proc_scan_pids.
 var _proc_names = 0;
 var _proc_offs  = 0;
@@ -63,6 +69,9 @@ fn _proc_ensure_init() {
     }
     if (_proc_map == 0) {
         _proc_map = map_u64_new();
+    }
+    if (_proc_map_b == 0) {
+        _proc_map_b = map_u64_new();
     }
     if (_proc_names == 0) {
         _proc_names = alloc(PROC_NAMES_CAP);
@@ -175,6 +184,111 @@ fn _proc_cmp(a, b, sort_key) {
 # append per-pid record, then sort by `sort_key`. Top-N selection
 # happens in processes_render so callers can change top-N without
 # re-walking /proc.
+# Sort the sampled table in place under `sort_key`. Shared by the two-walk
+# sampler (`shu -p`) and the single-walk TUI sampler.
+fn _proc_sort(sort_key) {
+    # Insertion sort under the chosen comparator, shift-hole form.
+    #
+    # R6 (v0.7.13): the previous version swapped adjacent records with THREE
+    # memcpy(48) calls per shift step, and lib/string.cyr's memcpy is a byte
+    # loop — so every step moved 144 bytes one at a time. Lifting the record
+    # into a hole once and shifting predecessors up costs one memcpy per step
+    # plus two for the lift/drop: ~2.85x faster, measured. This matters far
+    # more now that R5 raised PROC_MAX to 8192, where the old form cost
+    # roughly 1.5 s on `--sort mem`.
+    #
+    # Output is byte-identical and stability is preserved: the strict `> 0`
+    # test means equal records never shift past one another.
+    var s = 1;
+    while (s < _proc_n) {
+        var tmp[48];
+        memcpy(&tmp, _proc_recs + s * PROC_REC_SIZE, PROC_REC_SIZE);
+        var j = s;
+        while (j > 0) {
+            var prev = _proc_recs + (j - 1) * PROC_REC_SIZE;
+            if (_proc_cmp(&tmp, prev, sort_key) > 0) {
+                memcpy(_proc_recs + j * PROC_REC_SIZE, prev, PROC_REC_SIZE);
+                j = j - 1;
+            } else {
+                break;
+            }
+        }
+        memcpy(_proc_recs + j * PROC_REC_SIZE, &tmp, PROC_REC_SIZE);
+        s = s + 1;
+    }
+    return 0;
+}
+
+# Single-walk sampler for the TUI (v0.7.15).
+#
+# processes_sample1() + processes_sample2() is a TWO-walk pattern: seed the tick
+# map, sleep, walk again, difference. That is right for `shu -p`, which is a
+# one-shot snapshot with no earlier frame to difference against. In the TUI it
+# was pure waste — every frame paid two full /proc walks (~562 per-pid stat
+# reads/sec at 1 Hz with 281 processes) plus a 100 ms sleep, to measure a
+# 100 ms window inside a 1000 ms refresh interval.
+#
+# This variant walks ONCE and differences against the previous frame, recording
+# the current ticks as it goes. Two maps rather than one in-place update: if we
+# overwrote `_proc_map` while reading it we would lose the baseline mid-walk,
+# and a single map never sheds entries for pids that have exited — with pid
+# reuse a stale entry becomes a wrong baseline. Swapping a freshly-built map in
+# each frame bounds it exactly to the live set.
+#
+# `total_delta` is the aggregate CPU-tick delta over the SAME window the caller
+# used, so per-pid percentages stay consistent with the summary line.
+fn processes_sample_delta(total_delta, ncores, sort_key) {
+    _proc_ensure_init();
+    map_u64_clear(_proc_map_b);
+    _proc_n = 0;
+    var scanned = _proc_scan_pids();
+    var i = 0;
+    while (i < scanned) {
+        if (_proc_n >= PROC_MAX) { break; }
+        var name = _proc_names + load64(_proc_offs + i * 8);
+        if (proc_is_pid_name(name) == 1) {
+            var pid = atoi(name);
+            var path[64];
+            proc_pid_path(name, "/stat", &path);
+            var sb[1024];
+            var sn = file_read_all(&path, &sb, 1023);
+            if (sn > 0) {
+                store8(&sb + sn, 0);
+                var srec[48];
+                if (proc_pid_stat_parse(&sb, sn, &srec) == 0) {
+                    var ticks2 = load64(&srec + 8);
+                    # Default to ticks2 so a pid first seen this frame yields a
+                    # delta of 0 rather than its whole lifetime's CPU.
+                    var ticks1 = map_u64_get_or(_proc_map, pid, ticks2);
+                    map_u64_set(_proc_map_b, pid, ticks2);
+                    var dt = ticks2 - ticks1;
+                    if (dt < 0) { dt = 0; }
+                    var cpu_pct = 0;
+                    if (total_delta > 0) {
+                        cpu_pct = dt * 100 * ncores / total_delta;
+                    }
+                    var rec = _proc_recs + _proc_n * PROC_REC_SIZE;
+                    store64(rec + 0,  pid);
+                    store64(rec + 8,  cpu_pct);
+                    store64(rec + 16, load64(&srec + 16));
+                    store64(rec + 24, load64(&srec + 0));
+                    memcpy(rec + 32, &srec + 24, 16);
+                    _proc_n = _proc_n + 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+
+    # Swap: this frame's map becomes next frame's baseline.
+    var tmp = _proc_map;
+    _proc_map   = _proc_map_b;
+    _proc_map_b = tmp;
+
+    _proc_sort(sort_key);
+    return 0;
+}
+
 fn processes_sample2(total_delta, ncores, sort_key) {
     _proc_n = 0;
     # R4: _proc_scan_pids() also calls _proc_ensure_init(), which sample2
@@ -217,35 +331,7 @@ fn processes_sample2(total_delta, ncores, sort_key) {
         i = i + 1;
     }
 
-    # Insertion sort under the chosen comparator, shift-hole form.
-    #
-    # R6 (v0.7.13): the previous version swapped adjacent records with THREE
-    # memcpy(48) calls per shift step, and lib/string.cyr's memcpy is a byte
-    # loop — so every step moved 144 bytes one at a time. Lifting the record
-    # into a hole once and shifting predecessors up costs one memcpy per step
-    # plus two for the lift/drop: ~2.85x faster, measured. This matters far
-    # more now that R5 raised PROC_MAX to 8192, where the old form cost
-    # roughly 1.5 s on `--sort mem`.
-    #
-    # Output is byte-identical and stability is preserved: the strict `> 0`
-    # test means equal records never shift past one another.
-    var s = 1;
-    while (s < _proc_n) {
-        var tmp[48];
-        memcpy(&tmp, _proc_recs + s * PROC_REC_SIZE, PROC_REC_SIZE);
-        var j = s;
-        while (j > 0) {
-            var prev = _proc_recs + (j - 1) * PROC_REC_SIZE;
-            if (_proc_cmp(&tmp, prev, sort_key) > 0) {
-                memcpy(_proc_recs + j * PROC_REC_SIZE, prev, PROC_REC_SIZE);
-                j = j - 1;
-            } else {
-                break;
-            }
-        }
-        memcpy(_proc_recs + j * PROC_REC_SIZE, &tmp, PROC_REC_SIZE);
-        s = s + 1;
-    }
+    _proc_sort(sort_key);
     return 0;
 }
 

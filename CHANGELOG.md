@@ -4,6 +4,81 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.15] — 2026-08-24 — one /proc walk per frame, and a forward-only roadmap
+
+### Changed — TUI sampling
+
+- **The TUI took TWO full `/proc` walks per frame.** Every render ran
+  `processes_sample1()` → `sleep_ms(100)` → `processes_sample2()` — seeding a tick
+  map, sleeping, then walking again — to measure a 100 ms window inside a 1000 ms
+  refresh interval. At 1 Hz with 281 processes that was ~562 per-pid `stat` reads
+  per second. Worse, `_tui_dispatch_key` re-renders on **every keypress**, so each
+  keystroke paid a 100 ms sleep plus two full walks before the frame repainted.
+- **Now one walk per frame, differenced against the previous frame.** New
+  `processes_sample_delta()` in `src/processes.cyr` walks once and diffs each pid
+  against the prior frame's ticks, recording the current ones as it goes. It uses
+  **two tick maps that swap** rather than updating one in place: overwriting the
+  map mid-walk would destroy the baseline it is still reading, and a single map
+  never sheds entries for exited pids — with pid reuse a stale entry becomes a
+  wrong baseline. Swapping a freshly-built map in each frame bounds it to the
+  live set exactly. Verified with an instrumented build: **13 walks over 12 s at
+  1 Hz** — one per frame plus the first-frame seed.
+- **The delta window is now the real elapsed time**, not a fixed 100 ms. That is
+  both cheaper and more accurate: it matches the interval the user is actually
+  watching, the same reason htop samples over its whole refresh period. A repaint
+  arriving sooner than `TUI_MIN_SAMPLE_MS` (200 ms) reuses the cached figures
+  instead of dividing by a near-zero window — so keystrokes are now instant
+  rather than costing 100 ms and two walks.
+- **`shu -p` is deliberately unchanged**, still two samples over a 100 ms window:
+  a one-shot snapshot has no previous frame to difference against.
+- **Static identity facts are probed once.** `MemTotal` cannot change while the
+  process runs, yet `/proc/meminfo` (1.6 KB) was read and parsed **twice** per
+  frame — once for total, once for available. Total is now cached.
+- The insertion sort was factored into a shared `_proc_sort()` used by both the
+  one-shot and rolling samplers; no behaviour change.
+
+### Performance — §8 audit
+
+Measured under a real PTY at `--rate 1` over 20 s, 281 processes, 16-core box.
+
+| target | before | after |
+|---|---|---|
+| Memory `< 8 MB` steady | 4.49 MB | **4.49 MB — MET** |
+| Cold start `< 5 ms` | ~1.6 ms | **~1.6 ms — MET** |
+| CPU `< 0.5%` at 1 Hz | 0.650% | **0.549% — still over** |
+
+CPU improved 15.5% but has **not** met the target, and the reason is now measured
+rather than guessed: at `--top 1` it is **0.466%**, i.e. under target, so the
+residual cost scales with the number of visible rows — the per-row `cmdline` read
+and the render itself, not the `/proc` walk. Halving the walks bought less than
+expected because the walk was never the dominant term. Carried to **0.9.0** with
+two named options: cache `cmdline` per pid across frames, or accept that the
+target implies a smaller table than a 281-process box shows.
+
+### Changed — documentation
+
+- **`docs/development/roadmap.md` rewritten to be forward-looking only** (200 →
+  150 lines). All shipped history was removed — that is what `CHANGELOG.md` is
+  for, and duplicating it there had already produced stale claims (the size
+  budget line still read "~1.38 MB — over budget" three releases after that
+  stopped being true, and the GPU item still cited an ai-hwaccel pin freed at
+  0.7.14).
+- The remaining path to v1.0 is now **batched into concrete releases** rather
+  than open-ended milestones: **0.8.0** `--watch` (closes M3), **0.8.1**
+  `--with-logs`, **0.8.2** AI hardening, **0.9.0** perf + size close-out,
+  **0.9.1** GPU depth, **0.9.2** theming, **0.9.3** AGNOS parity, **1.0.0** ship.
+  21 open items, each under the release that carries it, each with its gate.
+- Standing constraints (no libc/FFI in lean `shu`, AI opt-in at the binary level,
+  prompt privacy, version-bump discipline) are stated once at the end as binding
+  on every release, rather than repeated per milestone.
+
+### Verified
+
+- Lean `shu`: build clean, **81/81**, smoke **PASS**, PTY **11/11**, DCE parity
+  PASS, lint 0 non-cosmetic, `-p` stderr 0 bytes, `shu --version` → `chakshu 0.7.15`.
+- `shu -p` output is field-for-field unchanged, confirming the sampling rework is
+  confined to the TUI path.
+
 ## [0.7.14] — 2026-08-24 — the bayan monolith comes out: lean `shu` drops 33.7%
 
 Dependency-pin cut, no chakshu source change. Picks up the two upstream releases that

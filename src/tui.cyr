@@ -290,6 +290,45 @@ var _tui_msg_until = 0;
 # TCFLSH ioctl, queue selector TCIFLUSH (0) — discard unread input already
 # sitting in the KERNEL tty queue. Flushing only the userspace readahead
 # buffer is not enough: a burst can still be waiting in the line discipline.
+# Rolling delta baseline (v0.7.15). The TUI used to take TWO full /proc walks
+# per frame — seed, sleep 100 ms, walk again — to measure a 100 ms window inside
+# a 1000 ms refresh interval. That cost ~562 per-pid stat reads/sec at 1 Hz and
+# put the process over design-spec §8's "< 0.5% CPU at 1 Hz" (measured 0.650%).
+# It also meant every keypress paid a 100 ms sleep plus two walks before the
+# frame repainted, because _tui_dispatch_key re-renders on every key.
+#
+# Now one walk per frame, differenced against the previous frame. The window is
+# the real elapsed time rather than a fixed 100 ms, which is both cheaper and
+# more accurate — it matches the interval the user is actually watching, the
+# same reason htop samples over its whole refresh period.
+#
+# `shu -p` deliberately keeps the two-sample 100 ms window: a one-shot snapshot
+# has no previous frame to difference against.
+var TUI_MIN_SAMPLE_MS = 200;
+# Static identity facts, probed once. hostname/kernel come from uname(2) and
+# MemTotal from /proc/meminfo — none of them can change while the process runs,
+# yet the header re-read and re-parsed them on every frame (meminfo is 1.6 KB
+# and was parsed twice per frame, once for total and once for available).
+var _tui_id_done      = 0;
+var _tui_mem_total_b  = 0;
+var _tui_have_prev    = 0;
+var _tui_prev_ms      = 0;
+var _tui_prev_cpu_act = 0;
+var _tui_prev_cpu_tot = 0;
+var _tui_prev_sec_r   = 0;
+var _tui_prev_sec_w   = 0;
+var _tui_prev_rx      = 0;
+var _tui_prev_tx      = 0;
+# Last computed values, reused when a repaint arrives too soon to re-sample.
+var _tui_cpu_pct      = 0;
+var _tui_disk_rd_bps  = 0;
+var _tui_disk_wr_bps  = 0;
+var _tui_net_rx_bps   = 0;
+var _tui_net_tx_bps   = 0;
+var _tui_ncores       = 1;
+var _tui_total_delta  = 0;
+var _tui_resampled    = 0;
+
 var TUI_TCFLSH   = 0x540B;
 var TUI_TCIFLUSH = 0;
 
@@ -724,7 +763,12 @@ fn tui_render_table_frame() {
 
     # ----- row 2: memory -----
     tty_move(2, 1);
-    var mem_total_b = mihi_mem_total(&buf, 8192);
+    # MemTotal is fixed for the life of the process — probe it once.
+    if (_tui_id_done == 0) {
+        _tui_mem_total_b = mihi_mem_total(&buf, 8192);
+        _tui_id_done = 1;
+    }
+    var mem_total_b = _tui_mem_total_b;
     var mem_avail_b = mihi_mem_free(&buf, 8192);
     var mem_total_kb  = mem_total_b / 1024;
     var mem_used_mib  = (mem_total_b - mem_avail_b) / 1048576;
@@ -775,46 +819,94 @@ fn tui_render_table_frame() {
     }
     tty_clear_to_eol();
 
-    # ----- row 3: cpu / disk / net (delta-based, 100ms window) -----
+    # ----- row 3: cpu / disk / net (rolling inter-frame delta) -----
     # R7c (v0.7.13): shared 64 KiB heap scratch — see src/proc.cyr.
     proc_truncated_reset();
     var sb1 = proc_scratch(0);
     var db1 = proc_scratch(1);
     var nb1 = proc_scratch(2);
-    var s1n = proc_read("/proc/stat",      sb1, PROC_BUF_CAP);
-    var d1n = proc_read("/proc/diskstats", db1, PROC_BUF_CAP);
-    var n1n = proc_read("/proc/net/dev",   nb1, PROC_BUF_CAP);
-    var cpu_active1 = 0; var cpu_total1 = 0;
-    var sec_r1 = 0; var sec_w1 = 0;
-    var rx1 = 0; var tx1 = 0;
-    if (s1n > 0) { proc_stat_cpu_agg (sb1, &cpu_active1, &cpu_total1); }
-    if (d1n > 0) { proc_diskstats_agg(db1, d1n, &sec_r1, &sec_w1); }
-    if (n1n > 0) { proc_netdev_agg   (nb1, n1n, &rx1, &tx1); }
-    var ncores = 1;
-    if (s1n > 0) { ncores = proc_stat_ncores(sb1, s1n); }
-    processes_sample1();
 
-    sleep_ms(SNAP_SAMPLE_MS);
+    var now_ms = clock_now_ms();
+    _tui_resampled = 0;
 
-    var s2n = proc_read("/proc/stat",      sb1, PROC_BUF_CAP);
-    var d2n = proc_read("/proc/diskstats", db1, PROC_BUF_CAP);
-    var n2n = proc_read("/proc/net/dev",   nb1, PROC_BUF_CAP);
-    var cpu_active2 = 0; var cpu_total2 = 0;
-    var sec_r2 = 0; var sec_w2 = 0;
-    var rx2 = 0; var tx2 = 0;
-    if (s2n > 0) { proc_stat_cpu_agg (sb1, &cpu_active2, &cpu_total2); }
-    if (d2n > 0) { proc_diskstats_agg(db1, d2n, &sec_r2, &sec_w2); }
-    if (n2n > 0) { proc_netdev_agg   (nb1, n2n, &rx2, &tx2); }
+    # Re-sample only when enough time has passed for the delta to mean
+    # something. A keypress repaint arriving 20 ms after the last sample would
+    # otherwise divide by a near-zero window and produce garbage rates — and
+    # would pay a full /proc walk to do it. Below the threshold we repaint from
+    # the cached figures, which makes keystrokes feel instant.
+    var due = 0;
+    if (_tui_have_prev == 0) { due = 1; }
+    elif (now_ms - _tui_prev_ms >= TUI_MIN_SAMPLE_MS) { due = 1; }
 
-    var cpu_pct = 0;
-    var total_delta = cpu_total2 - cpu_total1;
-    if (total_delta > 0) {
-        cpu_pct = (cpu_active2 - cpu_active1) * 100 / total_delta;
+    if (due == 1) {
+        var sn = proc_read("/proc/stat",      sb1, PROC_BUF_CAP);
+        var dn = proc_read("/proc/diskstats", db1, PROC_BUF_CAP);
+        var nn = proc_read("/proc/net/dev",   nb1, PROC_BUF_CAP);
+        var cpu_act = 0; var cpu_tot = 0;
+        var sec_r = 0; var sec_w = 0;
+        var rx = 0; var tx = 0;
+        if (sn > 0) { proc_stat_cpu_agg (sb1, &cpu_act, &cpu_tot); }
+        if (dn > 0) { proc_diskstats_agg(db1, dn, &sec_r, &sec_w); }
+        if (nn > 0) { proc_netdev_agg   (nb1, nn, &rx, &tx); }
+        if (sn > 0) { _tui_ncores = proc_stat_ncores(sb1, sn); }
+
+        if (_tui_have_prev == 1) {
+            var win_ms = now_ms - _tui_prev_ms;
+            if (win_ms < 1) { win_ms = 1; }
+            _tui_total_delta = cpu_tot - _tui_prev_cpu_tot;
+            _tui_cpu_pct = 0;
+            if (_tui_total_delta > 0) {
+                _tui_cpu_pct = (cpu_act - _tui_prev_cpu_act) * 100 / _tui_total_delta;
+            }
+            _tui_disk_rd_bps = (sec_r - _tui_prev_sec_r) * 512 * 1000 / win_ms;
+            _tui_disk_wr_bps = (sec_w - _tui_prev_sec_w) * 512 * 1000 / win_ms;
+            _tui_net_rx_bps  = (rx - _tui_prev_rx) * 1000 / win_ms;
+            _tui_net_tx_bps  = (tx - _tui_prev_tx) * 1000 / win_ms;
+            _tui_resampled = 1;
+        } else {
+            # First frame only: there is no previous sample, so fall back to the
+            # snapshot pattern once — a short sleep and a second read — rather
+            # than showing a frame of zeros before the first real delta lands.
+            processes_sample1();
+            sleep_ms(SNAP_SAMPLE_MS);
+            var sn2 = proc_read("/proc/stat",      sb1, PROC_BUF_CAP);
+            var dn2 = proc_read("/proc/diskstats", db1, PROC_BUF_CAP);
+            var nn2 = proc_read("/proc/net/dev",   nb1, PROC_BUF_CAP);
+            var a2 = 0; var t2 = 0; var r2 = 0; var w2 = 0; var x2 = 0; var y2 = 0;
+            if (sn2 > 0) { proc_stat_cpu_agg (sb1, &a2, &t2); }
+            if (dn2 > 0) { proc_diskstats_agg(db1, dn2, &r2, &w2); }
+            if (nn2 > 0) { proc_netdev_agg   (nb1, nn2, &x2, &y2); }
+            _tui_total_delta = t2 - cpu_tot;
+            _tui_cpu_pct = 0;
+            if (_tui_total_delta > 0) {
+                _tui_cpu_pct = (a2 - cpu_act) * 100 / _tui_total_delta;
+            }
+            _tui_disk_rd_bps = (r2 - sec_r) * 512 * 1000 / SNAP_SAMPLE_MS;
+            _tui_disk_wr_bps = (w2 - sec_w) * 512 * 1000 / SNAP_SAMPLE_MS;
+            _tui_net_rx_bps  = (x2 - rx) * 1000 / SNAP_SAMPLE_MS;
+            _tui_net_tx_bps  = (y2 - tx) * 1000 / SNAP_SAMPLE_MS;
+            cpu_act = a2; cpu_tot = t2;
+            sec_r = r2; sec_w = w2; rx = x2; tx = y2;
+            now_ms = clock_now_ms();
+        }
+
+        _tui_prev_cpu_act = cpu_act;
+        _tui_prev_cpu_tot = cpu_tot;
+        _tui_prev_sec_r   = sec_r;
+        _tui_prev_sec_w   = sec_w;
+        _tui_prev_rx      = rx;
+        _tui_prev_tx      = tx;
+        _tui_prev_ms      = now_ms;
+        _tui_have_prev    = 1;
     }
-    var disk_rd_bps = (sec_r2 - sec_r1) * 512 * 1000 / SNAP_SAMPLE_MS;
-    var disk_wr_bps = (sec_w2 - sec_w1) * 512 * 1000 / SNAP_SAMPLE_MS;
-    var net_rx_bps  = (rx2 - rx1) * 1000 / SNAP_SAMPLE_MS;
-    var net_tx_bps  = (tx2 - tx1) * 1000 / SNAP_SAMPLE_MS;
+
+    var cpu_pct     = _tui_cpu_pct;
+    var ncores      = _tui_ncores;
+    var total_delta = _tui_total_delta;
+    var disk_rd_bps = _tui_disk_rd_bps;
+    var disk_wr_bps = _tui_disk_wr_bps;
+    var net_rx_bps  = _tui_net_rx_bps;
+    var net_tx_bps  = _tui_net_tx_bps;
 
     # ----- row 4: cpu / disk / net (delta line) -----
     tty_move(4, 1);
@@ -833,7 +925,14 @@ fn tui_render_table_frame() {
     tty_clear_to_eol();
 
     # ----- row 5+: process table (header + top-N rows) -----
-    processes_sample2(total_delta, ncores, sort_key);
+    # Only re-walk /proc when we actually took a new sample this frame; a
+    # repaint reuses the table already in _proc_recs. The first frame's table
+    # came from processes_sample1()+sleep above, so it is already seeded.
+    if (_tui_resampled == 1) {
+        processes_sample_delta(total_delta, ncores, sort_key);
+    } elif (_tui_have_prev == 1) {
+        if (_proc_n == 0) { processes_sample_delta(total_delta, ncores, sort_key); }
+    }
     tty_move(5, 1);
     syscall(1, 1, "   PID S  CPU%  MEM% CMD", 24);
     tty_clear_to_eol();
