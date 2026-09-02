@@ -19,13 +19,17 @@ test = "tests/chakshu-ai.tcyr"
 # module (never a git dep) so its bare socket/tls constants resolve alongside
 # net/tls; the async..thread_local entries are sandhi's transitive references and
 # unicode is niyama's.
+# ⛔ `fdlopen` and `dynlib` are deliberately ABSENT — they are the dlopen bridges.
+# TLS runs on
+# the native backend and ../src/nolibc.cyr hard-refuses the libssl path; see that
+# file. `random` supplies getrandom(2) entropy for the native handshake.
 [deps]
 stdlib = [
     "syscalls", "alloc", "fmt", "io", "fs", "str", "string", "slice", "vec",
     "args", "chrono", "hashmap", "process", "tagged", "assert", "sys",
     "fnptr", "thread", "freelist", "ct", "bench",
     "unicode",
-    "async", "atomic", "regression", "mmap", "dynlib", "fdlopen",
+    "async", "atomic", "regression", "mmap", "random",
     "net", "http", "tls", "ws", "sakshi", "sigil", "keccak", "thread_local",
     "sandhi",
 ]

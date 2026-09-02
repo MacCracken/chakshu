@@ -157,7 +157,7 @@ Excluded: env vars, /home paths, file contents, network packets.
 - **HTTP `POST /v1/chat/completions`** to the `hoosh` gateway via `sandhi`'s HTTP client. Default `http://127.0.0.1:8088`; override with `$CHAKSHU_HOOSH_URL`. Model via `$CHAKSHU_MODEL`. Bearer auth via `$CHAKSHU_HOOSH_TOKEN` (hoosh 2.3.5+).
 - OpenAI request `{model, messages:[{role:"user", content:<prompt>}]}`; answer extracted from the response `content`.
 - The `?` overlay sets `"stream":true` and renders the **SSE** deltas incrementally into a modal overlay; **Esc/q cancels** (non-blocking poll). `--explain` is request→render (one-shot). On any failure it falls back to printing the redacted context.
-- Caveat: `sandhi` dlopens libc (`getaddrinfo`/libssl), so this path runs only on a libc host — see [`state.md`](development/state.md) "runtime-libc caveat".
+- ~~Caveat: `sandhi` dlopens libc~~ — **removed at v0.9.7.** TLS uses the Cyrius-native TLS 1.3 stack and DNS sandhi's own UDP resolver; `src/nolibc.cyr` hard-refuses the libssl bridge. No libc on any path.
 
 > If `hoosh` later exposes a Unix socket for internal use, a socket transport can be added behind the same `$CHAKSHU_HOOSH_URL` selection. For now it's HTTP.
 
@@ -187,7 +187,7 @@ cooperation is required. aegis **1.1.7** implements the producer side
 **`--watch` lands in the LEAN `shu`, not `shu-ai`** — the second correction. Tailing a
 local file needs no libc, no network and no new dependency; the syscalls are already in
 the lean manifest. This means `--watch` works on a pure no-libc AGNOS host where `shu-ai`
-cannot run at all (sandhi dlopens libc), and it *strengthens* the "AI is opt-in at the
+could not even be built for AGNOS before v0.9.7 (the libssl bridge), and it *strengthens* the "AI is opt-in at the
 binary level" rule rather than weakening it: reading a file another process wrote is not a
 network reach. Only AI **triage** of a flagged event needs the gateway, and that stays in
 `shu-ai`.

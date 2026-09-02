@@ -5,7 +5,7 @@
 > [`state.md`](state.md). This file answers one question: *what is left to reach
 > v1.0, and in which release does it land?*
 >
-> **Current: v0.9.6.** | **Last Updated**: 2026-09-02
+> **Current: v0.9.7.** | **Last Updated**: 2026-09-02
 
 ---
 
@@ -28,6 +28,7 @@ inside it are additive or corrective only.
 | ~~0.9.4~~ | ~~v1.0 readiness~~ | **shipped 2026-08-25.** Security audit PASS (14 confirmed of 38 raised); fractional `--rate`; swap/cached/buffers; benchmarks + audit artifacts; an `--agnos` CI gate and the literal-length gate the P-1 sweep specified. Two v1.0 criteria went unmet → met |
 | ~~0.9.5~~ | ~~design-spec §1 close-out~~ | **shipped 2026-08-25.** All six §1 features that were in scope since M0 now ship; found and fixed a double-count in the aggregate disk rate; `docs/cli-contract.md` written (criterion 1) and criterion 4 decided |
 | ~~0.9.6~~ | ~~toolchain + dependency refresh~~ | **shipped 2026-09-02.** cyrius `6.5.35` → `6.5.41` (one stdlib addition, zero removals; folded sandhi 1.9.15 fixes silent SSE event loss on the `?` overlay). `bayan` 1.5.2 → 1.5.4 after cyrius 6.5.39 reversed stdlib-vs-dep precedence and left the pin naming a file that no longer linked; **ai-hwaccel held at 2.3.19** per the mihi tracking rule, though 2.3.20 exists. Both manifests cut 328 → 130 lines. `scripts/check.sh` had drifted from `ci.yml` a third time — DCE parity, three security assertions, the `ai/*.cyr` glob and three required files were all missing locally; now 20 gates |
+| ~~0.9.7~~ | ~~no-libc for `shu-ai`~~ | **shipped 2026-09-02.** Removed the last libc bridge: `src/nolibc.cyr` refuses the libssl `dlopen` path, `fdlopen`/`dynlib` left `ai/cyrius.cyml`. Both binaries are pure-syscall (0 `NEEDED`), verified by capturing a real TLS 1.3 ClientHello. **`shu-ai` builds for AGNOS** — striking one of the three AGNOS blockers below |
 | **1.0.0** | Ship as the AGNOS default monitor | Registry promotion, ISO default, announce |
 
 ---
@@ -68,7 +69,13 @@ inside it are additive or corrective only.
 > - the **process table is empty** and cannot be fixed from this repo — AGNOS exposes no procfs and
 >   no process-enumeration syscall (see *Blocked upstream* below);
 > - **load, cpu, disk and net all render `n/a`** for the same reason;
-> - **`shu-ai` cannot run at all** — sandhi dlopens libc, which AGNOS has no host for.
+> - ~~**`shu-ai` cannot run at all** — sandhi dlopens libc, which AGNOS has no host for.~~
+>   ⭐ **STRUCK at v0.9.7 — this reason was stale and is now false.** cyrius 6.1.21 had already made
+>   the native TLS stack the default backend; chakshu was linking the libssl bridge only because
+>   `lib/tls.cyr` compiles both transports in. `src/nolibc.cyr` removed it: `shu-ai` is pure-syscall
+>   and `cyrius build --agnos main.cyr` produces a 2,880,824 B AGNOS ELF, gated in CI. `--with-logs`
+>   fails closed on AGNOS (its validator needs procfs); `--explain` and the `?` overlay work.
+>   **Two of the three reasons below still stand, and both are upstream.**
 >
 > So on AGNOS the "AI-augmented system monitor" shows hostname, kernel, memory total, and a bare
 > column header with no rows — and neither half of the announcement is true there. Separately, the
@@ -131,8 +138,8 @@ inside it are additive or corrective only.
 These bind every release above; they are not work items.
 
 - **No libc, no FFI, no ncurses in the lean `shu`.** Documented exception:
-  `shu-ai` pulls sandhi, which dlopens libc, so it is not a pure no-libc binary
-  and its live path only runs on a libc host.
+  ~~`shu-ai` pulls sandhi, which dlopens libc~~ — **exception removed at v0.9.7**;
+  both binaries are now statically linked, pure-syscall, zero `NEEDED`.
 - **AI is opt-in at the binary level** — the lean `shu` cannot reach the network
   at all. Enforced in CI since v0.7.13.
 - **Privacy**: prompts carry only what the user can already see in the TUI. No

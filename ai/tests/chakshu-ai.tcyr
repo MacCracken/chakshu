@@ -13,6 +13,7 @@ include "lib/niyama.cyr"
 # needs watch.cyr in scope. It is the transport-free half of the watch module
 # (the TUI-dependent render lives in watch_render.cyr), so including it here
 # costs no TUI dependency.
+include "../src/nolibc.cyr"
 include "../src/watch.cyr"
 include "../src/proc.cyr"
 include "../src/processes.cyr"

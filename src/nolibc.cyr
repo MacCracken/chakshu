@@ -1,0 +1,65 @@
+# nolibc.cyr — hard-refuse the libssl/libc bridge in the `shu-ai` build.
+#
+# WHY THIS FILE EXISTS
+#
+# CLAUDE.md's rule is "no libc, no FFI". Until v0.9.7 that rule carried a
+# documented exception for `shu-ai`: sandhi's TLS reached libssl through
+# `lib/fdlopen.cyr`, which execs the toolchain's dlopen-helper and performs a
+# REAL glibc dlopen of libcrypto.so.3 / libssl.so.3. The exception was
+# load-bearing enough to be quoted as a v1.0 blocker — "shu-ai cannot run on
+# AGNOS at all" — in roadmap.md.
+#
+# That exception is obsolete. Cyrius 6.1.21 inverted the TLS default: the
+# sovereign native stack (lib/tls_native*.cyr — a full TLS 1.2/1.3
+# implementation, ~310 KB of Cyrius source, sigil-backed X.509) is the no-flag
+# default backend, and libssl is the deprecated opt-out. chakshu was still
+# linking the libssl bridge purely because `lib/tls.cyr` compiles BOTH
+# transports in and every one of its preprocessor guards is
+# `CYRIUS_TLS_LIBSSL`-only — there is no upstream flag that compiles the libssl
+# half OUT.
+#
+# So chakshu removes it from below instead. `fdlopen` is no longer declared in
+# ai/cyrius.cyml, and these four definitions take its place in the closure.
+# `tls.cyr:218` gates the whole libssl path on `fdlopen_helper_available()`:
+#
+#     if (fdlopen_helper_available() == 0) { return 0; }
+#
+# Returning 0 makes `_tls_init()` bail before `fdlopen_init_full`, before the
+# two `dlopen`s and before every `dlsym`. The remaining three are defined only
+# because the compiler must resolve the call sites; they are unreachable, and
+# each returns the failure value its caller already checks for, so the libssl
+# backend degrades to "unavailable" rather than misbehaving if that ever
+# changes upstream.
+#
+# NET EFFECT: `shu-ai` links no dlopen machinery of any kind. TLS is served by
+# the native stack, DNS by sandhi's own UDP resolver, entropy by `getrandom(2)`
+# via the `random` stdlib module. Both binaries are now pure-syscall, and the
+# no-libc rule has no exception. `scripts/check.sh` and ci.yml gate this: the
+# shu-ai binary must have zero NEEDED entries and must not link fdlopen.
+#
+# ⛔ DO NOT "fix" a TLS problem by re-declaring `fdlopen` in ai/cyrius.cyml.
+# That silently restores the libc bridge and the AGNOS regression with it. If
+# the native backend cannot do something, fix it in the native backend.
+
+# tls.cyr:218 — the single gate the whole libssl path hangs on. 0 = "the
+# dlopen-helper is not available", which is the truth here: it is not linked.
+fn fdlopen_helper_available(): i64 {
+    return 0;
+}
+
+# tls.cyr:220 — unreachable (guarded above). Non-zero = init failed, which is
+# the branch `_tls_init` already handles by returning 0.
+fn fdlopen_init_full(state): i64 {
+    return 0 - 1;
+}
+
+# tls.cyr:223 — unreachable. 0 = "no dlopen function", checked at tls.cyr:225.
+fn fdlopen_dlopen(state): i64 {
+    return 0;
+}
+
+# tls.cyr:224 and tls.cyr:614 — unreachable. 0 = "no dlsym function", checked
+# at tls.cyr:226 and tls.cyr:615.
+fn fdlopen_dlsym(state): i64 {
+    return 0;
+}

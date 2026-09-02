@@ -4,6 +4,109 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.7] — 2026-09-02 — the no-libc rule loses its exception, and `shu-ai` builds for AGNOS
+
+### Fixed — `shu-ai` no longer links a libc bridge, and the "documented exception" was obsolete
+
+For five releases this repo asserted, in `CLAUDE.md`, `README.md`, `docs/development/state.md` and
+`docs/development/roadmap.md`, that:
+
+> `shu-ai` pulls sandhi, whose HTTP/TLS client dlopens libc (`getaddrinfo`/libssl), so the AI build
+> is *not* a pure no-libc binary and its live path only runs on a libc host.
+
+**That was stale, and it was load-bearing** — `roadmap.md` cited it as one of three reasons the v1.0
+milestone premise ("ship as the AGNOS default AI-augmented monitor") did not hold, in the form
+*"`shu-ai` cannot run at all — sandhi dlopens libc, which AGNOS has no host for."*
+
+What was actually true: **cyrius 6.1.21 inverted the TLS default.** The sovereign native stack
+(`lib/tls_native*.cyr` — a full TLS 1.2/1.3 implementation, ~310 KB of Cyrius source with a
+sigil-backed X.509 chain) became the no-flag default backend, and libssl became the deprecated
+opt-out. sandhi has also had an IPv4-literal fast path and its own UDP DNS resolver for just as
+long, so `getaddrinfo` was never on the default path either.
+
+chakshu was still linking the libssl half for one mechanical reason: `lib/tls.cyr` compiles **both**
+transports in, and every preprocessor guard in it is `CYRIUS_TLS_LIBSSL`-only — there is no upstream
+flag that compiles the libssl bridge *out*. So chakshu removes it from below.
+
+- **New `src/nolibc.cyr`** — four definitions that take the place of `lib/fdlopen.cyr` in the
+  closure. `tls.cyr:218` gates the entire libssl path on `fdlopen_helper_available()`; returning 0
+  makes `_tls_init()` bail before `fdlopen_init_full`, before both `dlopen`s and before every
+  `dlsym`. The other three are defined only so the compiler can resolve the call sites, and each
+  returns the failure value its caller already checks.
+- **`ai/cyrius.cyml` no longer declares `fdlopen` or `dynlib`** — the two FFI on-ramps. `dynlib`
+  turned out to be reachable *only* through the fdlopen path, so it left with it. `random` was
+  added: the native handshake needs entropy, which `lib/random.cyr` takes from `getrandom(2)`.
+
+**Result — `shu-ai` is now pure-syscall.** `dlopen`, `dlsym`, `getaddrinfo`, `ld-linux-x86-64.so.2`
+and the `dlopen-helper` path are all **gone from the binary**. Both binaries are statically linked
+with zero `NEEDED` entries and no program interpreter. The no-libc rule now has **no exception**.
+
+⚠ Stated honestly: `libssl.so.3` and `libcrypto.so.3` survive as two dead `.rodata` strings from
+`tls.cyr`'s unreachable branch, because of the missing upstream guard above. No code path can reach
+them — the machinery that would use them is not linked — but they are visible to `strings`, and the
+gate below deliberately does **not** assert their absence rather than assert something false.
+
+### Verified — the native TLS stack really does the handshake
+
+Not inferred. A raw TCP listener captured the first bytes `shu-ai` sends to an `https://` gateway:
+
+```
+16 03 03 00 9d 01 00 00 99 03 03 …  0006 1302 1303 1301 …
+^^ record 0x16 = handshake     ^^ 0x01 = ClientHello
+                                     cipher suites: TLS_AES_256_GCM_SHA384,
+                                     TLS_CHACHA20_POLY1305_SHA256, TLS_AES_128_GCM_SHA256
+```
+
+…with the `supported_versions` (`0x002b`) extension present, i.e. a genuine **TLS 1.3** ClientHello
+from a binary that links no libc. Against a self-signed local server both the old (libssl) and new
+(native) builds behave identically — connection refused at certificate verification — so this is not
+a functional regression, and `tests/hoosh_stub_smoke.py` still passes end-to-end.
+
+### Added — `shu-ai` now compiles for AGNOS
+
+`cyrius build --agnos main.cyr` produces a **2,880,824 B** AGNOS ELF. This could not previously be
+attempted at all. Three real portability bugs surfaced once the libc blocker was gone, all in
+`_ai_log_open` (the `--with-logs` path validator): `O_NONBLOCK` and `SYS_FSTAT` do not exist on
+AGNOS, and `sys_readlink` takes four arguments there rather than three.
+
+The fix is **fail-closed**, not a workaround. That validator's whole design is: open with
+`O_NOFOLLOW`, `fstat` *that fd*, then canonicalise via `/proc/self/fd/<fd>` and apply the denylist to
+the resolved path — which is what closed audit finding F1 (`CHAKSHU_LOG_PATH=/proc/self/environ` put
+the entire process environment into the AI prompt). **AGNOS has no procfs, so step 3 is not
+implementable there.** Reading the file anyway would reintroduce F1 on the one target that cannot
+check for it, so `--with-logs` fails closed on AGNOS: the open is refused, the user is told why in
+AGNOS-specific wording (the Linux message names reasons that cannot apply there), and the log block
+is omitted from the prompt. `--explain` and the `?` overlay work normally.
+
+### Added — two gates, in `scripts/check.sh` and `.github/workflows/ci.yml` in the same edit
+
+- **no-libc posture** — both binaries must be statically linked with 0 `NEEDED` and no interpreter;
+  neither may contain `dlopen` / `dlsym` / `getaddrinfo` / `ld-linux-x86-64.so.2` / `dlopen-helper`;
+  `ai/cyrius.cyml` may not re-declare `dynlib`/`fdlopen`/`cffi`/`pam`; and `src/nolibc.cyr` must
+  still define the refusal.
+- **`shu-ai` AGNOS build** — the target the whole change was for.
+
+Both proven non-vacuous: re-declaring `fdlopen` in the manifest fires it, renaming the refusal in
+`src/nolibc.cyr` fires it, and dropping a dynamically-linked `/bin/ls` in as `build/shu` fires it on
+`NEEDED` *and* on `ld-linux`. `check.sh` is now **22** gates.
+
+### Changed — the v1.0 blocker list is one item shorter
+
+`roadmap.md`'s decision block listed three reasons the AGNOS premise fails. One of them —
+*"`shu-ai` cannot run at all"* — is now false and has been struck. The other two stand and are
+genuinely upstream: AGNOS still exposes no procfs and no process-enumeration syscall, so the process
+table is empty and load/cpu/disk/net render `n/a`. The release matrix still ships no AGNOS artifact.
+
+### Binary size
+
+| binary | 0.9.6 | 0.9.7 | Δ |
+|---|---|---|---|
+| lean `shu` | 663,704 B | 663,704 B | 0 — untouched |
+| `shu-ai` | 2,960,696 B | **2,925,168 B** | −35,528 (−1.2 %) |
+| `shu-ai-agnos` | *(could not build)* | **2,880,824 B** | new |
+
+The AI build got *smaller* by removing the libc bridge.
+
 ## [0.9.6] — 2026-09-02 — toolchain + dependency refresh, and the manifests stop being a ledger
 
 ### Changed — Cyrius toolchain pin `6.5.35` → `6.5.41` (both manifests)

@@ -637,6 +637,20 @@ fn _ai_log_path_ok_resolved(rp) {
 # O_NONBLOCK keeps a FIFO from blocking in open(2) even though S_ISREG rejects it
 # afterwards — the block would happen before the check could run.
 fn _ai_log_open(path) {
+    #ifdef CYRIUS_TARGET_AGNOS
+    # agnos has NO procfs, so step 3 above — canonicalise via /proc/self/fd/<fd>
+    # and apply the denylist to the resolved answer — is not implementable there.
+    # It also has no O_NOFOLLOW/O_NONBLOCK constants and no SYS_FSTAT, so steps 1
+    # and 2 cannot run either. Reading the file anyway would ship the audit's F1
+    # breach back in on the one target that cannot check for it, so `--with-logs`
+    # FAILS CLOSED on agnos. -1 here does NOT reject the flag — ai_set_with_logs
+    # only sets a bit — it makes the caller print the refusal and omit the log
+    # block from the prompt, which is the same path a denylisted path takes.
+    # This is the only AI surface agnos loses; --explain and the `?` overlay work,
+    # because sandhi's transport is pure syscall since v0.9.7 (see src/nolibc.cyr).
+    return 0 - 1;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     var fd = file_open(path, O_RDONLY | O_NONBLOCK | 131072, 0);   # 131072 = O_NOFOLLOW
     if (fd < 0) { return 0 - 1; }
 
@@ -656,6 +670,7 @@ fn _ai_log_open(path) {
         if (_ai_log_path_ok_resolved(&rp) == 0) { file_close(fd); return 0 - 1; }
     }
     return fd;
+    #endif
 }
 
 # Build "/proc/self/fd/<n>" without a formatter.
@@ -706,8 +721,17 @@ fn _ai_append_log_context(out, pos, cap) {
     # a different file's contents.
     var lfd = _ai_log_open(&lpath);
     if (lfd < 0) {
+        #ifdef CYRIUS_TARGET_AGNOS
+        # The Linux wording would name a reason that cannot apply here: on agnos
+        # the open is refused unconditionally because there is no procfs to
+        # canonicalise the fd through, not because this path failed a check.
+        _ai_eputs("chakshu: --with-logs is unavailable on agnos — the log-path\n");
+        _ai_eputs("chakshu: validator needs procfs. Log context omitted.\n");
+        #endif
+        #ifndef CYRIUS_TARGET_AGNOS
         _ai_eputs("chakshu: refusing log path — not a regular file, a symlink, or\n");
         _ai_eputs("chakshu: under /proc, /sys, /dev or /home. Log context omitted.\n");
+        #endif
         return pos;
     }
     var lbuf[8192];
