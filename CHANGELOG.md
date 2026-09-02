@@ -90,6 +90,27 @@ Both proven non-vacuous: re-declaring `fdlopen` in the manifest fires it, renami
 `src/nolibc.cyr` fires it, and dropping a dynamically-linked `/bin/ls` in as `build/shu` fires it on
 `NEEDED` *and* on `ld-linux`. `check.sh` is now **22** gates.
 
+⛔ **The no-libc gate shipped broken and red-ed CI on its first run — recorded because the failure
+mode is instructive.** It was written as two inline copies, one in `ci.yml` and one in `check.sh`.
+GitHub Actions runs `run:` blocks under `bash -e`; `check.sh` runs under `set -u` with no `-e`. And
+**`grep -c` exits 1 when the count is zero**, so:
+
+```sh
+n=$(readelf -d "$b" | grep -c NEEDED)   # 0 matches -> rc=1 -> -e kills the step
+```
+
+killed the CI step on a *correctly static* binary. The gate failed **precisely because the tree was
+clean**, and died before printing a single diagnostic — the CI log showed `exit code 1` and nothing
+else. It was green locally, because `check.sh` has no `-e`.
+
+Fixed twice over: every count now takes `|| true`, and the gate moved into **`scripts/nolibc-check.sh`**,
+invoked identically by both callers — the arrangement `scripts/toolchain-pin-check.sh` already uses,
+so the two cannot diverge in logic *or* in shell flags again. It also gained a vacuity floor (both
+binaries must actually have been examined). Now verified to exit 0 on a clean tree under `sh`,
+`bash -e`, `bash -eu` and `bash -euo pipefail`, and to exit 1 on all four breach probes under
+`bash -e`. The lesson generalises: proving a gate FAILS on bad input is not enough — it must also be
+proven to PASS under the caller's real shell semantics.
+
 ### Changed — the v1.0 blocker list is one item shorter
 
 `roadmap.md`'s decision block listed three reasons the AGNOS premise fails. One of them —

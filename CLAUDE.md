@@ -76,7 +76,13 @@ Build-specific entries + AI module:
    the same edit. ⛔ That rule has been broken every cut so far — v0.9.6 found
    `check.sh` missing the whole DCE-parity step, three of CI's eight security
    assertions and three of its eleven required files. **At each cut, diff the two
-   files gate-by-gate**, and prove any gate you add by making it FAIL first.
+   files gate-by-gate**, and prove any gate you add by making it FAIL first — then
+   ALSO prove it PASSES on a clean tree under CI's own shell, `bash -e`. v0.9.7's
+   no-libc gate red-ed CI on a green tree because `grep -c` exits 1 on a zero
+   count and `-e` killed the step; it was fine under check.sh, which has no `-e`.
+   ⭐ Best: a gate both runners need goes in ONE shared script they each invoke
+   (`scripts/toolchain-pin-check.sh`, `scripts/nolibc-check.sh`) — two inline
+   copies diverge in shell flags even when the logic is identical.
 4. Manual TUI check on a real terminal — type checks can't catch ANSI regressions or termios state leaks
 5. `python3 tests/agnos_qemu.py build/shu-agnos` if the change touches the AGNOS path.
    Not in `check.sh` or CI: it boots a real AGNOS kernel under QEMU and needs

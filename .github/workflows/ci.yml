@@ -245,38 +245,15 @@ jobs:
         # 6.1.21 made the sovereign native TLS stack the default backend, and
         # chakshu was linking the libssl half only because lib/tls.cyr compiles
         # both transports in and every guard in it is CYRIUS_TLS_LIBSSL-only.
-        # src/nolibc.cyr hard-refuses that path and the manifest no longer
-        # declares fdlopen/dynlib. This gate keeps it that way.
         #
-        # NOTE on what is deliberately NOT asserted: libssl.so.3 / libcrypto.so.3
-        # survive as dead .rodata in tls.cyr's unreachable branch, because there
-        # is no upstream flag that compiles the libssl half out. The machinery
-        # that would USE them — dlopen, dlsym, ld-linux, the helper — is what is
-        # gated, and none of it is linked.
-        run: |
-          FAIL=0
-          for b in build/shu ai/build/shu-ai; do
-            [ -f "$b" ] || { echo "FAIL: missing $b"; FAIL=1; continue; }
-            n=$(readelf -d "$b" 2>/dev/null | grep -c NEEDED)
-            [ "$n" = "0" ] || { echo "FAIL: $b has $n NEEDED entries"; FAIL=1; }
-            i=$(readelf -l "$b" 2>/dev/null | grep -c 'program interpreter')
-            [ "$i" = "0" ] || { echo "FAIL: $b has a program interpreter"; FAIL=1; }
-            hits=$(strings "$b" | grep -xE 'dlopen|dlsym|getaddrinfo|ld-linux-x86-64\.so\.2|/lib64/ld-linux-x86-64\.so\.2' || true)
-            if [ -n "$hits" ]; then
-              echo "FAIL: $b links dlopen machinery:"; echo "$hits"; FAIL=1
-            fi
-            if strings "$b" | grep -q 'dlopen-helper'; then
-              echo "FAIL: $b references the dlopen-helper"; FAIL=1
-            fi
-          done
-          ai_ffi=$(sed -n '/^\[deps\]/,/^\[/p' ai/cyrius.cyml | grep -oE '"(dynlib|fdlopen|cffi|pam)"' || true)
-          if [ -n "$ai_ffi" ]; then
-            echo "FAIL: ai/cyrius.cyml re-declares an FFI on-ramp: $ai_ffi"; FAIL=1
-          fi
-          grep -q 'fn fdlopen_helper_available' src/nolibc.cyr \
-            || { echo "FAIL: src/nolibc.cyr no longer defines the fdlopen refusal"; FAIL=1; }
-          echo "no-libc scan complete (fail: $FAIL)"
-          exit $FAIL
+        # ⚠ SHARED SCRIPT, invoked identically by scripts/check.sh — the same
+        # arrangement as toolchain-pin-check.sh, and for the same reason. This
+        # gate first shipped as two inline copies and the CI one died under
+        # `bash -e` on `grep -c` returning 1 for a ZERO count, i.e. it failed
+        # exactly when the binaries were correctly static, and exited before
+        # printing any diagnostic. One implementation cannot diverge in logic
+        # or in shell flags. See the header of scripts/nolibc-check.sh.
+        run: sh scripts/nolibc-check.sh
 
       - name: Build shu-ai for AGNOS
         # The target the no-libc work was for. Before v0.9.7 this could not even

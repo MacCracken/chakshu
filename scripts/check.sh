@@ -98,32 +98,14 @@ check "hoosh-stub smoke" $rc
 echo ""
 
 echo "--- No-libc posture (v0.9.7) ---"
-# ⛔ THE RULE CLAUDE.md STATES, NOW GATED FOR BOTH BINARIES. Until v0.9.7 shu-ai
-# reached libssl through lib/fdlopen.cyr (a real glibc dlopen), and that
-# exception was quoted in roadmap.md as a v1.0 blocker ("shu-ai cannot run on
-# AGNOS"). src/nolibc.cyr removed it. This gate keeps it removed.
-nolibc=0
-for b in build/shu ai/build/shu-ai; do
-    [ -f "$b" ] || { echo "      missing binary: $b"; nolibc=1; continue; }
-    [ "$(readelf -d "$b" 2>/dev/null | grep -c NEEDED)" = "0" ] \
-        || { echo "      $b: has NEEDED (dynamically linked)"; nolibc=1; }
-    [ "$(readelf -l "$b" 2>/dev/null | grep -c 'program interpreter')" = "0" ] \
-        || { echo "      $b: has a program interpreter"; nolibc=1; }
-    # The dlopen bridge, by its own strings. libssl.so.3/libcrypto.so.3 are NOT
-    # listed: they survive as dead .rodata in lib/tls.cyr's unreachable libssl
-    # branch, which has no CYRIUS_TLS_LIBSSL-free guard upstream. The machinery
-    # that would USE them is what must be absent.
-    hits=$(strings "$b" | grep -xE 'dlopen|dlsym|getaddrinfo|ld-linux-x86-64\.so\.2|/lib64/ld-linux-x86-64\.so\.2' || true)
-    [ -n "$hits" ] && { echo "      $b: dlopen machinery present: $(echo $hits | tr '\n' ' ')"; nolibc=1; }
-    strings "$b" | grep -q 'dlopen-helper' && { echo "      $b: references the dlopen-helper"; nolibc=1; }
-done
-# The manifests must not re-declare the on-ramps. (The root/lean one is covered
-# by the security scan's lean_net check; this is its ai/ counterpart.)
-ai_ffi=$(sed -n '/^\[deps\]/,/^\[/p' ai/cyrius.cyml | grep -oE '"(dynlib|fdlopen|cffi|pam)"' || true)
-[ -n "$ai_ffi" ] && { echo "      ai/cyrius.cyml re-declares an FFI on-ramp: $ai_ffi"; nolibc=1; }
-grep -q 'fn fdlopen_helper_available' src/nolibc.cyr 2>/dev/null \
-    || { echo "      src/nolibc.cyr no longer defines the fdlopen refusal"; nolibc=1; }
-check "no-libc: both binaries static, no dlopen bridge" $nolibc
+# ⛔ Same script ci.yml runs, invoked the same way — not a local re-implementation.
+# The first version of this gate WAS two inline copies, and the CI half died under
+# `bash -e` because `grep -c` exits 1 on a zero count: it failed precisely when the
+# binaries were clean, while this file (no `-e`) stayed green. That is the whole
+# check.sh-vs-ci.yml drift class, in shell-flag form.
+sh scripts/nolibc-check.sh > /tmp/chk-nolibc.log 2>&1 && rc=0 || rc=$?
+check "no-libc: both binaries static, no dlopen bridge" $rc
+[ "$rc" = "0" ] || cat /tmp/chk-nolibc.log
 # shu-ai must also COMPILE for agnos — the target the no-libc work was for.
 ( cd ai && CYRIUS_ALLOW_PARENT_INCLUDES=1 cyrius build --agnos main.cyr build/shu-ai-agnos ) \
     > /tmp/chk-aiagnos.log 2>&1 && rc=0 || rc=$?
