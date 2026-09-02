@@ -20,7 +20,7 @@ The Sanskrit name **चक्षु** *chakṣu* means *the eye* / *the faculty 
 
 ## Status
 
-**v0.9.6 — monitor feature-complete and audited; v1.0 is gated on the criteria in
+**v0.9.8 — monitor feature-complete and audited; v1.0 is gated on the criteria in
 [docs/development/roadmap.md](docs/development/roadmap.md), not on features.** What works today:
 
 - **Plain snapshot** (`shu -p`) — host / uptime / load / mem / cpu / disk / net, GPU telemetry, and a
@@ -50,11 +50,15 @@ network); **`shu-ai`** adds the AI panel (**2.96 MB**; pulls `sandhi` / `niyama`
 
 chakshu builds and runs on AGNOS, but the platform constrains what a monitor can show:
 
-- **The process table is empty.** AGNOS exposes no procfs and no process-enumeration syscall, so the
-  table renders its header and no rows. This is an upstream kernel gap, not a chakshu one, and there
-  is no workaround from this repo.
-- **Load, CPU, disk and network read `n/a`** for the same reason. Host, kernel, memory and GPU
-  identity do work.
+- **The process table works as of v0.9.8**, via `proclist` #99. It lists pid, state and command for
+  every live process. **CPU%, MEM% and USER read `n/a`** — the kernel does not track per-process cpu
+  time or rss yet, and the record carries no uid. `--sort cpu|mem|user` therefore falls back to pid;
+  `--sort name` is genuine.
+- **Load, disk and network rates read `n/a`.** AGNOS has no `/proc/diskstats` or `/proc/net/dev`
+  equivalent and its `sysinfo` carries no load average. Host, kernel, memory and GPU identity work.
+  Volume *capacity* is available to the kernel (`statfs` #103) and is not yet surfaced here.
+- ⚠ **Untracked values always read `n/a`, never `0`.** A measured zero and an unmeasurable value are
+  different facts, and a monitor that prints `0` for the second is inventing data.
 - **`shu-ai` builds for AGNOS as of v0.9.7.** The old "`sandhi` dlopens libc" blocker is gone — TLS
   runs on the Cyrius-native TLS 1.3 stack and DNS on sandhi's own UDP resolver, so the AI build is
   now pure-syscall too. `--explain` and the `?` overlay work; `--with-logs` fails closed there,

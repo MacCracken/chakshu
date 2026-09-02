@@ -31,6 +31,7 @@ MINIMUM KERNEL: the ring-3 stack fix (AGNOS cycle 1.56.46). Before it, any
 frame over ~12 KB is page-fault-killed and `-p` reports `run: exit 142`.
 """
 
+import re
 import os
 import shutil
 import socket
@@ -253,6 +254,27 @@ def main():
         # the table were truncated mid-header.
         check("column header reached (ran to the end)",
               "PID USER      S  CPU%  MEM% CMD" in out)
+
+        # v0.9.8: proclist #99. Before this the table was a header and ZERO ROWS,
+        # and the repo recorded that as blocked upstream. These assertions are the
+        # ones that would catch it silently regressing to empty again.
+        rows = [l for l in out.splitlines()
+                if re.match(r"^\s*\d+\s+root\s+[RC?]\s", l)]
+        check("process table is POPULATED (proclist #99)", len(rows) >= 2,
+              f"expected >=2 rows, got {len(rows)}")
+        # pid 1 is init and must always be live; a table that lists everything
+        # EXCEPT init would be a walk that silently dropped a slot.
+        check("init (pid 1) present", any(re.match(r"^\s*1\s+root\s", l) for l in rows),
+              "pid 1 missing from the table")
+        # ...and the untracked columns must say so rather than claim a measured 0.
+        # CPU% and MEM% are untracked -> n/a. USER is NOT: agnos is single-user
+        # (getuid is a literal `return 0`), so every process really is root and
+        # claiming n/a there would be feigning ignorance we do not have.
+        check("CPU%/MEM% read n/a, not a fabricated 0",
+              all(l.count("n/a") >= 2 for l in rows),
+              "a row reported 0 for a value agnos does not track")
+        check("USER reads root (agnos is single-user), not n/a",
+              all(" root " in l for l in rows))
 
         print("[2] absent /proc degrades to n/a, never a false zero")
         check("loadavg reports n/a", "load: n/a" in out)

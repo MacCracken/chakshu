@@ -5,7 +5,7 @@
 > [`state.md`](state.md). This file answers one question: *what is left to reach
 > v1.0, and in which release does it land?*
 >
-> **Current: v0.9.7.** | **Last Updated**: 2026-09-02
+> **Current: v0.9.8.** | **Last Updated**: 2026-09-02
 
 ---
 
@@ -29,6 +29,7 @@ inside it are additive or corrective only.
 | ~~0.9.5~~ | ~~design-spec §1 close-out~~ | **shipped 2026-08-25.** All six §1 features that were in scope since M0 now ship; found and fixed a double-count in the aggregate disk rate; `docs/cli-contract.md` written (criterion 1) and criterion 4 decided |
 | ~~0.9.6~~ | ~~toolchain + dependency refresh~~ | **shipped 2026-09-02.** cyrius `6.5.35` → `6.5.41` (one stdlib addition, zero removals; folded sandhi 1.9.15 fixes silent SSE event loss on the `?` overlay). `bayan` 1.5.2 → 1.5.4 after cyrius 6.5.39 reversed stdlib-vs-dep precedence and left the pin naming a file that no longer linked; **ai-hwaccel held at 2.3.19** per the mihi tracking rule, though 2.3.20 exists. Both manifests cut 328 → 130 lines. `scripts/check.sh` had drifted from `ci.yml` a third time — DCE parity, three security assertions, the `ai/*.cyr` glob and three required files were all missing locally; now 20 gates |
 | ~~0.9.7~~ | ~~no-libc for `shu-ai`~~ | **shipped 2026-09-02.** Removed the last libc bridge: `src/nolibc.cyr` refuses the libssl `dlopen` path, `fdlopen`/`dynlib` left `ai/cyrius.cyml`. Both binaries are pure-syscall (0 `NEEDED`), verified by capturing a real TLS 1.3 ClientHello. **`shu-ai` builds for AGNOS** — striking one of the three AGNOS blockers below |
+| ~~0.9.8~~ | ~~AGNOS process table~~ | **shipped 2026-09-02.** `proclist` #99 — the table renders on AGNOS for the first time, striking the second of the three v1.0 AGNOS blockers. Untracked columns read `n/a`, never a fabricated 0. Remaining gaps audited and filed in the agnos repo |
 | **1.0.0** | Ship as the AGNOS default monitor | Registry promotion, ISO default, announce |
 
 ---
@@ -66,9 +67,15 @@ inside it are additive or corrective only.
 > its own AI-augmented system monitor"*. On AGNOS today, verified by `tests/agnos_qemu.py` against a
 > real kernel:
 >
-> - the **process table is empty** and cannot be fixed from this repo — AGNOS exposes no procfs and
->   no process-enumeration syscall (see *Blocked upstream* below);
-> - **load, cpu, disk and net all render `n/a`** for the same reason;
+> - ~~the **process table is empty** and cannot be fixed from this repo — AGNOS exposes no procfs and
+>   no process-enumeration syscall.~~
+>   ⭐ **STRUCK at v0.9.8 — stale, like the libc reason before it.** agnos 1.56.47 minted
+>   `#99 proclist` and the cyrius wrapper shipped in **6.5.35**, i.e. it was available under the pin
+>   chakshu held *before* v0.9.6. Nothing re-read the syscall table, so the blocker outlived its own
+>   fix. `src/proc_agnos.cyr` implements it; the table renders on a real kernel under QEMU and is
+>   gated by three new `agnos_qemu.py` assertions. CPU%/MEM%/USER read `n/a` — the kernel tracks no
+>   per-process cpu/rss and proclist carries no uid.
+> - **load, cpu, disk and net still render `n/a`** — these are genuine gaps, filed upstream;
 > - ~~**`shu-ai` cannot run at all** — sandhi dlopens libc, which AGNOS has no host for.~~
 >   ⭐ **STRUCK at v0.9.7 — this reason was stale and is now false.** cyrius 6.1.21 had already made
 >   the native TLS stack the default backend; chakshu was linking the libssl bridge only because
@@ -110,10 +117,17 @@ inside it are additive or corrective only.
 
 ## Blocked upstream (not schedulable here)
 
-- **Process table on AGNOS.** AGNOS exposes no procfs and no process-enumeration
-  syscall (`getpid`/`spawn`/`waitpid`/`kill` only), so `shu` on AGNOS renders the
-  column header and no rows. Needs a kernel enumeration primitive first; there is
-  no chakshu-side workaround.
+- ~~**Process table on AGNOS.**~~ **RESOLVED at v0.9.8** — `#99 proclist` (agnos
+  1.56.47, cyrius wrapper since 6.5.35). Implemented in `src/proc_agnos.cyr`.
+- **Per-process CPU time, RSS and uid on AGNOS.** proclist reserves `+56` for cpu
+  and rss and the kernel does not track them yet; the record carries no uid. So
+  CPU%, MEM% and USER read `n/a`. Filed upstream.
+- **Disk and network I/O counters on AGNOS.** No equivalent of `/proc/diskstats`
+  or `/proc/net/dev`, so the `disk:` and `net:` RATE lines read `n/a`. Volume
+  *capacity* is available (`statfs` #103, `blk_enum` #75) and is a separate,
+  implementable panel. Filed upstream.
+- **Load average on AGNOS.** agnos `sysinfo` #35 is a 40-byte struct with no
+  `loads[]`. Filed upstream.
 
 ---
 

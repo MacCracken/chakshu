@@ -1,0 +1,151 @@
+# proc_agnos.cyr — AGNOS-native process table, on `proclist` #99 (v0.9.8).
+#
+# WHY THIS EXISTS
+#
+# Until now `shu` on AGNOS rendered the process table's column header and ZERO
+# ROWS, and both roadmap.md and state.md recorded that as blocked upstream with
+# "no chakshu-side workaround": AGNOS has no procfs, and the ring-3 surface was
+# getpid/spawn/waitpid/kill with nothing that could answer "what is running?".
+#
+# That stopped being true at **agnos 1.56.47**, which minted `#99 proclist`, and
+# the cyrius wrapper has shipped since **6.5.35** — i.e. it was already available
+# under the pin chakshu had *before* the v0.9.6 bump. The blocker had simply
+# outlived its own fix, unnoticed, because nothing re-read the syscall table.
+#
+#   sys_proclist(buf, max) -> record count, or -1
+#
+# Record is 64 B, little-endian, one per live slot:
+#   +0   u64 pid
+#   +8   u64 state     1 = ready · 2 = running · 3 = claiming (0 = dead, skipped)
+#   +16  u64 ppid      0 = init
+#   +24  u8  name[32]  NUL-terminated basename, recorded by the ELF loader
+#   +56  u64 reserved  always 0 today
+#
+# ⚠ WHAT AGNOS DOES NOT GIVE, AND WHY THOSE COLUMNS READ `n/a`
+#
+# The kernel does not track per-process cpu time or rss yet — the syscall's own
+# ABI note says so, and reserves +56 for them without changing the record size.
+# So CPU% and MEM% have no data behind them on AGNOS.
+#
+# USER is different and must NOT be lumped in: agnos is single-user, its getuid is
+# a literal `return 0` and no per-task uid exists in the kernel at all, so every
+# process really is root. That is a known value, not a missing one — it renders
+# `root`.
+#
+# They are therefore rendered `n/a`, NOT 0. This is the rule src/tui.cyr already
+# argues for in its own comments — "a blank field reads as a render bug; `n/a` is
+# the honest answer" — and it is the difference between reporting a measured zero
+# and fabricating one. A row claiming 0% CPU for a spinning process would be a
+# lie the monitor invented; `n/a` is a fact about the kernel.
+#
+# ⚠ A SNAPSHOT, NOT A HANDLE. The kernel walks its table under preempt_disable,
+# so the set cannot change mid-walk, but a pid may exit before we act on it. That
+# race belongs to the caller — the kill path re-probes before signalling.
+#
+# ⚠ GUARD THE CALL. A kernel older than 1.56.47 has no `#99` arm. The ABI note is
+# explicit that a negative return means "this kernel cannot enumerate" and must
+# NOT be conflated with "the system has no processes" — they are different facts
+# and a monitor that confuses them is lying about the machine. `_procs_fill_agnos`
+# returns -1 on a negative proclist and leaves `_proc_n` at 0; callers surface
+# that as the same degraded state as any other unreadable source.
+
+# The entire body is AGNOS-only: `sys_proclist` is an agnos syscall and does not
+# resolve on Linux, so an ungated body would warn on every lean Linux build.
+# Same posture as src/tui_agnos.cyr (audit AG-7).
+#ifdef CYRIUS_TARGET_AGNOS
+
+var PROCLIST_REC_SIZE = 64;
+var PROCLIST_ST_READY = 1;
+var PROCLIST_ST_RUN   = 2;
+var PROCLIST_ST_CLAIM = 3;
+
+# Sentinel for "the kernel does not track this". Distinct from 0, which is a
+# legitimate measured value for cpu% and rss on Linux.
+var PROC_NA = 0 - 1;
+
+# Lazy scratch for the proclist snapshot: PROC_MAX * 64 B, alloc'd once and
+# reused every frame. Module-scope rather than a local because PROC_MAX * 64 is
+# 512 KB, far past any per-fn stack budget.
+var _proclist_buf = 0;
+
+fn _proclist_ensure() {
+    if (_proclist_buf == 0) {
+        _proclist_buf = alloc(PROC_MAX * PROCLIST_REC_SIZE);
+    }
+    return 0;
+}
+
+# Map an agnos scheduler state to the single status character the table renders.
+#
+# Linux's `R` covers TASK_RUNNING, which is BOTH on-CPU and on-runqueue, so
+# folding agnos's `ready` and `running` into `R` is not a loss of fidelity —
+# it is exactly the Linux semantics a reader already knows. `claiming` has no
+# Linux counterpart and gets its own letter rather than being forced into one.
+fn _proclist_state_char(st) {
+    if (st == PROCLIST_ST_READY) { return 82; }     # 'R' — runnable
+    if (st == PROCLIST_ST_RUN)   { return 82; }     # 'R' — on-CPU
+    if (st == PROCLIST_ST_CLAIM) { return 67; }     # 'C' — claiming
+    return 63;                                       # '?' — unknown to us
+}
+
+# Fill chakshu's process table from one proclist snapshot.
+#
+# Writes the shared 56-byte record layout that processes_render and the TUI both
+# read, so nothing downstream needs an agnos branch:
+#   +0 pid · +8 cpu_pct · +16 rss · +24 state char · +32 comm[16] · +48 uid
+# with cpu_pct / rss set to PROC_NA and uid set to 0 (root — agnos is single-user).
+#
+# Returns the row count, or -1 if this kernel cannot enumerate.
+fn _procs_fill_agnos(sort_key) {
+    _proc_ensure_init();
+    _proclist_ensure();
+    _proc_n = 0;
+
+    var n = sys_proclist(_proclist_buf, PROC_MAX);
+    if (n < 0) { return 0 - 1; }
+    if (n > PROC_MAX) { n = PROC_MAX; }
+
+    var i = 0;
+    while (i < n) {
+        var src = _proclist_buf + i * PROCLIST_REC_SIZE;
+        var rec = _proc_recs + _proc_n * PROC_REC_SIZE;
+
+        store64(rec + 0,  load64(src + 0));                      # pid
+        store64(rec + 8,  PROC_NA);                              # cpu% — untracked
+        store64(rec + 16, PROC_NA);                              # rss  — untracked
+        store64(rec + 24, _proclist_state_char(load64(src + 8)));
+        # uid: proclist carries no field, but agnos is SINGLE-USER — its getuid
+        # (kernel/core/syscall.cyr:8657) is the literal `return 0`, and no per-task
+        # uid exists anywhere in the kernel. So every process IS root; 0 is a KNOWN
+        # value, not a missing one, and n/a here would claim ignorance we do not have.
+        store64(rec + 48, 0);                                    # uid  — root, always
+
+        # comm: proclist gives 32 bytes, the shared record holds 16. Copy at most
+        # 15 and always NUL-terminate — _proc_cmp_comm and strlen both stop at the
+        # first null, and an unterminated 16th byte would run into the uid slot.
+        var k = 0;
+        while (k < 15) {
+            var c = load8(src + 24 + k);
+            if (c == 0) { break; }
+            store8(rec + 32 + k, c);
+            k = k + 1;
+        }
+        store8(rec + 32 + k, 0);
+
+        _proc_n = _proc_n + 1;
+        i = i + 1;
+    }
+
+    # Sort. CPU and MEM both rank on PROC_NA here, so every row compares equal and
+    # the "sorted" table would be arbitrary kernel-slot order wearing a sort's name.
+    # Fall back to PID, which is real data. NAME is genuine (proclist carries it) and
+    # USER is genuine too — every row is root, and that comparator already tiebreaks
+    # on pid, so it degenerates correctly without a special case.
+    var key = sort_key;
+    if (key == SORT_CPU) { key = SORT_PID; }
+    if (key == SORT_MEM) { key = SORT_PID; }
+    _proc_sort(key);
+    return _proc_n;
+}
+
+#endif

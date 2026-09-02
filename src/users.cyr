@@ -110,6 +110,21 @@ fn users_load() {
 # Write pid-owner `uid`'s display name into `out` (cap bytes, NUL-terminated).
 # Returns the byte length written. Falls back to the decimal uid.
 fn users_name_for(uid, out, cap) {
+    # uid 0 is root BY DEFINITION on every Unix-alike, so answer it WITHOUT
+    # touching /etc/passwd.
+    #
+    # ⚠ THE ORDER HERE IS LOAD-BEARING, not a micro-optimisation. agnos is
+    # single-user: every process reports uid 0, so on that target this is the only
+    # branch ever taken. Calling users_load() first would make every AGNOS frame
+    # alloc a 64 KB buffer and open /etc/passwd — a file agnos does not have, on a
+    # platform with 488 MiB of RAM and no procfs. Doing so hung the boot outright
+    # (caught by tests/agnos_qemu.py, which is why that suite is not optional).
+    # On Linux the answer is identical to what the passwd scan would return.
+    if (uid == 0) {
+        store8(out, 114); store8(out + 1, 111); store8(out + 2, 111); store8(out + 3, 116);
+        store8(out + 4, 0);
+        return 4;
+    }
     users_load();
     var i = 0;
     while (i < _users_n) {

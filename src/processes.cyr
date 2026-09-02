@@ -158,6 +158,11 @@ fn _proc_read_uid(pid_str) {
 
 fn processes_sample1() {
     _proc_ensure_init();
+    #ifdef CYRIUS_TARGET_AGNOS
+    # No CPU-tick baseline to seed: proclist carries no per-process cpu time,
+    # so the two-sample delta the Linux path needs has nothing to sample.
+    return 0;
+    #endif
     map_u64_clear(_proc_map);
     var scanned = _proc_scan_pids();
     var i = 0;
@@ -281,6 +286,12 @@ fn _proc_sort(sort_key) {
 # used, so per-pid percentages stay consistent with the summary line.
 fn processes_sample_delta(total_delta, ncores, sort_key) {
     _proc_ensure_init();
+    #ifdef CYRIUS_TARGET_AGNOS
+    # agnos has no procfs; the table comes from proclist #99 in one shot.
+    # total_delta/ncores are meaningless without per-process cpu time.
+    _procs_fill_agnos(sort_key);
+    return 0;
+    #endif
     map_u64_clear(_proc_map_b);
     _proc_n = 0;
     var scanned = _proc_scan_pids();
@@ -336,6 +347,12 @@ fn processes_sample_delta(total_delta, ncores, sort_key) {
 
 fn processes_sample2(total_delta, ncores, sort_key) {
     _proc_n = 0;
+    #ifdef CYRIUS_TARGET_AGNOS
+    # agnos has no procfs; the table comes from proclist #99 in one shot.
+    # total_delta/ncores are meaningless without per-process cpu time.
+    _procs_fill_agnos(sort_key);
+    return 0;
+    #endif
     # R4: _proc_scan_pids() also calls _proc_ensure_init(), which sample2
     # previously never did — it relied on sample1 having run first.
     var scanned = _proc_scan_pids();
@@ -442,6 +459,20 @@ fn _proc_read_cmdline(pid_str, out_buf, max_len) {
 # decimal-digits-of-n; otherwise the number prints unpadded (no
 # truncation — better to overflow the column than lie about the
 # value).
+# Right-align "n/a" in `width` columns. Used where the kernel does not track a
+# value at all — a measured 0 and an untracked value are different facts, and a
+# monitor that prints 0 for the second is inventing data. On Linux nothing ever
+# reaches this: every value below is >= 0 there, so the branch is inert.
+fn _proc_print_na_pad(width) {
+    var sp = width - 3;
+    while (sp > 0) {
+        syscall(1, 1, " ", 1);
+        sp = sp - 1;
+    }
+    syscall(1, 1, "n/a", 3);
+    return 0;
+}
+
 fn _proc_print_int_pad(n, width) {
     var w = 1;
     var x = n;
@@ -464,6 +495,11 @@ fn _proc_print_int_pad(n, width) {
 fn proc_rec_uid(rec) {
     var u = load64(rec + 48);
     if (u >= 0) { return u; }
+    #ifdef CYRIUS_TARGET_AGNOS
+    # There is no /proc/<pid>/status to fall back to, and proclist has no uid
+    # field, so -1 is final rather than "not read yet".
+    return 0 - 1;
+    #endif
     var pbuf[24];
     _proc_int_to_cstr(load64(rec + 0), &pbuf);
     u = _proc_read_uid(&pbuf);
@@ -495,8 +531,12 @@ fn processes_render(top_n, mem_total_kb) {
         var rss = load64(rec + 16);
         var st  = load64(rec + 24);
         var mem = 0;
-        if (mem_total_kb > 0) {
-            mem = rss * 400 / mem_total_kb;
+        if (rss < 0) {
+            mem = 0 - 1;                        # untracked -> propagate, don't zero
+        } else {
+            if (mem_total_kb > 0) {
+                mem = rss * 400 / mem_total_kb;
+            }
         }
         _proc_print_int_pad(pid, 6);
         syscall(1, 1, " ", 1);
@@ -505,7 +545,15 @@ fn processes_render(top_n, mem_total_kb) {
         # which is the field a reader actually scans, and 9 covers the overwhelming
         # majority of real account names.
         var unm[24];
-        var ul = users_name_for(proc_rec_uid(rec), &unm, 24);
+        var uidv = proc_rec_uid(rec);
+        var ul = 3;
+        if (uidv < 0) {
+            # No owner is knowable (agnos: proclist carries no uid field).
+            store8(&unm, 110); store8(&unm + 1, 47); store8(&unm + 2, 97);
+            store8(&unm + 3, 0);
+        } else {
+            ul = users_name_for(uidv, &unm, 24);
+        }
         if (ul > 9) { ul = 9; }
         syscall(1, 1, &unm, ul);
         var upad = 9 - ul;
@@ -515,8 +563,8 @@ fn processes_render(top_n, mem_total_kb) {
         store8(&sc, st);
         store8(&sc + 1, 0);
         syscall(1, 1, &sc, 1);
-        _proc_print_int_pad(cpu, 6);
-        _proc_print_int_pad(mem, 6);
+        if (cpu < 0) { _proc_print_na_pad(6); } else { _proc_print_int_pad(cpu, 6); }
+        if (mem < 0) { _proc_print_na_pad(6); } else { _proc_print_int_pad(mem, 6); }
         syscall(1, 1, " ", 1);
         # CMD: prefer /proc/<pid>/cmdline (full command line, joined
         # by spaces). Kernel threads have empty cmdline — fall back to
@@ -528,8 +576,18 @@ fn processes_render(top_n, mem_total_kb) {
         if (cmd_n > 0) {
             syscall(1, 1, &cmd_buf, cmd_n);
         } else {
+            # No cmdline. On Linux that means a kernel thread and comm is always
+            # set, so the bracketed comm is the htop convention. On agnos a slot
+            # the ELF loader never named (pid 0, the idle task) has an EMPTY comm
+            # too, and "[]" reads as a truncation bug rather than as an absent
+            # name — so say n/a, the same word the untracked columns use.
+            var cl = strlen(rec + 32);
             syscall(1, 1, "[", 1);
-            syscall(1, 1, rec + 32, strlen(rec + 32));
+            if (cl > 0) {
+                syscall(1, 1, rec + 32, cl);
+            } else {
+                syscall(1, 1, "n/a", 3);
+            }
             syscall(1, 1, "]", 1);
         }
         syscall(1, 1, "\n", 1);

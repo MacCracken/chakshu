@@ -4,6 +4,68 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.8] — 2026-09-02 — AGNOS grows a process table
+
+### Added — the AGNOS process table, on `proclist` #99
+
+`shu` on AGNOS rendered the table's column header and **zero rows**. Both `roadmap.md` and
+`state.md` recorded that as blocked upstream, "no chakshu-side workaround", and it was cited as one
+of the reasons the v1.0 milestone premise does not hold.
+
+**It had not been true for some time.** agnos 1.56.47 minted `#99 proclist`, and the cyrius wrapper
+has shipped since **6.5.35** — the pin chakshu had *before* the v0.9.6 bump. The blocker outlived
+its own fix because nothing re-read the syscall table. (Same failure as v0.9.7's "sandhi dlopens
+libc": a stale claim repeated from the repo's own docs.)
+
+- **New `src/proc_agnos.cyr`** fills chakshu's shared 56-byte record from proclist's 64-byte
+  snapshot, so `processes_render` and the TUI need no AGNOS branch. `processes_sample1` /
+  `_delta` / `_sample2` each dispatch to it under `#ifdef CYRIUS_TARGET_AGNOS`; **no call site
+  changed** and the Linux path is untouched.
+- **Verified on a real kernel**: `tests/agnos_qemu.py` now asserts the table is populated, that
+  pid 1 is present, that no row reports a fabricated `0`, and that USER reads `root`. The suite goes
+  **17 → 21 checks** and renders pid 0–3 under QEMU (agnos 1.56.58).
+
+**CPU% and MEM% read `n/a`, not `0`.** The kernel does not track per-process cpu time or rss (the
+ABI reserves `+56` for them). A row claiming `0%` for a spinning process would be data the monitor
+invented; `n/a` is a fact about the kernel — the rule `src/tui.cyr` already argues for and did not
+previously apply to its own primary panel.
+
+**USER reads `root`, and that is not the same kind of answer.** proclist carries no uid field, so
+the first cut rendered `n/a` there too. That was wrong: `getuid` #15 is the literal `return 0`
+(`kernel/core/syscall.cyr:8657`) and no per-task uid exists anywhere in the agnos kernel — it is
+single-user, so every process genuinely **is** root. `n/a` would have been feigning ignorance we do
+not have. Caught by auditing the kernel source before filing an upstream issue about the "missing"
+uid; the issue now explicitly asks agnos **not** to add one.
+
+⚠ **That fix then hung the AGNOS boot, and `tests/agnos_qemu.py` caught it.** Setting uid to 0 made
+the render call `users_name_for(0)` → `users_load()`, which allocates a 64 KB buffer and opens
+`/etc/passwd` — a file agnos does not have, on a platform with no procfs. The `uid == 0` → `root`
+short-circuit now sits **before** `users_load()`, so that path is never entered. The ordering is
+load-bearing, not a micro-optimisation, and is commented as such. On Linux the answer is identical
+to what the passwd scan returns.
+
+**`ready` and `running` both render `R`.** Linux's `R` covers `TASK_RUNNING`, which is *both*
+on-CPU and on-runqueue, so this matches the semantics a reader already knows rather than losing
+fidelity. `claiming` has no Linux counterpart and renders `C`.
+
+**`--sort cpu|mem` falls back to PID on AGNOS.** Both rank on the same sentinel, so every row would
+compare equal and the result would be arbitrary kernel-slot order wearing a sort's name. `--sort
+name` is genuine (proclist carries it) and `--sort user` needs no special case — every row is root
+and that comparator already tiebreaks on pid, so it degenerates correctly on its own.
+
+**An unnamed slot renders `[n/a]`, not `[]`.** pid 0 (the idle task) is never named by the ELF
+loader, and an empty `[]` reads as a truncation bug rather than as an absent name.
+
+### Known gaps, filed upstream
+
+`docs/development/issues/` in the agnos repo — see that filing for the audited list. In summary:
+volume capacity is **not** missing (`statfs` #103, `blk_enum` #75, `blk_info` #79 all exist); what
+is absent is per-device disk and per-interface network **I/O counters**, per-process cpu/rss/uid,
+and load average. Separately, `kernel/core/syscall.cyr:10213` `kprintln`s
+`proclist: first call from ring 3` to the console on first call, which lands in the middle of
+`shu -p` output — a mode design-spec §2.2 calls "sacred for pipes".
+
+
 ## [0.9.7] — 2026-09-02 — the no-libc rule loses its exception, and `shu-ai` builds for AGNOS
 
 ### Fixed — `shu-ai` no longer links a libc bridge, and the "documented exception" was obsolete
