@@ -4,6 +4,149 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.6] — 2026-09-02 — toolchain + dependency refresh, and the manifests stop being a ledger
+
+### Changed — Cyrius toolchain pin `6.5.35` → `6.5.41` (both manifests)
+
+The stdlib file-list diff across the span is **one addition, zero removals** (`hashseed.cyr`, new
+per-process hash seeding). All 22 lean and 37 AI declared stdlib modules still resolve by name —
+no repeat of the `json`→`bayan` or `agnosys`→`sys` class of break. Top-level symbol count
+10,908 → 10,973 (65 added, **0 removed**).
+
+Three folded-in libraries move with the toolchain:
+
+- **sandhi 1.9.14 → 1.9.15.** The only functional change is an SSE fix: the parser no longer
+  consumes a line belonging to an event still being assembled, which previously caused **silent
+  event loss** whenever a TCP read boundary split a field line from its terminating blank line —
+  "no error, no short read, no truncation the caller could detect". That is exactly the path
+  `shu-ai`'s streamed `?` overlay runs on, so this is a live bugfix chakshu inherits for free.
+  All 8 `sandhi_*` entry points `src/ai.cyr` calls are unchanged in name and arity (public fn
+  surface 842 → 842, zero removals).
+- **bayan 1.5.2 → 1.5.4** — see below; additive only (944 → 996 symbols, all 52 additions in the
+  `bayan_toml_*` family, **zero removals, zero signature changes**).
+- **niyama** unchanged at 1.0.7; the folded copy is byte-identical to the git-dep dist.
+
+`hashmap` hashing became per-process randomized. Structurally harmless here: chakshu only ever
+makes key-addressed `map_u64_*` calls and never iterates a map, so no output ordering depends on it.
+
+### Changed — `[deps.bayan]` `1.5.2` → `1.5.4`, because the pin had stopped describing the build
+
+**Cyrius 6.5.39 reversed the precedence between a git dep and a same-named stdlib leaf** (bisected:
+6.5.38 silently lets the dep artifact overwrite the stdlib snapshot; 6.5.39 keeps the stdlib
+snapshot, skips the dep artifact, and warns). Crossing that boundary made `ai/cyrius.cyml`'s
+`tag = "1.5.2"` inert — `cyrius deps` kept the toolchain's folded bayan **1.5.4** and skipped the
+pinned 1.5.2 dist, so the manifest asserted one version while a genuinely different file linked.
+
+Moving the tag to 1.5.4 does not change a single byte of the binary — 1.5.4 was already what
+compiled. It makes the declaration true: the skipped artifact is now **byte-identical** to the
+kept stdlib copy (`md5 21e1dc32…` for all three of `ai/lib/bayan.cyr`, the 6.5.41 stdlib copy, and
+the 1.5.4 dep dist). The block itself stays — deleting it would let ai-hwaccel's transitive
+`dist/bayan-json.cyr` sublib land beside the monolith and produce 163 duplicate symbol definitions.
+
+### Changed — both `cyrius.cyml` manifests cut from 328 lines to 130
+
+The manifests had accreted ~200 lines of per-bump archaeology, and a material fraction of it was
+**already false**: it described mihi 1.2.4 / ai-hwaccel 2.3.18 while the pins read 1.2.5 / 2.3.19,
+and it documented stdlib entries (`bayan`, `unicode`, `agnosys`, `net`, `sandhi`, `niyama`) that
+were not in the lean array at all. A manifest is for compilation; history belongs in the changelog
+and `docs/development/state.md`, where it is indexed and read.
+
+Root 230 → 67 lines, `ai/` 98 → 63. **Every functional line is preserved character-for-character** —
+a comment-stripped diff of old vs new shows the pin as the sole difference in each file, and the
+lean binary built from the minimal manifest is `sha256 9e08aa45…`, byte-identical to one built from
+the verbose manifest at the same pin. What survives is one short line of intent per block, keeping
+the four load-bearing invariants that a future editor could otherwise break: no transport modules
+in the lean manifest, sandhi as a stdlib module and never a git dep, niyama never consumed both
+ways at once, and the ai-hwaccel pin tracking **mihi's** tag rather than ai-hwaccel's latest.
+
+⚠ One trap worth recording: the CI lean-network gate greps the range from `[deps]` to the next `[`
+line, which **includes the comments in that window**. A one-line survivor quoting `"sandhi"` or
+`"niyama"` there would turn CI red. Verified non-vacuously — injecting exactly that comment fails
+the gate.
+
+### Dependencies held, deliberately
+
+| dep | pin | latest | why |
+|---|---|---|---|
+| darshana | 1.0.0 | 1.0.0 | current |
+| mihi | 1.2.5 | 1.2.5 | current |
+| niyama | 1.0.7 | 1.0.7 | current |
+| **ai-hwaccel** | **2.3.19** | **2.3.20** | **held.** The pin tracks mihi's own `[deps.ai-hwaccel]` tag, and mihi 1.2.5 pins 2.3.19 |
+
+This cycle is exactly the case the tracking rule exists for — ai-hwaccel's latest and mihi's pin
+have diverged, so "update everything to latest" would have been the wrong move. (2.3.20 is in any
+case not a body change: its `dist/ai-hwaccel.cyr` differs from 2.3.19's only in the version header,
+and the two `dist/*.deps` sidecars are identical.)
+
+### Fixed — `scripts/check.sh` had drifted from `ci.yml` for the third time
+
+The whole point of `check.sh` is that it *is* the CI gate rather than resembling it. An audit of the
+two files side by side found it had silently fallen behind again, in four ways — each proven with a
+probe that turns CI red while `check.sh` stayed green:
+
+- the **entire DCE-parity step** was missing (`CYRIUS_DCE=1` build + smoke on the DCE'd binary);
+- three of CI's eight security assertions were absent — the **FFI/dynlib/pam import scan**, the
+  **large-buffer awk**, and the **non-`CHAKSHU_` env-var read scan** (probes: adding
+  `include "lib/dynlib.cyr"`, `var _probe_big[9000];`, and `getenv("HOOSH_API_KEY")` each failed CI
+  and passed `check.sh`);
+- `AI_SRC` was a hardcoded three-file list where CI globs `ai/*.cyr`, and CI's "the gate is dead
+  again" empty-guard was missing;
+- the required-files list checked 8 files against CI's 11 (`CONTRIBUTING.md`, `cyrius.cyml`,
+  `docs/adr/0001-binary-name-shu.md` absent).
+
+All four are closed. `check.sh` now runs 20 gates.
+
+### Binary size
+
+Measured clean-room on both toolchains (isolated `CYRIUS_HOME` for the baseline — the wrapper
+re-execs to the manifest pin but resolves `cycc` from `~/.cyrius/bin`, so a bare pin edit silently
+compiles with the *current* cycc):
+
+| binary | 6.5.35 | 6.5.41 | Δ |
+|---|---|---|---|
+| lean `shu` | 659,592 B | **663,704 B** | +4,112 (+0.62 %) |
+| `shu-agnos` | 657,320 B | **657,368 B** | +48 (+0.007 %) |
+| `shu-ai` | 2,936,056 B | **2,960,696 B** | +24,640 (+0.84 %) |
+
+No codegen swing of the 6.5.16 class. Lean `shu` holds against design-spec §8's revised
+< 768 KB target with ~120 KB of headroom.
+
+### Benchmarks re-captured — and the CPU rise is *not* this cut
+
+`docs/benchmarks.md` promises every figure is measured rather than carried forward, so the whole
+file was re-taken on 6.5.41. The 1 Hz TUI CPU reads **0.600 %** against v0.9.5's 0.533 % — a rise,
+on a release that changed no monitor source.
+
+Rather than assume, a **same-box 6.5.35 control** was rebuilt from this tree with an isolated
+`CYRIUS_HOME` (the wrapper re-execs to the manifest pin but resolves `cycc` from `~/.cyrius/bin`,
+so editing the pin alone compares a toolchain against itself) and benchmarked in alternating runs:
+
+| | 1 Hz | 4 Hz | peak RSS |
+|---|---|---|---|
+| cyrius 6.5.35 control | 0.633 % / 0.600 % | 2.283 % | 4,692 kB |
+| cyrius 6.5.41 this cut | 0.650 % / 0.600 % | 2.332 % | 4,712 kB |
+
+The toolchain delta (≈ +0.02 pp) is **smaller than one binary's run-to-run spread** (±0.05 pp). The
+gap against v0.9.5 is box state — kernel 7.1.9-arch1-2 → 7.1.10-arch1-1, and a process count that
+drifted 283 → 293 during the run itself. Which is the §8 complaint restated: a CPU budget with no
+named workload cannot separate a regression from a busier machine, and this cut demonstrates the
+unstated workload moving the reading further than a whole toolchain generation does.
+
+Still recorded as a **miss against `< 0.5 %`**, not waived. Other figures: peak RSS 4,712 kB
+(vs < 8 MB), cold start 0.343 ms (vs < 5 ms), `shu -p` 109.4 ms wall = 100 ms sample window +
+~9.4 ms work (vs < 30 ms of work).
+
+### Verification
+
+`bash scripts/check.sh` — **20 passed, 0 failed**. 179 monitor + 39 AI unit tests, 29 smoke gates,
+14/14 PTY scenarios. `tests/agnos_qemu.py` passes **17/17** against the 6.5.41 `--agnos` binary
+(booted on a real AGNOS kernel under QEMU — not part of CI).
+
+Not run: the manual TUI check against a **live** hoosh. The folded sandhi 1.9.15 SSE fix touches the
+streamed `?` overlay and nothing automated exercises a live stream (`hoosh_stub_smoke.py` covers the
+`--explain` one-shot only), so that is the one behaviour in this bump a gate cannot vouch for.
+
+
 ## [0.9.5] — 2026-08-25 — the six §1 features that were in scope since M0
 
 ### Added — `scripts/check.sh`: run locally exactly what CI runs

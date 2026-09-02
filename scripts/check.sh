@@ -97,11 +97,49 @@ check "hoosh-stub smoke" $rc
 [ "$rc" = "0" ] || tail -12 /tmp/chk-hoosh.log
 echo ""
 
+echo "--- DCE parity ---"
+# Release builds set CYRIUS_DCE=1. The DCE'd binary must behave identically, or
+# the pass dropped something live. ci.yml runs this; check.sh did not until 0.9.6.
+CYRIUS_DCE=1 cyrius build src/main.cyr build/shu-dce > /tmp/chk-dce.log 2>&1 && rc=0 || rc=$?
+check "DCE build ($([ -f build/shu-dce ] && wc -c < build/shu-dce) bytes)" $rc
+[ "$rc" = "0" ] || tail -20 /tmp/chk-dce.log
+bash scripts/smoke.sh build/shu-dce > /tmp/chk-smoke-dce.log 2>&1 && rc=0 || rc=$?
+check "smoke (DCE'd shu)" $rc
+[ "$rc" = "0" ] || tail -12 /tmp/chk-smoke-dce.log
+echo ""
+
 echo '--- Security scan (a SEPARATE CI job) ---'
 # ⚠ A SEPARATE CI JOB, which is precisely why it was never run locally and why
 # v0.9.4 shipped a red build. Mirrors ci.yml's AI-privacy scan.
-AI_SRC="src/ai.cyr src/ai_stub.cyr ai/main.cyr"
+# Built the way ci.yml builds it (glob ai/*.cyr, not a hardcoded list) so a new
+# AI source file is scanned the moment it lands.
+AI_SRC=""
+[ -f src/ai.cyr ] && AI_SRC="$AI_SRC src/ai.cyr"
+[ -f src/ai_stub.cyr ] && AI_SRC="$AI_SRC src/ai_stub.cyr"
+for f in ai/*.cyr; do [ -f "$f" ] && AI_SRC="$AI_SRC $f"; done
 secfail=0
+# ci.yml's dead-gate guard: an empty AI_SRC means the scan enumerated nothing and
+# every negative assertion below would pass vacuously.
+[ -n "$AI_SRC" ] || { echo "      AI privacy scan found no AI sources — the gate is dead"; secfail=1; }
+# CLAUDE.md "Don't introduce libc / FFI / ncurses" — cffi/dynlib/fdlopen/pam are
+# the FFI on-ramps. Comments tolerated; only includes flagged.
+ffi_hits=$(grep -rnE 'include "lib/(cffi|dynlib|fdlopen|pam)\.cyr"' src/ 2>/dev/null || true)
+[ -n "$ffi_hits" ] && { echo "      FFI/dynlib/pam library import:"; echo "$ffi_hits"; secfail=1; }
+# CLAUDE.md "heap-allocate large data", 64 KiB. Element size is scope-dependent:
+# module-scope `var X[N]` is N*8 bytes, function-local is N*1. Two rules, split by
+# column-1 anchoring. `# bigbuf-ok:` is the visible escape hatch.
+awk '
+  /bigbuf-ok:/ { next }
+  /^var [A-Za-z_][A-Za-z0-9_]*\[[0-9]+\]/ {
+    match($0, /\[[0-9]+\]/); s=substr($0,RSTART+1,RLENGTH-2); n=s+0;
+    if (n * 8 >= 65536) print "      "FILENAME":"FNR": large module-scope buffer ("n" elems = "n*8" bytes)"
+    next
+  }
+  /^[ \t]+var [A-Za-z_][A-Za-z0-9_]*\[[0-9]+\]/ {
+    match($0, /\[[0-9]+\]/); s=substr($0,RSTART+1,RLENGTH-2); n=s+0;
+    if (n >= 65536) print "      "FILENAME":"FNR": large stack buffer ("n" bytes)"
+  }' src/*.cyr > /tmp/chk-bigbuf.txt
+[ -s /tmp/chk-bigbuf.txt ] && { cat /tmp/chk-bigbuf.txt; secfail=1; }
 marked=$(grep -n 'privacy: DENY' $AI_SRC 2>/dev/null || true)
 bad_marker=$(echo "$marked" | grep -v 'return 0;' | grep . || true)
 [ -n "$bad_marker" ] && { echo "      marker not on a refusal line:"; echo "$bad_marker"; secfail=1; }
@@ -110,6 +148,10 @@ home_hits=$(grep -n '"/home/' $AI_SRC 2>/dev/null | grep -v 'privacy: DENY' || t
 for deny in '/proc/' '/sys/' '/dev/' '/home/'; do
     grep -q "\"$deny\".*privacy: DENY" $AI_SRC 2>/dev/null || { echo "      denylist no longer refuses $deny"; secfail=1; }
 done
+# getenv-equivalent: allowlist by ARGUMENT. The generic helper body is
+# `getenv(name)`; every caller must pass a CHAKSHU_* literal.
+env_hits=$(grep -n 'env_get\|getenv' $AI_SRC 2>/dev/null | grep -v 'getenv(name)' | grep -v 'CHAKSHU_' || true)
+[ -n "$env_hits" ] && { echo "      AI prompt path reads a non-CHAKSHU_ env var:"; echo "$env_hits"; secfail=1; }
 lean_net=$(sed -n '/^\[deps\]/,/^\[/p' cyrius.cyml | grep -oE '"(sandhi|net|http|tls|ws|dynlib|fdlopen|niyama)"' || true)
 [ -n "$lean_net" ] && { echo "      lean manifest declares a network module: $lean_net"; secfail=1; }
 sfd_hits=$(grep -rnE 'file_close\(\s*sfd' src/ 2>/dev/null || true)
@@ -125,8 +167,10 @@ grep -qE '^version *= *"\$\{file:VERSION\}"' cyrius.cyml || { echo "      cyrius
 grep -qE "CHAKSHU_VERSION *= *\"chakshu ${V}\"" src/cli.cyr || { echo "      CHAKSHU_VERSION != ${V}"; vfail=1; }
 check "version consistency (VERSION=${V})" $vfail
 dfail=0
-for f in README.md CHANGELOG.md VERSION LICENSE CLAUDE.md docs/design-spec.md \
-         docs/development/roadmap.md docs/development/state.md; do
+for f in README.md CHANGELOG.md VERSION CONTRIBUTING.md LICENSE \
+         cyrius.cyml CLAUDE.md \
+         docs/design-spec.md docs/development/roadmap.md \
+         docs/development/state.md docs/adr/0001-binary-name-shu.md; do
     [ -f "$f" ] || { echo "      missing: $f"; dfail=1; }
 done
 check "required files present" $dfail

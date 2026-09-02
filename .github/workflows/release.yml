@@ -133,8 +133,8 @@ jobs:
 
       - name: Package release artifacts
         # Ships both binaries + project metadata as separate tarballs:
-        #   chakshu-<ver>-<target>      → lean `shu` (monitor, ~0.84 MB)
-        #   chakshu-ai-<ver>-<target>   → `shu-ai` (+AI, ~2.57 MB)
+        #   chakshu-<ver>-<target>      → lean `shu` (monitor, ~0.66 MB)
+        #   chakshu-ai-<ver>-<target>   → `shu-ai` (+AI, ~2.96 MB)
         # No vendored lib/ — consumers building from source run
         # `cyrius deps` themselves. The downstream SHA256/release steps
         # glob *.tar.gz, so a second tarball flows through automatically.

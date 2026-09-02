@@ -73,7 +73,10 @@ Build-specific entries + AI module:
    of *being* it — once it missed the AI-privacy scan (a separate CI job), once it
    walked `src/` and `ai/` while the fmt gate also covers `tests/*.tcyr` and
    `ai/tests/*.tcyr`. If you add a gate to `ci.yml`, add it to `scripts/check.sh` in
-   the same edit.
+   the same edit. ⛔ That rule has been broken every cut so far — v0.9.6 found
+   `check.sh` missing the whole DCE-parity step, three of CI's eight security
+   assertions and three of its eleven required files. **At each cut, diff the two
+   files gate-by-gate**, and prove any gate you add by making it FAIL first.
 4. Manual TUI check on a real terminal — type checks can't catch ANSI regressions or termios state leaks
 5. `python3 tests/agnos_qemu.py build/shu-agnos` if the change touches the AGNOS path.
    Not in `check.sh` or CI: it boots a real AGNOS kernel under QEMU and needs

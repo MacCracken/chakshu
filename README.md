@@ -20,7 +20,7 @@ The Sanskrit name **चक्षु** *chakṣu* means *the eye* / *the faculty 
 
 ## Status
 
-**v0.9.5 — monitor feature-complete and audited; v1.0 is gated on the criteria in
+**v0.9.6 — monitor feature-complete and audited; v1.0 is gated on the criteria in
 [docs/development/roadmap.md](docs/development/roadmap.md), not on features.** What works today:
 
 - **Plain snapshot** (`shu -p`) — host / uptime / load / mem / cpu / disk / net, GPU telemetry, and a
@@ -43,8 +43,8 @@ The Sanskrit name **चक्षु** *chakṣu* means *the eye* / *the faculty 
 - **AGNOS** (v0.9.3) — both `-p` and the **TUI** run on AGNOS, via a poll loop over `kbscan` #42 and
   `winsize` #60 in place of the Linux termios/SIGWINCH/epoll trio. See the caveats below.
 
-**Two binaries.** The default **`shu`** is the lean monitor (**660 KB**, no AI deps, no libc, no
-network); **`shu-ai`** adds the AI panel (**3.28 MB**; pulls `sandhi` / `niyama`).
+**Two binaries.** The default **`shu`** is the lean monitor (**664 KB**, no AI deps, no libc, no
+network); **`shu-ai`** adds the AI panel (**2.96 MB**; pulls `sandhi` / `niyama`).
 
 ### Running on AGNOS — read this first
 
@@ -76,7 +76,7 @@ ark bazaar install btop
 # AGNOS / Cyrius native package manager (post-v1.0)
 pkg install chakshu
 
-# From source — Cyrius toolchain 6.5.35+ on $PATH
+# From source — Cyrius toolchain 6.5.41+ on $PATH
 git clone https://github.com/MacCracken/chakshu
 cd chakshu
 
@@ -94,7 +94,7 @@ CYRIUS_ALLOW_PARENT_INCLUDES=1 cyrius build main.cyr build/shu-ai
 ./build/shu-ai
 ```
 
-Why two binaries? The Cyrius toolchain links every declared stdlib module into the binary (dead code is NOP'd, not dropped — and since cycc 6.5.16 it emits every *declared* module rather than pruning to what `main` reaches, so `CYRIUS_DCE=1` no longer shrinks the output at all). The AI dep chain (`sandhi`'s TLS/HTTP stack + `niyama`'s regex/unicode tables) would bloat every build to ~3.2 MB. Confining those deps to `ai/cyrius.cyml` keeps the default `shu` at ~660 KB — still smaller than btop's install and fully self-contained (no libc / ncurses). `shu-ai` is the opt-in heavy build; note that `sandhi` dlopens libc for DNS/TLS, so **`shu-ai` (unlike `shu`) is not a pure no-libc binary** and its live path only runs on a host with libc.
+Why two binaries? The Cyrius toolchain links every declared stdlib module into the binary (dead code is NOP'd, not dropped — and since cycc 6.5.16 it emits every *declared* module rather than pruning to what `main` reaches, so `CYRIUS_DCE=1` no longer shrinks the output at all). The AI dep chain (`sandhi`'s TLS/HTTP stack + `niyama`'s regex/unicode tables) would bloat every build to ~3.0 MB. Confining those deps to `ai/cyrius.cyml` keeps the default `shu` at ~664 KB — still smaller than btop's install and fully self-contained (no libc / ncurses). `shu-ai` is the opt-in heavy build; note that `sandhi` dlopens libc for DNS/TLS, so **`shu-ai` (unlike `shu`) is not a pure no-libc binary** and its live path only runs on a host with libc.
 
 ---
 

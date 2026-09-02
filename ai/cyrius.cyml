@@ -1,3 +1,6 @@
+# chakshu — `shu-ai` build manifest (lean core from ../src/* plus the AI chain).
+# Rationale, dep history and binary sizes: docs/development/state.md ("Dependency
+# Envelope"); per-bump detail: CHANGELOG.md. Keep this file to compilation facts.
 [package]
 name = "chakshu-ai"
 version = "${file:../VERSION}"
@@ -5,28 +8,18 @@ description = "shu-ai — the AI-augmented build of chakshu (monitor + hoosh exp
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/chakshu"
 language = "cyrius"
-cyrius = "6.5.35"
+cyrius = "6.5.41"
 
-# The `shu-ai` build: lean chakshu core (../src/*) PLUS src/ai.cyr and its
-# transport chain. Shares the monitor source with the root build; the only
-# differences are this manifest's extra deps and ai/main.cyr swapping
-# src/ai_stub.cyr → ../src/ai.cyr. See docs/development/state.md for the
-# lean-vs-AI split rationale (binary size at v0.7.12: ~0.86 MB vs ~3.02 MB —
-# shu-ai fell from ~15.49 MB when cyrius 6.5.22 reclaimed sigil's banked crypto
-# .bss; see docs/development/state.md).
 [build]
 entry = "main.cyr"
 output = "shu-ai"
 test = "tests/chakshu-ai.tcyr"
 
+# Root manifest's stdlib list plus the AI chain. sandhi is consumed as a STDLIB
+# module (never a git dep) so its bare socket/tls constants resolve alongside
+# net/tls; the async..thread_local entries are sandhi's transitive references and
+# unicode is niyama's.
 [deps]
-# Monitor stdlib (matches ../cyrius.cyml) + the AI chain. sandhi is consumed
-# as a STDLIB module (folded into the toolchain as lib/sandhi.cyr) so its
-# bare socket/tls constants resolve alongside net.cyr/tls.cyr — the git-dep
-# dist could not (built for an older toolchain). The async/atomic/net/http/
-# tls/ws/sigil/sakshi/keccak/thread_local/mmap/dynlib/fdlopen/regression
-# entries are sandhi's transitive references; unicode is niyama's. DCE drops
-# what's unreached; json/base64/bigint are folded into `bayan`.
 stdlib = [
     "syscalls", "alloc", "fmt", "io", "fs", "str", "string", "slice", "vec",
     "args", "chrono", "hashmap", "process", "tagged", "assert", "sys",
@@ -37,62 +30,34 @@ stdlib = [
     "sandhi",
 ]
 
-# darshana — kept in lockstep with the root manifest. Bumped 0.9.0 → 1.0.0 at
-# chakshu v0.7.12 (2026-08-24) alongside root cyrius.cyml — darshana's v1.0 API
-# freeze (ADR 0003); bundle bodies identical to 0.9.4, and both deliberate 0.9.3
-# breaks hit zero chakshu call sites. See the root manifest for the full
-# rationale; these two blocks must not drift apart.
+# These three blocks are kept in lockstep with the root manifest; do not drift.
 [deps.darshana]
 git = "https://github.com/MacCracken/darshana.git"
 tag = "1.0.0"
 modules = ["dist/darshana.cyr"]
 
-# mihi — kept in lockstep with root. Bumped 1.2.1 → 1.2.4 at v0.7.12
-# (2026-08-24); mihi 1.2.4 advances its transitive ai-hwaccel pin to 2.3.18 and
-# clamps ai-hwaccel's detect logging to SK_WARN. See root cyrius.cyml.
 [deps.mihi]
 git = "https://github.com/MacCracken/mihi.git"
 tag = "1.2.5"
 modules = ["dist/mihi.cyr"]
 
-# ai-hwaccel — tracks mihi's transitive pin, NOT ai-hwaccel's latest. mihi 1.2.4
-# pins 2.3.18, so chakshu followed 2.2.6 → 2.3.18 at v0.7.12 (2026-08-24); the
-# tracking rule is unchanged, not suspended. Kept ABI-consistent with the
-# concatenated mihi+ai-hwaccel dist bundle. See root cyrius.cyml for the full
-# rationale and the list of renamed symbols chakshu does not reference.
+# Pin TRACKS mihi's own [deps.ai-hwaccel] tag, NOT ai-hwaccel's latest release.
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel.git"
 tag = "2.3.19"
 modules = ["dist/ai-hwaccel.cyr"]
 
-# niyama — re2 redaction engine (AI-only; design-spec §6.2). Git dep here,
-# not stdlib. Bumped 1.0.6 → 1.0.7 at v0.7.12 (2026-08-24) — a PIN-ONLY release:
-# niyama's own cyrius pin moved 6.4.64 → 6.5.29 with zero engine source changes,
-# and dist/niyama.cyr is byte-identical to 1.0.6 apart from its version header.
-# chakshu uses exactly two of its exported symbols — niyama_re2_compile and
-# niyama_re2_search, both in src/ai.cyr — unchanged in signature and body.
-# niyama 1.0.7 pins 6.5.29 against this manifest's 6.5.35: same 6.5.x line, six
-# patches behind, the same posture as the previous cut. `unicode` above stays
-# required by this bundle.
-#
-# HAZARD, for a future cut (do NOT act on it here): cyrius 6.5.30 folded niyama
-# 1.0.7 into the stdlib, so lib/niyama.cyr now also exists as a toolchain module
-# at the very version this git dep pins. There is no conflict today — "niyama"
-# is deliberately absent from [deps].stdlib above and no stdlib module includes
-# it, so exactly one copy lands in ai/lib/. niyama COULD be consumed as a stdlib
-# module the way sandhi already is, but never both at once: that would put two
-# definitions of every niyama_* symbol in the closure.
+# re2 secret redaction (src/ai.cyr). Git dep ONLY — cyrius >= 6.5.30 also ships
+# lib/niyama.cyr, and consuming it both ways would duplicate every niyama_* symbol.
 [deps.niyama]
 git = "https://github.com/MacCracken/niyama.git"
 tag = "1.0.7"
 modules = ["dist/niyama.cyr"]
 
-# bayan — the AI chain's ws/sigil/tls modules call functions carved into bayan,
-# so the resolver pulls the monolith regardless. Declaring it DIRECTLY here (at
-# the full bundle, not a sublib) overrides ai-hwaccel's transitive
-# `[deps.bayan] modules = ["dist/bayan-json.cyr"]`, so exactly one bayan lands
-# instead of monolith + sublib with duplicate symbols.
+# Declared at the full bundle so ai-hwaccel's transitive dist/bayan-json.cyr sublib
+# does not land beside it. cyrius >= 6.5.39 keeps its own folded lib/bayan.cyr and
+# skips this artifact, so the tag selects no bytes — keep it naming what links.
 [deps.bayan]
 git = "https://github.com/MacCracken/bayan.git"
-tag = "1.5.2"
+tag = "1.5.4"
 modules = ["dist/bayan.cyr"]
