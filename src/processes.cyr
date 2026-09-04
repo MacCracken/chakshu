@@ -159,8 +159,9 @@ fn _proc_read_uid(pid_str) {
 fn processes_sample1() {
     _proc_ensure_init();
     #ifdef CYRIUS_TARGET_AGNOS
-    # No CPU-tick baseline to seed: proclist carries no per-process cpu time,
-    # so the two-sample delta the Linux path needs has nothing to sample.
+    # No CPU-tick baseline to seed. agnos 1.56.59 DOES carry per-process ticks, but
+    # they include halted time and chakshu does not render them — see the CPU% note
+    # in src/proc_agnos.cyr. Nothing here needs two samples.
     return 0;
     #endif
     map_u64_clear(_proc_map);

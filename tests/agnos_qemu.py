@@ -267,14 +267,34 @@ def main():
         check("init (pid 1) present", any(re.match(r"^\s*1\s+root\s", l) for l in rows),
               "pid 1 missing from the table")
         # ...and the untracked columns must say so rather than claim a measured 0.
-        # CPU% and MEM% are untracked -> n/a. USER is NOT: agnos is single-user
-        # (getuid is a literal `return 0`), so every process really is root and
-        # claiming n/a there would be feigning ignorance we do not have.
-        check("CPU%/MEM% read n/a, not a fabricated 0",
-              all(l.count("n/a") >= 2 for l in rows),
-              "a row reported 0 for a value agnos does not track")
+        # v0.9.9 SUPERSEDES the old ">= 2 n/a per row" assertion. MEM% became a real
+        # number when agnos 1.56.59 filled proclist's +56 high u32, so a row now
+        # carries exactly ONE n/a (CPU%) plus a numeric MEM%. The two successor
+        # assertions below pin both halves of that, which is stricter than the
+        # count-based test ever was.
+        # Assert on the FIELD, not the line: an unnamed slot renders its command as
+        # "[n/a]" too, so a whole-line n/a count conflates two different columns.
+        # Columns are: PID USER S CPU% MEM% CMD...
+        check("MEM% is numeric on every row (never n/a)",
+              all(l.split()[4].isdigit() for l in rows),
+              f"a MEM% field is not numeric: {[l.split()[:5] for l in rows[:3]]}")
         check("USER reads root (agnos is single-user), not n/a",
               all(" root " in l for l in rows))
+        # v0.9.9: MEM% is REAL — agnos 1.56.59 put rss pages in proclist's +56 high
+        # u32. At least one userspace row must report a non-zero MEM%; a table where
+        # every row reads 0 means the field is being read as a zeroed/absent slot.
+        # (Kernel/boot-address-space slots legitimately report 0 — they have no user
+        # PDEs — so this asserts "some row", not "every row".)
+        memvals = [int(l.split()[4]) for l in rows if l.split()[4].isdigit()]
+        check("MEM% is populated from proclist rss (some row > 0)",
+              any(v > 0 for v in memvals),
+              f"every MEM% read 0: {memvals}")
+        # ...and CPU% must still say n/a. agnos charges timer ticks to a HALTED
+        # process, so the ticks exist but are not CPU utilisation — see the header of
+        # src/proc_agnos.cyr. A number here means someone rendered them anyway.
+        check("CPU% stays n/a (agnos charges ticks to halted processes)",
+              all(l.split()[3] == "n/a" for l in rows),
+              "CPU% rendered a number from halt-inclusive ticks")
 
         print("[2] absent /proc degrades to n/a, never a false zero")
         check("loadavg reports n/a", "load: n/a" in out)

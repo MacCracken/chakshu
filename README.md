@@ -20,7 +20,7 @@ The Sanskrit name **चक्षु** *chakṣu* means *the eye* / *the faculty 
 
 ## Status
 
-**v0.9.8 — monitor feature-complete and audited; v1.0 is gated on the criteria in
+**v0.9.9 — monitor feature-complete and audited; v1.0 is gated on the criteria in
 [docs/development/roadmap.md](docs/development/roadmap.md), not on features.** What works today:
 
 - **Plain snapshot** (`shu -p`) — host / uptime / load / mem / cpu / disk / net, GPU telemetry, and a
@@ -50,10 +50,12 @@ network); **`shu-ai`** adds the AI panel (**2.96 MB**; pulls `sandhi` / `niyama`
 
 chakshu builds and runs on AGNOS, but the platform constrains what a monitor can show:
 
-- **The process table works as of v0.9.8**, via `proclist` #99. It lists pid, state and command for
-  every live process. **CPU%, MEM% and USER read `n/a`** — the kernel does not track per-process cpu
-  time or rss yet, and the record carries no uid. `--sort cpu|mem|user` therefore falls back to pid;
-  `--sort name` is genuine.
+- **The process table works as of v0.9.8**, via `proclist` #99, and **v0.9.9 added a real MEM%
+  column** from the per-process rss agnos 1.56.59 started reporting. `--sort mem` and `--sort name`
+  are genuine; `--sort cpu` falls back to pid.
+- **CPU% reads `n/a` on purpose.** The kernel does track per-process ticks, but it charges them to a
+  *halted* process too, so a sleeping program reads 100%. That is not CPU utilisation and chakshu
+  will not print it under a column head that means `utime+stime` on Linux. Filed upstream.
 - **Load, disk and network rates read `n/a`.** AGNOS has no `/proc/diskstats` or `/proc/net/dev`
   equivalent and its `sysinfo` carries no load average. Host, kernel, memory and GPU identity work.
   Volume *capacity* is available to the kernel (`statfs` #103) and is not yet surfaced here.

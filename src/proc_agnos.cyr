@@ -21,22 +21,59 @@
 #   +24  u8  name[32]  NUL-terminated basename, recorded by the ELF loader
 #   +56  u64 reserved  always 0 today
 #
-# ⚠ WHAT AGNOS DOES NOT GIVE, AND WHY THOSE COLUMNS READ `n/a`
+# ⭐ v0.9.9 — CPU% AND MEM% ARE REAL NOW. agnos 1.56.59 filled `+56` in response to
+# chakshu's telemetry filing: it is ONE store64 of `(rss_pages << 32) | cpu_ticks`
+# (kernel/core/syscall.cyr:10424), so little-endian x86-64 puts
+#   load32(rec + 56) = cpu ticks   (100 Hz, cumulative since the SLOT was allocated)
+#   load32(rec + 60) = rss pages   (4 KiB units)
+# Cyrius `load32` emits a 32-bit `mov`, which zero-extends, so neither half can come
+# back negative. ⛔ Do NOT render `load64(rec + 56)` as either field: on a live
+# process the packed value is ~6.6e12, which is positive, formats fine, and is
+# nonsense as both a tick count and a page count.
 #
-# The kernel does not track per-process cpu time or rss yet — the syscall's own
-# ABI note says so, and reserves +56 for them without changing the record size.
-# So CPU% and MEM% have no data behind them on AGNOS.
+# ⚠ cyrius 6.5.45's own wrapper doc still says "+56 reserved — always 0 today" and
+# ships no accessors for the halves. That text is stale as of agnos 1.56.59; the
+# arithmetic here is chakshu's own. A cyrius doc filing is owed.
 #
 # USER is different and must NOT be lumped in: agnos is single-user, its getuid is
 # a literal `return 0` and no per-task uid exists in the kernel at all, so every
 # process really is root. That is a known value, not a missing one — it renders
 # `root`.
 #
-# They are therefore rendered `n/a`, NOT 0. This is the rule src/tui.cyr already
-# argues for in its own comments — "a blank field reads as a render bug; `n/a` is
-# the honest answer" — and it is the difference between reporting a measured zero
-# and fabricating one. A row claiming 0% CPU for a spinning process would be a
-# lie the monitor invented; `n/a` is a fact about the kernel.
+# ⚠ MEM% IS 2 MB-GRANULAR, AND THAT IS NOT THE UNIT SUGGESTING OTHERWISE. The page
+# count is genuine 4 KiB pages, but the kernel COMPUTES it by walking the process's
+# page directory and counting PDEs that are present AND user, adding 512 pages per
+# hit (kernel/core/proc.cyr:1455) — agnos's own gate asserts the result is always a
+# multiple of 512. So a 22 KB binary reports 3 PDEs = 6 MB. Each counted PDE is a
+# real 2 MB physical commitment, so the figure is honest as "physical memory
+# committed to this process" — it is NOT Linux-comparable RSS and is not labelled
+# as such anywhere user-facing.
+#
+# ⛔ CPU% IS DELIBERATELY *NOT* RENDERED, THOUGH THE TICKS ARE THERE. This was built,
+# measured on a live kernel, and backed out — recorded so nobody re-implements it.
+#
+# The tick charge (kernel/arch/x86_64/pic.cyr:65-68) credits `proc_current_get()`
+# unconditionally, with NO halt exclusion. `sleep_ms`#41 halts with `sched_active=0`
+# and the caller still current, so a process blocked in a syscall keeps accruing
+# ticks. The measured consequence, from QEMU: chakshu slept for its own 100 ms
+# sampling window and rendered **itself at 100% with every other process at 0%**.
+#
+# So the quantity is "share of wall-clock ticks while this slot was current,
+# INCLUDING halted", which equals CPU utilisation only for processes that never
+# block. That is not a number a reader can reason about, and putting it under a
+# column head shared with the Linux build — where it means utime+stime — would make
+# the two mean different things under one name.
+#
+# This is the per-process analogue of the missing per-core `idle` field, which agnos
+# declined to guess at for exactly the same reason. Filed upstream; when the tick is
+# not charged to a halted process, this becomes a one-line change: read
+# `load32(src + 56)` for ticks and difference it against a pooled per-core
+# denominator from `sysinfo`#35's +40 band (never wall time — `uptime_ms`#40 is
+# BSP-only and frozen under IF=0).
+#
+# Anything without data is rendered `n/a`, NOT 0 — the rule src/tui.cyr already
+# argues for: "a blank field reads as a render bug; `n/a` is the honest answer".
+# A row claiming 0% CPU for a spinning process would be a lie the monitor invented.
 #
 # ⚠ A SNAPSHOT, NOT A HANDLE. The kernel walks its table under preempt_disable,
 # so the set cannot change mid-walk, but a pid may exit before we act on it. That
@@ -110,9 +147,18 @@ fn _procs_fill_agnos(sort_key) {
         var src = _proclist_buf + i * PROCLIST_REC_SIZE;
         var rec = _proc_recs + _proc_n * PROC_REC_SIZE;
 
-        store64(rec + 0,  load64(src + 0));                      # pid
-        store64(rec + 8,  PROC_NA);                              # cpu% — untracked
-        store64(rec + 16, PROC_NA);                              # rss  — untracked
+        var pid = load64(src + 0);
+        # +56 is ONE packed u64: low u32 = cpu ticks, high u32 = rss pages.
+        # Only the RSS half is consumed — see the CPU% note in the file header.
+        var rssp = load32(src + 60);
+
+        store64(rec + 0,  pid);
+        store64(rec + 8,  PROC_NA);                              # CPU% — see header
+        # rss is in 4 KiB pages, which is exactly what the shared record and
+        # processes_render's `rss * 400 / mem_total_kb` already expect. A slot in the
+        # BOOT address space (kmain, the idle task, every kthread) has no user PDEs
+        # and legitimately reports 0 — that is a measured zero, not a missing value.
+        store64(rec + 16, rssp);
         store64(rec + 24, _proclist_state_char(load64(src + 8)));
         # uid: proclist carries no field, but agnos is SINGLE-USER — its getuid
         # (kernel/core/syscall.cyr:8657) is the literal `return 0`, and no per-task
@@ -141,9 +187,10 @@ fn _procs_fill_agnos(sort_key) {
     # Fall back to PID, which is real data. NAME is genuine (proclist carries it) and
     # USER is genuine too — every row is root, and that comparator already tiebreaks
     # on pid, so it degenerates correctly without a special case.
+    # Sort. MEM is real data now, so SORT_MEM ranks genuinely. CPU still has no
+    # data behind it (header), so it would rank every row equal — fall back to PID.
     var key = sort_key;
     if (key == SORT_CPU) { key = SORT_PID; }
-    if (key == SORT_MEM) { key = SORT_PID; }
     _proc_sort(key);
     return _proc_n;
 }

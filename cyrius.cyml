@@ -8,7 +8,7 @@ description = "The eye — AI-augmented system monitor for AGNOS / Cyrius"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/chakshu"
 language = "cyrius"
-cyrius = "6.5.41"
+cyrius = "6.5.45"
 
 [build]
 entry = "src/main.cyr"

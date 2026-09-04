@@ -4,6 +4,78 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.9] — 2026-09-03 — AGNOS stops saying `n/a`
+
+### Added — MEM% on AGNOS is a real number
+
+agnos 1.56.59 answered chakshu's v0.9.8 telemetry filing in full — the issue is archived as
+**"✅ RESOLVED — all 9 sections closed"**. `proclist` #99's `+56` slot is no longer reserved: it is
+one `store64` of `(rss_pages << 32) | cpu_ticks`, so `load32(rec + 60)` is a live per-process page
+count. chakshu renders it as **MEM%**, the first per-process memory figure AGNOS has ever had.
+
+The unit drops straight into the existing shared record — `processes_render`'s
+`rss * 400 / mem_total_kb` already expects 4 KiB pages — so the Linux path is untouched.
+
+⚠ **The resolution is 2 MB, not 4 KiB, and that is stated wherever it matters.** The kernel walks
+the process page directory and counts PDEs that are present AND user, adding 512 pages per hit, so
+the value is always a multiple of 512 — a 22 KB binary reports 6 MB. Each counted PDE is a real 2 MB
+physical commitment, so the figure is honest as *"physical memory committed to this process"*; it is
+not Linux-comparable RSS and is not labelled as such.
+
+### Not added — CPU% on AGNOS, after building it and measuring it
+
+The tick half of `+56` is live too, and chakshu **implemented the full CPU% column, ran it on a real
+kernel, and backed it out.** Recorded because the reason generalises.
+
+The tick charge (`kernel/arch/x86_64/pic.cyr:65-68`) credits `proc_current_get()` with **no halt
+exclusion**, and `sleep_ms` #41 halts with the caller still current. So a process blocked in a
+syscall accrues ticks at wall-clock rate. Measured under QEMU: chakshu slept for its own 100 ms
+sampling window and rendered **itself at 100%, every other process at 0%**.
+
+The quantity is "share of wall-clock ticks while current, *including halted*" — equal to CPU
+utilisation only for a process that never blocks. chakshu's column head is shared with the Linux
+build, where it means `utime+stime`; rendering this under it would make one name mean two things.
+It is the per-process analogue of the missing per-core `idle` field, which agnos declined to guess
+at for the same reason. `n/a` stands, with the reason in `src/proc_agnos.cyr`'s header.
+
+### Not added — a disk rate on AGNOS, for a worse reason
+
+The `sysinfo` #35 block band exists and reads cleanly, and it would have been rendered on trust.
+An audit of the kernel found `blk_reads_by_tag` / `blk_writes_by_tag` have **exactly one increment
+site each**, inside `blk_read_on` / `blk_write_on` — and every multi-sector path bypasses them,
+including `ext2_read_block` / `ext2_write_block`. chakshu's own harness builds a 4096-byte-block
+ext2 root on NVMe, so both counters stay frozen at their boot-probe value for the whole boot.
+
+Rendering it would have shown a confident `0 B/s` through a heavy copy. `disk:` stays `n/a` and the
+finding is filed upstream, along with `blk_info` #79 reporting the active backend's `lba_bytes` for
+every tag (an 8× byte-rate error on a secondary device).
+
+### Filed upstream
+
+- `agnos/docs/development/issues/2026-09-03-per-process-ticks-include-halt.md` — the two above,
+  plus three measured notes that are not asks (the `net_config` counters **do** work under QEMU, so
+  the counting seam agnos chose over chakshu's suggested virtio ring indices was the right call;
+  `statfs` on FAT costs 151 ms under `fs_spin_lock` so a capacity panel cannot run per-frame; and
+  `f_blocks * f_bsize` is self-declared per volume, so summing volumes double-counts).
+- `cyrius/docs/development/issues/2026-09-03-agnos-proclist-doc-stale.md` — `sys_proclist`'s doc
+  block still says `+56` is "reserved, always 0 today", which is how chakshu missed the fields for a
+  release. Second time a stale upstream note has cost this project a cut.
+
+### Changed — Cyrius toolchain pin `6.5.41` → `6.5.45`
+
+Stdlib file-list diff across the span is **zero additions, zero removals**; every declared module in
+both manifests still resolves. The lean binary is byte-identical at 663,704 B. Dependencies are
+unchanged — `ai-hwaccel` stays at **2.3.19** because mihi 1.2.5 still pins it, though 2.3.20 exists.
+
+What the bump is actually for: cyrius 6.5.43/6.5.45 carry the AGNOS peers for the telemetry agnos
+shipped in 1.56.59 — `mountlist` #104, and `sys_sysinfo_n` for `sysinfo` #35's new tail bands.
+
+⛔ `blkstats` #105 shipped in cyrius 6.5.44 and was **withdrawn in 6.5.45**. agnos minted it, then an
+audit found a closed 5-value tag enum over flat arrays is a fixed-size tail block rather than a
+syscall, so the counters moved into `sysinfo` #35's tail. chakshu never consumed #105 — it is noted
+because the withdrawal is why the pin lands on .45 and not .44.
+
+
 ## [0.9.8] — 2026-09-02 — AGNOS grows a process table
 
 ### Added — the AGNOS process table, on `proclist` #99

@@ -5,7 +5,7 @@
 > [`state.md`](state.md). This file answers one question: *what is left to reach
 > v1.0, and in which release does it land?*
 >
-> **Current: v0.9.8.** | **Last Updated**: 2026-09-02
+> **Current: v0.9.9.** | **Last Updated**: 2026-09-03
 
 ---
 
@@ -30,6 +30,7 @@ inside it are additive or corrective only.
 | ~~0.9.6~~ | ~~toolchain + dependency refresh~~ | **shipped 2026-09-02.** cyrius `6.5.35` → `6.5.41` (one stdlib addition, zero removals; folded sandhi 1.9.15 fixes silent SSE event loss on the `?` overlay). `bayan` 1.5.2 → 1.5.4 after cyrius 6.5.39 reversed stdlib-vs-dep precedence and left the pin naming a file that no longer linked; **ai-hwaccel held at 2.3.19** per the mihi tracking rule, though 2.3.20 exists. Both manifests cut 328 → 130 lines. `scripts/check.sh` had drifted from `ci.yml` a third time — DCE parity, three security assertions, the `ai/*.cyr` glob and three required files were all missing locally; now 20 gates |
 | ~~0.9.7~~ | ~~no-libc for `shu-ai`~~ | **shipped 2026-09-02.** Removed the last libc bridge: `src/nolibc.cyr` refuses the libssl `dlopen` path, `fdlopen`/`dynlib` left `ai/cyrius.cyml`. Both binaries are pure-syscall (0 `NEEDED`), verified by capturing a real TLS 1.3 ClientHello. **`shu-ai` builds for AGNOS** — striking one of the three AGNOS blockers below |
 | ~~0.9.8~~ | ~~AGNOS process table~~ | **shipped 2026-09-02.** `proclist` #99 — the table renders on AGNOS for the first time, striking the second of the three v1.0 AGNOS blockers. Untracked columns read `n/a`, never a fabricated 0. Remaining gaps audited and filed in the agnos repo |
+| ~~0.9.9~~ | ~~AGNOS telemetry: MEM%~~ | **shipped 2026-09-03.** agnos 1.56.59 closed chakshu's telemetry filing in full. MEM% ships from `proclist` rss pages. CPU% and the disk rate were each **built or read, measured, and declined** — halt-inclusive ticks and a block band that misses the mainline I/O path would both have been confident wrong numbers. Cyrius 6.5.45 |
 | **1.0.0** | Ship as the AGNOS default monitor | Registry promotion, ISO default, announce |
 
 ---
