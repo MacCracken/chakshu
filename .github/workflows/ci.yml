@@ -276,6 +276,10 @@ jobs:
           CYRIUS_DCE=1 cyrius build src/main.cyr build/shu-dce
           echo "shu-dce: $(wc -c < build/shu-dce) bytes"
           bash scripts/smoke.sh build/shu-dce
+          # v0.10.0: 6.6.0 restored real pruning (211 KB off the shipped artifact), so
+          # the DCE'd binary must also survive the PTY suite — smoke alone never enters
+          # the TUI render loop, which is where dropped-but-live code would show.
+          python3 tests/integration_smoke.py build/shu-dce
 
   security:
     name: Security scan

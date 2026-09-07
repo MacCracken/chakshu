@@ -5,7 +5,7 @@
 > [`state.md`](state.md). This file answers one question: *what is left to reach
 > v1.0, and in which release does it land?*
 >
-> **Current: v0.9.9.** | **Last Updated**: 2026-09-03
+> **Current: v0.10.0.** | **Last Updated**: 2026-09-07
 
 ---
 
@@ -31,6 +31,7 @@ inside it are additive or corrective only.
 | ~~0.9.7~~ | ~~no-libc for `shu-ai`~~ | **shipped 2026-09-02.** Removed the last libc bridge: `src/nolibc.cyr` refuses the libssl `dlopen` path, `fdlopen`/`dynlib` left `ai/cyrius.cyml`. Both binaries are pure-syscall (0 `NEEDED`), verified by capturing a real TLS 1.3 ClientHello. **`shu-ai` builds for AGNOS** — striking one of the three AGNOS blockers below |
 | ~~0.9.8~~ | ~~AGNOS process table~~ | **shipped 2026-09-02.** `proclist` #99 — the table renders on AGNOS for the first time, striking the second of the three v1.0 AGNOS blockers. Untracked columns read `n/a`, never a fabricated 0. Remaining gaps audited and filed in the agnos repo |
 | ~~0.9.9~~ | ~~AGNOS telemetry: MEM%~~ | **shipped 2026-09-03.** agnos 1.56.59 closed chakshu's telemetry filing in full. MEM% ships from `proclist` rss pages. CPU% and the disk rate were each **built or read, measured, and declined** — halt-inclusive ticks and a block band that misses the mainline I/O path would both have been confident wrong numbers. Cyrius 6.5.45 |
+| ~~0.10.0~~ | ~~AGNOS CPU%; Cyrius 6.6.0~~ | **shipped 2026-09-07.** agnos 1.56.60 added the halt exclusion chakshu filed for, so the CPU% column backed out at v0.9.9 now ships honestly. Cyrius 6.6.0 is a breaking minor and the deps moved with it. Lean artifact down to **399 KB** (DCE prunes again) |
 | **1.0.0** | Ship as the AGNOS default monitor | Registry promotion, ISO default, announce |
 
 ---

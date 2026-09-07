@@ -276,8 +276,10 @@ identity probes) and `ai-hwaccel` (for the GPU panel):
 - **No chakshu-side lever remains.** The remaining safe stdlib drops (`bench`,
   `freelist`, `tagged`, `slice`) total ~25 KB combined.
 - **DCE is not a lever either.** Since cycc 6.5.16 the compiler emits every
-  *declared* stdlib module and `CYRIUS_DCE=1` NOPs dead code in place — it produces
-  a byte-identical binary. It is a parity check, not an optimizer.
+  *declared* stdlib module. From cycc 6.5.16 to 6.5.73 `CYRIUS_DCE=1` NOPed dead code
+  in place and produced a byte-identical binary — a parity check, not an optimizer.
+  **Cyrius 6.6.0 restored real pruning**: the lean build is 608,328 B plain and
+  399,432 B DCE'd, and `release.yml` ships the pruned one.
 
 The rest is bulk inside the mihi/ai-hwaccel dist bundles, which is upstream work,
 not chakshu's. Rather than carry a permanently-red target, §8 now states a number

@@ -17,6 +17,8 @@
 # target of <30ms refers to parse+render work, not the sleep window —
 # `watch -n 1 shu -p` will still tick comfortably within its second.
 var SNAP_SAMPLE_MS = 100;
+# agnos CPU% window. 100 Hz ticks quantise a 100 ms window to 10 points; 1 s gives 1.
+var AGNOS_CPU_WINDOW_MS = 1000;
 
 # Print n with a leading zero if n < 10. Used for HH and MM in the
 # uptime "Nd HH:MM" format. Negative n is undefined (uptime never is).
@@ -120,6 +122,19 @@ fn snapshot_finish_no_delta(sort_key, top_n) {
     var mem_total_b = mihi_mem_total(&mi, 8192);
     var mem_total_kb = 0;
     if (mem_total_b > 0) { mem_total_kb = mem_total_b / 1024; }
+    #ifdef CYRIUS_TARGET_AGNOS
+    # v0.10.0: "no delta" means no procfs for the cpu/disk/net LINE — it does not mean
+    # there is no per-process CPU data. agnos carries halt-excluded per-process ticks,
+    # so take the two samples the rate needs.
+    #
+    # ⚠ THE WINDOW IS 1 s HERE, NOT SNAP_SAMPLE_MS's 100 ms, and that is deliberate.
+    # The tick is 100 Hz, so a 100 ms window quantises CPU% to 10 percentage points —
+    # precise-looking noise. 1 s puts the quantum at 1 point. The cost is that `shu -p`
+    # takes ~1 s on agnos instead of ~110 ms; the alternative is a number that reads
+    # 0/10/20 and nothing between.
+    processes_sample1();
+    sleep_ms(AGNOS_CPU_WINDOW_MS);
+    #endif
     processes_sample2(0, 1, sort_key);
     processes_render(top_n, mem_total_kb);
     return EXIT_OK;

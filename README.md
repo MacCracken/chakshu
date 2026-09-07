@@ -20,7 +20,7 @@ The Sanskrit name **चक्षु** *chakṣu* means *the eye* / *the faculty 
 
 ## Status
 
-**v0.9.9 — monitor feature-complete and audited; v1.0 is gated on the criteria in
+**v0.10.0 — monitor feature-complete and audited; v1.0 is gated on the criteria in
 [docs/development/roadmap.md](docs/development/roadmap.md), not on features.** What works today:
 
 - **Plain snapshot** (`shu -p`) — host / uptime / load / mem / cpu / disk / net, GPU telemetry, and a
@@ -53,9 +53,10 @@ chakshu builds and runs on AGNOS, but the platform constrains what a monitor can
 - **The process table works as of v0.9.8**, via `proclist` #99, and **v0.9.9 added a real MEM%
   column** from the per-process rss agnos 1.56.59 started reporting. `--sort mem` and `--sort name`
   are genuine; `--sort cpu` falls back to pid.
-- **CPU% reads `n/a` on purpose.** The kernel does track per-process ticks, but it charges them to a
-  *halted* process too, so a sleeping program reads 100%. That is not CPU utilisation and chakshu
-  will not print it under a column head that means `utime+stime` on Linux. Filed upstream.
+- **CPU% works as of v0.10.0.** chakshu measured the old behaviour — a sleeping process read 100%,
+  because halted time was charged — and filed it; agnos 1.56.60 added the halt exclusion, so the
+  ticks are real CPU time now. Kernel threads still read `n/a`: each core's idle park is charged real
+  ticks and only the ELF loader names a process, so a number there would be a phantom.
 - **Load, disk and network rates read `n/a`.** AGNOS has no `/proc/diskstats` or `/proc/net/dev`
   equivalent and its `sysinfo` carries no load average. Host, kernel, memory and GPU identity work.
   Volume *capacity* is available to the kernel (`statfs` #103) and is not yet surfaced here.
@@ -103,7 +104,7 @@ CYRIUS_ALLOW_PARENT_INCLUDES=1 cyrius build main.cyr build/shu-ai
 ./build/shu-ai
 ```
 
-Why two binaries? The Cyrius toolchain links every declared stdlib module into the binary (dead code is NOP'd, not dropped — and since cycc 6.5.16 it emits every *declared* module rather than pruning to what `main` reaches, so `CYRIUS_DCE=1` no longer shrinks the output at all). The AI dep chain (`sandhi`'s TLS/HTTP stack + `niyama`'s regex/unicode tables) would bloat every build to ~3.0 MB. Confining those deps to `ai/cyrius.cyml` keeps the default `shu` at ~664 KB — still smaller than btop's install and fully self-contained (no libc / ncurses). `shu-ai` is the opt-in heavy build. **As of v0.9.7 both binaries are pure no-libc** — statically linked, zero `NEEDED`, no `dlopen` of any kind: TLS runs on the Cyrius-native TLS 1.3 stack and DNS on sandhi's own UDP resolver.
+Why two binaries? The Cyrius toolchain links every declared stdlib module into the binary (dead code is NOP'd, not dropped — — though as of Cyrius 6.6.0 `CYRIUS_DCE=1` prunes for real again, which is why the released lean binary is ~399 KB against the ~608 KB plain build). The AI dep chain (`sandhi`'s TLS/HTTP stack + `niyama`'s regex/unicode tables) would bloat every build to ~3.0 MB. Confining those deps to `ai/cyrius.cyml` keeps the default `shu` at ~399 KB released (~608 KB unpruned) — still smaller than btop's install and fully self-contained (no libc / ncurses). `shu-ai` is the opt-in heavy build. **As of v0.9.7 both binaries are pure no-libc** — statically linked, zero `NEEDED`, no `dlopen` of any kind: TLS runs on the Cyrius-native TLS 1.3 stack and DNS on sandhi's own UDP resolver.
 
 ---
 

@@ -159,9 +159,10 @@ fn _proc_read_uid(pid_str) {
 fn processes_sample1() {
     _proc_ensure_init();
     #ifdef CYRIUS_TARGET_AGNOS
-    # No CPU-tick baseline to seed. agnos 1.56.59 DOES carry per-process ticks, but
-    # they include halted time and chakshu does not render them — see the CPU% note
-    # in src/proc_agnos.cyr. Nothing here needs two samples.
+    # v0.10.0: seed the tick baseline. agnos 1.56.60 made per-process ticks
+    # halt-excluded, so they are real CPU time and CPU% is rendered — see the header
+    # of src/proc_agnos.cyr. One sample is not a rate; this is the t0 half.
+    _procs_seed_agnos();
     return 0;
     #endif
     map_u64_clear(_proc_map);

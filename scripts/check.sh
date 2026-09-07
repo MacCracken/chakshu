@@ -122,6 +122,14 @@ check "DCE build ($([ -f build/shu-dce ] && wc -c < build/shu-dce) bytes)" $rc
 bash scripts/smoke.sh build/shu-dce > /tmp/chk-smoke-dce.log 2>&1 && rc=0 || rc=$?
 check "smoke (DCE'd shu)" $rc
 [ "$rc" = "0" ] || tail -12 /tmp/chk-smoke-dce.log
+# ⛔ ADDED v0.10.0. Until 6.6.0, CYRIUS_DCE=1 emitted a BYTE-IDENTICAL binary, so this
+# gate was trivially satisfied and smoke alone was enough. 6.6.0 restored pruning and
+# now removes 211 KB from the artifact release.yml actually ships — so the only test
+# chakshu owns that drives the TUI through a real PTY has to run against the pruned
+# binary too, or "behaves identically" is an untested claim about 34% of the build.
+python3 tests/integration_smoke.py build/shu-dce > /tmp/chk-pty-dce.log 2>&1 && rc=0 || rc=$?
+check "PTY integration smoke (DCE'd shu)" $rc
+[ "$rc" = "0" ] || tail -12 /tmp/chk-pty-dce.log
 echo ""
 
 echo '--- Security scan (a SEPARATE CI job) ---'

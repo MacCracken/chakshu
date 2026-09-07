@@ -8,7 +8,7 @@ description = "The eye — AI-augmented system monitor for AGNOS / Cyrius"
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/chakshu"
 language = "cyrius"
-cyrius = "6.5.45"
+cyrius = "6.6.0"
 
 [build]
 entry = "src/main.cyr"
@@ -49,19 +49,19 @@ stdlib = [
 # Needs the syscalls entry above — darshana no longer defines its own SYS_IOCTL.
 [deps.darshana]
 git = "https://github.com/MacCracken/darshana.git"
-tag = "1.0.0"
+tag = "1.1.1"
 modules = ["dist/darshana.cyr"]
 
 # Identity/static probes (hostname/kernel/distro/cpu/mem/uptime/gpu_*).
 # Per-frame deltas stay chakshu-local.
 [deps.mihi]
 git = "https://github.com/MacCracken/mihi.git"
-tag = "1.2.5"
+tag = "1.2.6"
 modules = ["dist/mihi.cyr"]
 
 # Transitive via mihi/gpu.cyr. Pin TRACKS mihi's own [deps.ai-hwaccel] tag,
 # NOT ai-hwaccel's latest release; the two must move together.
 [deps.ai-hwaccel]
 git = "https://github.com/MacCracken/ai-hwaccel.git"
-tag = "2.3.19"
+tag = "2.3.22"
 modules = ["dist/ai-hwaccel.cyr"]

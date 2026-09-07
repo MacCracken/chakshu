@@ -31,9 +31,11 @@
 # process the packed value is ~6.6e12, which is positive, formats fine, and is
 # nonsense as both a tick count and a page count.
 #
-# ⚠ cyrius 6.5.45's own wrapper doc still says "+56 reserved — always 0 today" and
-# ships no accessors for the halves. That text is stale as of agnos 1.56.59; the
-# arithmetic here is chakshu's own. A cyrius doc filing is owed.
+# ⭐ cyrius 6.6.0 fixed the stale wrapper doc AND shipped the two accessors chakshu
+# filed for — `proclist_cpu_ticks(rec)` and `proclist_rss_pages(rec)`. They are used
+# below in preference to hand-decoding, which is what their own comment asks for:
+# "both halves are plausible positive integers, so a swap produces a wrong number
+# rather than an obvious failure".
 #
 # USER is different and must NOT be lumped in: agnos is single-user, its getuid is
 # a literal `return 0` and no per-task uid exists in the kernel at all, so every
@@ -49,27 +51,44 @@
 # committed to this process" — it is NOT Linux-comparable RSS and is not labelled
 # as such anywhere user-facing.
 #
-# ⛔ CPU% IS DELIBERATELY *NOT* RENDERED, THOUGH THE TICKS ARE THERE. This was built,
-# measured on a live kernel, and backed out — recorded so nobody re-implements it.
+# ⭐ v0.10.0 — CPU% SHIPS, because agnos fixed the reason it could not.
 #
-# The tick charge (kernel/arch/x86_64/pic.cyr:65-68) credits `proc_current_get()`
-# unconditionally, with NO halt exclusion. `sleep_ms`#41 halts with `sched_active=0`
-# and the caller still current, so a process blocked in a syscall keeps accruing
-# ticks. The measured consequence, from QEMU: chakshu slept for its own 100 ms
-# sampling window and rendered **itself at 100% with every other process at 0%**.
+# v0.9.9 built this column, measured chakshu rendering ITSELF at 100% while it slept
+# through its own sampling window, and backed it out: the tick charge credited
+# `proc_current_get()` unconditionally, so a process halted in a blocking syscall
+# accrued at wall-clock rate. Filed upstream; agnos 1.56.60 fixed it and credits the
+# measurement by name. `cpu_in_halt[cpu]` is set around the `hlt` in `arch_wait()`
+# (kernel/arch/x86_64/io.cyr:181-187) and the timer ISR consumes it read-then-clear
+# before deciding whether to charge (kernel/arch/x86_64/pic.cyr:88-99). The tick is
+# DROPPED, not re-charged — halted time belongs to nobody — so the numerator is now
+# utime+stime, which is exactly what the shared column head means on Linux.
 #
-# So the quantity is "share of wall-clock ticks while this slot was current,
-# INCLUDING halted", which equals CPU utilisation only for processes that never
-# block. That is not a number a reader can reason about, and putting it under a
-# column head shared with the Linux build — where it means utime+stime — would make
-# the two mean different things under one name.
+# NUMERATOR   delta of `proclist_cpu_ticks(rec)` — halt-excluded 100 Hz ticks.
+# DENOMINATOR pooled delta of `sysinfo`#35's +40 band, (user+kern) summed over the
+#             online cores. ⛔ NOT wall time: `uptime_ms`#40 is BSP-only and frozen
+#             whenever IF is clear, so it would divide a live numerator by a stopped
+#             clock.
 #
-# This is the per-process analogue of the missing per-core `idle` field, which agnos
-# declined to guess at for exactly the same reason. Filed upstream; when the tick is
-# not charged to a halted process, this becomes a one-line change: read
-# `load32(src + 56)` for ticks and difference it against a pooled per-core
-# denominator from `sysinfo`#35's +40 band (never wall time — `uptime_ms`#40 is
-# BSP-only and frozen under IF=0).
+# ⭐ AND THE BAND IS THE RIGHT DENOMINATOR *BECAUSE* IT IS NOT HALT-EXCLUDED. The
+# per-core user/kern counters are charged unconditionally, so a halted tick lands in
+# `kern`. That asymmetry is deliberate: it makes the pooled sum a true wall-clock
+# tick count. The same asymmetry is why `user/(user+kern)` must NEVER be rendered as
+# machine-busy — on an idle box `kern` is mostly halt — so chakshu still shows no
+# aggregate CPU bar on agnos.
+#
+# ⚠ NAMELESS ROWS GET n/a, AND THAT IS NOT COSMETIC. The halt exclusion covers
+# `arch_wait()`, but an AP's idle park is a RAW `hlt` outside it (agnos
+# kernel/arch/x86_64/smp.cyr:467) with its LAPIC timer armed — so on a multi-core box
+# every idle tick is charged to that core's idle kthread. Names are set only by the
+# ELF loader, so every kernel thread has an empty name: suppressing CPU% for nameless
+# rows is what stops a wholly idle 4-core machine rendering three phantom rows at
+# ~33% each. Invisible on the single-vCPU QEMU harness; wrong on real iron. Filed.
+#
+# ⚠ THE COLUMN DEPENDS ON agnoshi's LAUNCH ROUTING, not on agnos. `run /bin/shu` goes
+# through `spawn_path`#43 and gets IF=1 as an ordinary scheduled process. Under
+# `execwait`#37 the child runs IF=0, takes no timer interrupt at all, and its tick
+# counter reads a flat zero. If chakshu ever measures its own row at 0 while other
+# rows move, suspect a #37 revert in agnoshi before suspecting the kernel.
 #
 # Anything without data is rendered `n/a`, NOT 0 — the rule src/tui.cyr already
 # argues for: "a blank field reads as a render bug; `n/a` is the honest answer".
@@ -125,6 +144,52 @@ fn _proclist_state_char(st) {
     return 63;                                       # '?' — unknown to us
 }
 
+# Pooled CPU ticks across every online core, or -1 if the band is unreadable.
+# This is the CPU% DENOMINATOR — see the header for why wall time is not.
+fn _agnos_tick_pool() {
+    var si[208];
+    if (sys_sysinfo_n(&si, SYSINFO_SIZE_CPU) < 0) { return 0 - 1; }
+    # cpu_count is the ONLINE core count; the band has 4 fixed slots. Clamp both
+    # ways so a partial AP check-in cannot index past the band.
+    var ncpu = load64(&si + SI_CPUS);
+    if (ncpu < 1) { ncpu = 1; }
+    if (ncpu > 4) { ncpu = 4; }
+    var total = 0;
+    var c = 0;
+    while (c < ncpu) {
+        total = total + sysinfo_cpu_user(&si, c) + sysinfo_cpu_kern(&si, c);
+        c = c + 1;
+    }
+    return total;
+}
+
+# Previous frame's pooled tick total, and whether one has been taken.
+var _agnos_pool_prev  = 0;
+var _agnos_pool_valid = 0;
+
+# Seed the tick baseline: per-pid ticks into _proc_map, plus the pooled total.
+# Called by processes_sample1 before the sampling window.
+fn _procs_seed_agnos() {
+    _proc_ensure_init();
+    _proclist_ensure();
+    map_u64_clear(_proc_map);
+    var n = sys_proclist(_proclist_buf, PROC_MAX);
+    if (n < 0) { return 0 - 1; }
+    if (n > PROC_MAX) { n = PROC_MAX; }
+    var i = 0;
+    while (i < n) {
+        var src = _proclist_buf + i * PROCLIST_REC_SIZE;
+        map_u64_set(_proc_map, load64(src + 0), proclist_cpu_ticks(src));
+        i = i + 1;
+    }
+    var pool = _agnos_tick_pool();
+    if (pool >= 0) {
+        _agnos_pool_prev  = pool;
+        _agnos_pool_valid = 1;
+    }
+    return 0;
+}
+
 # Fill chakshu's process table from one proclist snapshot.
 #
 # Writes the shared 56-byte record layout that processes_render and the TUI both
@@ -142,18 +207,53 @@ fn _procs_fill_agnos(sort_key) {
     if (n < 0) { return 0 - 1; }
     if (n > PROC_MAX) { n = PROC_MAX; }
 
+    # Pooled tick delta for this window. <= 0 disables the whole CPU% column: no
+    # baseline yet, an unreadable band, or a window in which the machine took no
+    # tick at all (the IF=0 execwait case) all land here, and each must render n/a
+    # rather than a division.
+    var pool_d = 0;
+    var pool = _agnos_tick_pool();
+    if (pool >= 0) {
+        if (_agnos_pool_valid == 1) {
+            if (pool > _agnos_pool_prev) { pool_d = pool - _agnos_pool_prev; }
+        }
+    }
+
     var i = 0;
     while (i < n) {
         var src = _proclist_buf + i * PROCLIST_REC_SIZE;
         var rec = _proc_recs + _proc_n * PROC_REC_SIZE;
 
         var pid = load64(src + 0);
-        # +56 is ONE packed u64: low u32 = cpu ticks, high u32 = rss pages.
-        # Only the RSS half is consumed — see the CPU% note in the file header.
-        var rssp = load32(src + 60);
+        var rssp = proclist_rss_pages(src);
+
+        # CPU%: share of every tick the machine took in this window.
+        #  (a) no usable denominator     -> n/a for every row
+        #  (b) pid unseen at t0          -> n/a (first sighting; one sample is not a rate)
+        #  (c) ticks went BACKWARDS      -> n/a. pid is the slot index in a 16-slot
+        #      table and is recycled, and ticks are zeroed at slot ALLOC, so a
+        #      decrease means this pid is a different process now — not negative CPU.
+        #  (d) nameless row              -> n/a. Kernel threads and each AP's idle
+        #      park are charged real ticks (the idle hlt at smp.cyr:467 sits outside
+        #      arch_wait()'s halt guard), and only the ELF loader sets a name. Without
+        #      this an idle 4-core box shows three phantom busy rows.
+        #  (e) clamp to 100 — a tick landing between the two reads can exceed the pool.
+        var cpu = PROC_NA;
+        if (pool_d > 0) {
+            if (load8(src + 24) != 0) {
+                var prev = map_u64_get_or(_proc_map, pid, 0 - 1);
+                var tks  = proclist_cpu_ticks(src);
+                if (prev >= 0) {
+                    if (tks >= prev) {
+                        cpu = (tks - prev) * 100 / pool_d;
+                        if (cpu > 100) { cpu = 100; }
+                    }
+                }
+            }
+        }
 
         store64(rec + 0,  pid);
-        store64(rec + 8,  PROC_NA);                              # CPU% — see header
+        store64(rec + 8,  cpu);
         # rss is in 4 KiB pages, which is exactly what the shared record and
         # processes_render's `rss * 400 / mem_total_kb` already expect. A slot in the
         # BOOT address space (kmain, the idle task, every kthread) has no user PDEs
@@ -187,10 +287,27 @@ fn _procs_fill_agnos(sort_key) {
     # Fall back to PID, which is real data. NAME is genuine (proclist carries it) and
     # USER is genuine too — every row is root, and that comparator already tiebreaks
     # on pid, so it degenerates correctly without a special case.
-    # Sort. MEM is real data now, so SORT_MEM ranks genuinely. CPU still has no
-    # data behind it (header), so it would rank every row equal — fall back to PID.
+    # Roll the pooled baseline forward so a TUI frame differences against the frame
+    # before it rather than against the one-shot seed.
+    if (pool >= 0) {
+        _agnos_pool_prev  = pool;
+        _agnos_pool_valid = 1;
+    }
+    # Re-seed the per-pid map from THIS snapshot for the next frame.
+    map_u64_clear(_proc_map);
+    var m = 0;
+    while (m < n) {
+        var msrc = _proclist_buf + m * PROCLIST_REC_SIZE;
+        map_u64_set(_proc_map, load64(msrc + 0), proclist_cpu_ticks(msrc));
+        m = m + 1;
+    }
+
+    # Sort. MEM and CPU are both real now; CPU only ranks meaningfully when the
+    # denominator held, so fall back to PID when the whole column is n/a.
     var key = sort_key;
-    if (key == SORT_CPU) { key = SORT_PID; }
+    if (key == SORT_CPU) {
+        if (pool_d <= 0) { key = SORT_PID; }
+    }
     _proc_sort(key);
     return _proc_n;
 }

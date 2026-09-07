@@ -4,6 +4,121 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-09-07 — Cyrius 6.6.0, and the ecosystem moves together
+
+### Added — CPU% on AGNOS, because agnos fixed the reason it could not ship
+
+v0.9.9 built this column, measured chakshu rendering **itself at 100% while it slept** through its
+own sampling window, and backed it out: the tick charge credited `proc_current_get()`
+unconditionally, so a process halted in a blocking syscall accrued at wall-clock rate. That was
+filed upstream. **agnos 1.56.60 fixed it and credits the measurement by name.**
+
+`cpu_in_halt[cpu]` is now set around the `hlt` in `arch_wait()` and the timer ISR consumes it
+read-then-clear before deciding whether to charge. The tick is **dropped, not re-charged** — halted
+time belongs to nobody — so the numerator is `utime+stime`, exactly what the shared column head
+means on Linux. Measured on a live kernel: chakshu's own row now reads **0%**, not 100%.
+
+- **Numerator** — delta of `proclist_cpu_ticks(rec)`, using the accessor **cyrius 6.6.0 shipped in
+  response to chakshu's own filing** (`2026-09-03-agnos-proclist-doc-stale.md`), rather than
+  hand-decoding the packed pair.
+- **Denominator** — pooled delta of `sysinfo` #35's `+40` band, `(user+kern)` summed over the online
+  cores. ⛔ Not wall time: `uptime_ms` #40 is BSP-only and frozen whenever IF is clear.
+- ⭐ **And the band is the right denominator *because* it is not halt-excluded.** The per-core
+  counters are charged unconditionally, so a halted tick lands in `kern`, which makes the pooled sum
+  a true wall-clock tick count. The same asymmetry is why `user/(user+kern)` must never be rendered
+  as machine-busy — on an idle box `kern` is mostly halt — so **chakshu still shows no aggregate CPU
+  bar on AGNOS**, and `cpu:` stays `n/a`.
+
+Five guards, each because its failure mode is a plausible wrong number rather than an error: no
+usable denominator → `n/a` for the whole column; pid unseen at t0 → `n/a`; ticks went **backwards** →
+`n/a` (pid is a slot index in a 16-slot table and is recycled, and ticks are zeroed at slot alloc);
+percentage clamped to 100; and the AGNOS sampling window raised to **1 s**, because a 100 ms window
+against a 100 Hz tick quantises CPU% to 10-point steps — precise-looking noise.
+
+⚠ **Nameless rows render `n/a`, and that is not cosmetic.** The halt exclusion covers `arch_wait()`,
+but an AP's idle park is a raw `hlt` outside it with its LAPIC timer armed, so on a multi-core box
+every idle tick is charged to that core's idle kthread. Names are set only by the ELF loader, so
+kernel threads have none — suppressing CPU% for nameless rows is what stops a wholly idle 4-core
+machine rendering three phantom rows at ~33% each. Invisible on the single-vCPU harness, wrong on
+iron. Filed upstream.
+
+`tests/agnos_qemu.py` grows to **25 checks**, including the inverted v0.9.9 assertion and a direct
+regression guard: chakshu's own row must not read 100%, which is the exact symptom that caused the
+backout.
+
+### Changed — Cyrius toolchain pin `6.5.45` → `6.6.0`, and the dep bumps are NOT optional
+
+⛔ **6.6.0 is a breaking minor, and the proof is that the old dep set does not compile under it.**
+A control build — 6.6.0 toolchain with v0.9.9's dep tags — fails outright:
+
+```
+error:lib/bayan-json.cyr:820:18: a `: stack` enum returns two values — bind both: `var tag, val = f();`
+```
+
+Tagged/Result-style returns are now a two-value pair that every call site must bind
+(`lib/tagged.cyr:10`, `lib/result.cyr:16`). chakshu's own source needed no change — it binds
+nothing of that shape — but bayan 1.5.4 does, so the toolchain and the deps have to move together.
+This is recorded because "bump the toolchain, hold the deps" is the usual safe move and here it is
+the one thing that cannot work.
+
+Stdlib file list is otherwise **identical** across the span (zero additions, zero removals) and
+every module both manifests declare still resolves.
+
+### Changed — dependencies to latest
+
+| dep | 0.9.9 | 0.10.0 | note |
+|---|---|---|---|
+| darshana | 1.0.0 | **1.1.1** | minor, on a library with a v1.0 API freeze (its ADR 0003) |
+| mihi | 1.2.5 | **1.2.6** | |
+| ai-hwaccel | 2.3.19 | **2.3.22** | still tracking **mihi's** pin — mihi 1.2.6 pins 2.3.22 |
+| niyama | 1.0.7 | 1.0.7 | already latest |
+| bayan | 1.5.4 | **1.5.5** | and the tag now names what links (6.6.0 folds 1.5.5) |
+
+The ai-hwaccel move is the tracking rule working, not being suspended: it held at 2.3.19 for two
+cuts while mihi pinned that, and moves now only because mihi moved.
+
+### Changed — the lean binary shrank 8.3%, and it was not codegen
+
+**663,704 B → 608,328 B (−55,376).** Decomposed rather than attributed: **ai-hwaccel 2.3.22 marks
+its `[deps.bayan]` `optional = true`**, so `bayan-json` leaves the lean closure entirely — the root
+lockfile drops from 4 commit-pinned deps to 3 and `lib/bayan-json.cyr` is no longer vendored. The
+AGNOS target shrinks by exactly the same 55,376 B, which is what a dropped dependency looks like and
+what a codegen change does not.
+
+`shu-ai` moves the other way, +16,440 B (2,925,184 → 2,941,624), where bayan is still declared
+directly and is now the larger 1.5.5.
+
+### Changed — `CYRIUS_DCE=1` prunes again, and the release binary is now 399 KB
+
+Since cycc 6.5.16 the DCE'd binary had been **byte-identical** to the plain one — the toolchain
+emitted every *declared* stdlib module rather than pruning to what `main` reaches, so `CYRIUS_DCE=1`
+was a parity check rather than an optimiser, and README, design-spec §8 and state.md all said so.
+
+**6.6.0 restores pruning.** The lean build measures **608,328 B plain and 399,432 B DCE'd — a 34.3%
+cut**. The DCE'd binary is intact: `--version` correct, zero `NEEDED`, and it passes the full smoke
+suite (the DCE-parity gate runs `scripts/smoke.sh` against it, which is how this was noticed).
+
+**The gate was widened in the same edit.** Until now `CYRIUS_DCE=1` was byte-identical, so smoke
+alone was enough. Now that pruning removes 211 KB from the shipped artifact, `check.sh` and `ci.yml`
+both also run `tests/integration_smoke.py` against the DCE'd binary — the only test chakshu owns
+that drives the TUI through a real PTY, which is where dropped-but-live code would surface.
+Non-vacuity proven: the gate passes on the real binary and fails on a stub. `check.sh` is now
+**23 gates**.
+
+⚠ The lean build also gained seven new `undefined function 'bayan_json_v_*'` warnings, all harmless:
+they sit in ai-hwaccel's `profile_from_json*` helpers, which `CYRIUS_DCE_VERBOSE=1` lists as dead
+and chakshu can never reach. They appeared because ai-hwaccel 2.3.22 stopped pulling the bayan
+sublib — the same change that shrank the binary.
+
+⚠ Lean build only — `shu-ai` is unchanged by DCE, so the AI artifact does not move.
+
+That matters because `release.yml` builds with `CYRIUS_DCE=1`, so **the lean artifact users actually
+download drops from ~664 KB to ~399 KB** — comfortably inside design-spec §8's revised < 768 KB
+target, and within sight of the original 256 KB figure that was set at M0 before chakshu took its
+dependencies and has been treated as unreachable since. The three docs that called DCE a no-op are
+corrected.
+
+
 ## [0.9.9] — 2026-09-03 — AGNOS stops saying `n/a`
 
 ### Added — MEM% on AGNOS is a real number

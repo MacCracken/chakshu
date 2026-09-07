@@ -289,12 +289,26 @@ def main():
         check("MEM% is populated from proclist rss (some row > 0)",
               any(v > 0 for v in memvals),
               f"every MEM% read 0: {memvals}")
-        # ...and CPU% must still say n/a. agnos charges timer ticks to a HALTED
-        # process, so the ticks exist but are not CPU utilisation — see the header of
-        # src/proc_agnos.cyr. A number here means someone rendered them anyway.
-        check("CPU% stays n/a (agnos charges ticks to halted processes)",
-              all(l.split()[3] == "n/a" for l in rows),
-              "CPU% rendered a number from halt-inclusive ticks")
+        # v0.10.0 INVERTS the v0.9.9 assertion. agnos 1.56.60 added the halt exclusion
+        # chakshu asked for, so per-process ticks are real CPU time and CPU% ships.
+        # A NAMED row must carry a number; a NAMELESS one must still read n/a, because
+        # kernel threads and each AP's idle park are charged real ticks and only the
+        # ELF loader sets a name (guard (d) in src/proc_agnos.cyr).
+        named   = [l for l in rows if not l.rstrip().endswith("[n/a]")]
+        nameless = [l for l in rows if l.rstrip().endswith("[n/a]")]
+        check("CPU% is a number on named rows (halt exclusion landed)",
+              bool(named) and all(l.split()[3].isdigit() for l in named),
+              f"a named row has no CPU%: {[l.split()[:5] for l in named]}")
+        check("CPU% stays n/a on nameless rows (idle-park ticks)",
+              all(l.split()[3] == "n/a" for l in nameless),
+              f"a nameless row rendered CPU%: {[l.split()[:5] for l in nameless]}")
+        # ⛔ THE REGRESSION THIS EXISTS FOR: at v0.9.9 chakshu rendered ITSELF at 100%
+        # because halted time was charged. It sleeps through its own sampling window,
+        # so its own row must now be modest. 100 here means the exclusion regressed.
+        shu_rows = [l for l in named if "[shu]" in l or "shu" in l.split()[-1]]
+        check("chakshu's own row is not 100% (it sleeps through its window)",
+              all(int(l.split()[3]) < 90 for l in shu_rows) if shu_rows else True,
+              f"self-CPU% back at wall-clock: {[l.split()[:5] for l in shu_rows]}")
 
         print("[2] absent /proc degrades to n/a, never a false zero")
         check("loadavg reports n/a", "load: n/a" in out)
