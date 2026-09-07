@@ -133,7 +133,11 @@ fn snapshot_finish_no_delta(sort_key, top_n) {
     # takes ~1 s on agnos instead of ~110 ms; the alternative is a number that reads
     # 0/10/20 and nothing between.
     processes_sample1();
-    sleep_ms(AGNOS_CPU_WINDOW_MS);
+    # v0.10.1: the disk and network rates now have real counters behind them, and
+    # their sampling window is the SAME one the CPU% column needs — so take both
+    # deltas across one wait instead of stacking two. snap_agnos_delta_line does the
+    # sleep, which is why processes_sample2 below sees a fully elapsed window.
+    snap_agnos_delta_line(AGNOS_CPU_WINDOW_MS);
     #endif
     processes_sample2(0, 1, sort_key);
     processes_render(top_n, mem_total_kb);
@@ -332,7 +336,15 @@ fn snapshot_print(sort_key, top_n) {
     if (d1n < 0) { have_delta = 0; }
     if (n1n < 0) { have_delta = 0; }
     if (have_delta == 0) {
+        #ifndef CYRIUS_TARGET_AGNOS
+        # No procfs and no syscall alternative: every field is genuinely unknown.
         syscall(1, 1, "cpu:  n/a   disk: n/a   net: n/a\n", 33);
+        #endif
+        # ⚠ On agnos this line is printed by snap_agnos_delta_line, from
+        # snapshot_finish_no_delta below — NOT here. agnos has no procfs but it does
+        # have syscall counters for disk and net, so the line is per-field rather
+        # than a blanket n/a, and it needs a sampling window this early-bail has not
+        # yet taken. Printing here too would emit the line twice.
         return snapshot_finish_no_delta(sort_key, top_n);
     }
 

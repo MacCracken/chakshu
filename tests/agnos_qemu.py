@@ -161,6 +161,12 @@ def boot_and_run(work, img, ovmf, command, hold, keys=""):
         "-drive", f"file={img},format=raw,if=none,id=disk0",
         "-device", "nvme,drive=disk0,serial=AGNOS-SHU",
         "-device", "qemu-xhci,id=xhci", "-device", "usb-kbd,bus=xhci.0",
+        # v0.10.1: attach a NIC. Without one, agnos's net_config#61 fields 8-11
+        # return a legitimate 0 rather than -1, so chakshu's no-link guard correctly
+        # reports `net: n/a` — and the network half of the delta line would never be
+        # exercised by this suite at all. With a NIC bound the counters move on the
+        # kernel's own DHCP/ARP traffic, so the assertions below test a real path.
+        "-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0",
         "-serial", f"file:{ser}", "-display", "none", "-no-reboot",
         "-monitor", f"unix:{mon},server,nowait",
     ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -310,10 +316,32 @@ def main():
               all(int(l.split()[3]) < 90 for l in shu_rows) if shu_rows else True,
               f"self-CPU% back at wall-clock: {[l.split()[:5] for l in shu_rows]}")
 
-        print("[2] absent /proc degrades to n/a, never a false zero")
+        print("[2] the delta line: real rates where there are counters, n/a where there are not")
         check("loadavg reports n/a", "load: n/a" in out)
-        check("delta line reports n/a", "cpu:  n/a   disk: n/a   net: n/a" in out)
-        check("no fabricated zero rate", "disk: rd 0 B/s" not in out)
+        # v0.10.1 REPLACES the blanket-n/a assertion. agnos 1.56.60 fixed the block
+        # band (it now counts at the multi-sector paths that used to bypass it) and
+        # the harness attaches a NIC, so disk and net are real rates. The aggregate
+        # cpu% is still n/a and that is NOT an oversight — agnos's per-core band is
+        # not halt-excluded, so user/(user+kern) is "fraction of time in ring 3", not
+        # utilisation, and there is no idle field to subtract.
+        # v0.10.1: the aggregate is DERIVED from the halt asymmetry between the pooled
+        # per-core band (halt included) and the summed per-process ticks (halt
+        # excluded), so it is a real number, not n/a.
+        check("aggregate cpu% is a derived number, not n/a",
+              re.search(r"cpu:  \d+%", out) is not None,
+              "cpu: still n/a — the busy% derivation did not fire")
+        check("disk renders a real rate, not n/a",
+              re.search(r"disk: rd \S+ \S+/s wr ", out) is not None,
+              "disk still n/a — block band unreadable or a non-512 LBA device")
+        check("net renders a real rate, not n/a",
+              re.search(r"net: rx \S+ \S+/s tx ", out) is not None,
+              "net still n/a — no NIC bound, or the no-link guard fired")
+        # ⛔ The guards are the point: a 0 B/s here must mean MEASURED zero traffic,
+        # never "no counter". The net guard only renders once packets have moved, so
+        # a rendered net line is itself proof the counters are live.
+        check("no blanket n/a delta line remains",
+              "cpu:  n/a   disk: n/a   net: n/a" not in out,
+              "the pre-0.10.1 fixed n/a line is still being printed")
 
         print("[3] the TUI runs and quits cleanly")
         out = run_or_die(work, img, ovmf, "run /bin/shu", 10, "q")

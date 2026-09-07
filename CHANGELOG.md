@@ -4,6 +4,98 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-09-07 — the AGNOS delta line stops saying `n/a`
+
+v0.9.9 audited the syscall alternatives to `/proc/diskstats` and `/proc/net/dev` and **declined both
+rates**: the block band's counters had one increment site each and every multi-sector path bypassed
+them (so a heavy copy would have rendered a confident `0 B/s`), and the network counters were live
+but chakshu's own harness attached no NIC (so they would have read a permanent confident zero).
+Both were filed. agnos 1.56.60 fixed the block band and `blk_info` #79's per-tag `lba_bytes`; the
+harness now attaches a NIC. So both ship.
+
+```
+cpu:  n/a   disk: rd 0 B/s wr 0 B/s   net: rx 0 B/s tx 0 B/s
+```
+
+**New `src/snap_agnos.cyr`** renders it through the *same* `_snap_print_rate_bps` the Linux path
+uses, so `-p` has one line shape on both targets. Each field is independently a rate or `n/a`, so a
+machine with a disk but no NIC still shows its disk rate.
+
+### Added — the aggregate `cpu:` is DERIVED, so the line no longer reads three `n/a`s
+
+The first pass at this cut left `cpu:` as `n/a` on the reasoning that agnos exposes no idle field
+and its per-core band is not halt-excluded, so `user/(user+kern)` is "fraction of time in ring 3"
+rather than utilisation. Both halves of that are true. The conclusion was wrong.
+
+The two counters are halt-asymmetric **in opposite directions**:
+
+| counter | halt |
+|---|---|
+| `sysinfo` #35 `+40` band, pooled | **included** — charged unconditionally by privilege of the interrupted context |
+| `proclist` #99 `+56` low u32, summed | **excluded** — agnos 1.56.60's guard |
+
+so `busy% = Σ(per-process deltas) / (pooled delta)`. Halted ticks are exactly the residue between
+them, and the ratio is real utilisation **without agnos needing an idle field at all**. The
+asymmetry was deliberate on their side for one reason — it makes the band a valid denominator for
+the per-process column — and it turns out to pay twice.
+
+```
+cpu:  0%   disk: rd 0 B/s wr 0 B/s   net: rx 0 B/s tx 0 B/s
+```
+
+⚠ **Named processes only in the numerator**, for the same reason the per-process column skips
+nameless rows: an AP's idle park is a raw `hlt` outside `arch_wait()`'s guard, so its ticks *are*
+charged — to that core's idle kthread. Counting them would report an idle 4-core box as 75% busy.
+⚠ A process exiting mid-window drops its ticks from the numerator, so this can under-report on a
+churning box. It cannot over-report, which is the direction that matters for a utilisation bar.
+
+### Filed upstream
+
+`agnos/docs/development/issues/2026-09-07-ap-idle-park-bypasses-halt-guard.md`:
+
+1. **`smp.cyr:466-467` is a bare `while (1) { hlt; }`** with its LAPIC timer armed and IF set, so
+   every idle tick on APs 1..3 is charged to that core's idle kthread. `arch_wait()` brackets its
+   `hlt` with `cpu_in_halt` correctly; this path does not. One line to fix, and invisible in both
+   projects' harnesses because each boots a single vCPU — which is why the 1.56.60 gate passed.
+2. ⛔ **A request NOT to build something**: no idle field, no halted-tick counter. The derivation
+   above already recovers it from the two counters that exist, and a third would carry information
+   the first two encode. Worth saying explicitly, because after 1.56.60 it would have been the
+   obvious next thing to add.
+3. Two doc notes: the ABI doc still says a length-taking `sysinfo` overload is pending upstream when
+   `sys_sysinfo_n` shipped in cyrius 6.5.45, and `blk_info`'s `capacity_lbas` remains active-only.
+
+⚠ A code comment in `src/proc_agnos.cyr` claimed the idle-park bug was "Filed." at v0.10.0. It was
+not — the issue above is the actual filing, and the comment now names it.
+
+### The guards, which are the whole reason the numbers are trustworthy
+
+- ⛔ **A non-512-byte LBA excludes the total.** The band counts in 512-byte units on every filesystem
+  path, but `blk_info` reports the device's real LBA size, which may be 4096 — so the ABI's
+  documented `sectors * lba_bytes` recipe is correct *only* at 512 and over-reports 8× otherwise.
+  The check is deliberately all-or-nothing: the band totals sectors *across* devices, so one
+  4 KiB-LBA device makes the total unconvertible, not just its own share.
+- ⛔ **Zero packets in both directions means no NIC, not no traffic.** `net_config` #61 returns a
+  legitimate `0` for fields 8-11 when nothing is bound — not `-1` — so every capability probe passes
+  and a monitor would render a confident permanent `net: rx 0 B/s` on a machine with no networking.
+  A rendered net line is therefore itself proof the counters are live.
+- The aggregate `cpu:` **stays `n/a`, and that is not an oversight.** agnos's per-core band is not
+  halt-excluded (deliberately — that asymmetry is what makes it a valid denominator for the
+  per-process CPU% column), so `user/(user+kern)` is "fraction of time in ring 3", not utilisation.
+  There is no idle field to subtract because agnos has no single idle loop to instrument.
+
+### Verified against agnos's own oracle, not by reading a counter once
+
+A rate that always reads 0 is the exact failure v0.9.9 declined to ship, so "it renders" is not
+sufficient evidence. `scripts/harness/telemetry-test.py` in the agnos tree boots a real kernel,
+generates load, and requires each counter to **increase** — it reports per-process CPU ticks
+advanced, network packets *and* bytes advanced on real wire traffic, and per-device disk sectors
+counted with out-of-range tags refused. Exit 95, PASS.
+
+`tests/agnos_qemu.py` grows to **27 checks** and its harness gains
+`-netdev user,id=n0 -device virtio-net-pci,netdev=n0`. The blanket-`n/a` assertion from v0.9.8 is
+replaced by three that require real rates, plus one asserting the old fixed line is *gone*.
+
+
 ## [0.10.0] — 2026-09-07 — Cyrius 6.6.0, and the ecosystem moves together
 
 ### Added — CPU% on AGNOS, because agnos fixed the reason it could not ship

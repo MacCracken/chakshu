@@ -20,7 +20,7 @@ The Sanskrit name **चक्षु** *chakṣu* means *the eye* / *the faculty 
 
 ## Status
 
-**v0.10.0 — monitor feature-complete and audited; v1.0 is gated on the criteria in
+**v0.10.1 — monitor feature-complete and audited; v1.0 is gated on the criteria in
 [docs/development/roadmap.md](docs/development/roadmap.md), not on features.** What works today:
 
 - **Plain snapshot** (`shu -p`) — host / uptime / load / mem / cpu / disk / net, GPU telemetry, and a
@@ -57,9 +57,13 @@ chakshu builds and runs on AGNOS, but the platform constrains what a monitor can
   because halted time was charged — and filed it; agnos 1.56.60 added the halt exclusion, so the
   ticks are real CPU time now. Kernel threads still read `n/a`: each core's idle park is charged real
   ticks and only the ELF loader names a process, so a number there would be a phantom.
-- **Load, disk and network rates read `n/a`.** AGNOS has no `/proc/diskstats` or `/proc/net/dev`
-  equivalent and its `sysinfo` carries no load average. Host, kernel, memory and GPU identity work.
-  Volume *capacity* is available to the kernel (`statfs` #103) and is not yet surfaced here.
+- **Disk and network rates work as of v0.10.1**, from syscall counters rather than procfs. Both were
+  declined at v0.9.9 — the disk counters missed the mainline I/O path and the test harness had no
+  NIC, so each would have shown a confident permanent `0 B/s` — and both were fixed upstream in
+  response. The **aggregate CPU bar is derived** rather than read: agnos has no idle field, but its
+  pooled per-core ticks include halted time while its per-process ticks exclude it, so the residue
+  between them *is* the idle time. **Load average still reads `n/a`** — agnos keeps no load metric,
+  by policy.
 - ⚠ **Untracked values always read `n/a`, never `0`.** A measured zero and an unmeasurable value are
   different facts, and a monitor that prints `0` for the second is inventing data.
 - **`shu-ai` builds for AGNOS as of v0.9.7.** The old "`sandhi` dlopens libc" blocker is gone — TLS

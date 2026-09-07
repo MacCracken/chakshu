@@ -1,0 +1,240 @@
+# snap_agnos.cyr — the AGNOS delta line: disk and network rates (v0.10.1).
+#
+# WHY THIS EXISTS
+#
+# `shu -p` on AGNOS printed a fixed `cpu:  n/a   disk: n/a   net: n/a` because the
+# Linux path reads /proc/stat, /proc/diskstats and /proc/net/dev and AGNOS has no
+# procfs. v0.9.9 audited the syscall alternatives and DECLINED both rates:
+#
+#   · the block band's counters had exactly one increment site each and every
+#     multi-sector path bypassed them, so they froze at their boot-probe value on
+#     the ext2/NVMe path this project's own harness builds — a heavy copy would
+#     have rendered a confident `0 B/s`;
+#   · the network counters were live, but chakshu's harness attaches no NIC, so
+#     they would have read a permanent confident zero.
+#
+# Both were filed. agnos 1.56.60 fixed the block band (counting is now placed at
+# all four bypassing branches, and both universal FS block primitives route through
+# counted seams) and fixed `blk_info`#79 to report per-tag `lba_bytes`. The harness
+# now attaches a virtio NIC. So both rates are renderable, and this file renders
+# them — through the SAME `_snap_print_rate_bps` the Linux path uses, so the `-p`
+# line has one shape on both targets.
+#
+# ⭐ THE AGGREGATE cpu% IS DERIVED, NOT READ — and the derivation is the point.
+#
+# agnos exposes no idle field, and its per-core band cannot supply one: the band
+# splits ticks by the privilege of the interrupted context and is NOT halt-excluded,
+# so a core halted in a blocking syscall lands in `kern`. `user / (user + kern)` is
+# therefore "fraction of time in ring 3", not utilisation — on an idle box `kern` is
+# mostly halt — and rendering it as a CPU bar would be a fabrication.
+#
+# But the number IS recoverable, because the two counters are halt-asymmetric in
+# opposite directions:
+#
+#   pooled band delta      = every tick the machine took        (halt INCLUDED)
+#   Σ per-process deltas   = every tick charged to a process    (halt EXCLUDED)
+#   ------------------------------------------------------------------------
+#   busy%                  = Σ per-process / pooled  * 100
+#
+# Halted ticks are exactly the residue between them, so the ratio is real CPU
+# utilisation without agnos needing an idle field at all. That asymmetry was
+# deliberate on their side (it is what makes the band a valid denominator for the
+# per-process column); this just spends it twice.
+#
+# ⚠ NAMED PROCESSES ONLY IN THE NUMERATOR. An AP's idle park is a raw `hlt` outside
+# arch_wait()'s halt guard, so on a multi-core box its ticks ARE charged — to that
+# core's idle kthread. Counting those would report an idle 4-core machine as 75%
+# busy. Only the ELF loader names a process, so summing named rows drops every
+# kernel thread and every idle park in one test. Same guard, same reason, as the
+# per-process column in src/proc_agnos.cyr.
+#
+# ⚠ A process that EXITS mid-window loses its ticks from the numerator, so busy%
+# can under-report on a churning box. It cannot over-report, which is the direction
+# that matters for a utilisation bar, and the alternative (crediting a departed
+# slot) would mean inventing a number for a process we cannot re-read.
+
+#ifdef CYRIUS_TARGET_AGNOS
+
+# Block-device tags, as `blk_enum`#75 hands them out. Slot 0 is BLK_NONE and is
+# reserved — the band is indexed by the RAW tag, so slot 0 is simply never used.
+var AGNOS_BLK_TAG_MIN = 1;
+var AGNOS_BLK_TAG_MAX = 5;
+
+# The one LBA size the band's unit agrees with. ⚠ The counters tick in 512-BYTE
+# units on every filesystem path, but `blk_info`#79 reports the device's real LBA
+# size, which `blk_lba_bytes_ok` admits may be 4096. The ABI's documented
+# `sectors * lba_bytes` recipe is therefore correct ONLY at 512; on a 4 KiB-LBA
+# device it over-reports by 8x. Rather than guess which is authoritative, a device
+# that reports anything else is excluded from the total — see _agnos_disk_sectors.
+var AGNOS_SECTOR_BYTES = 512;
+
+# Sum cumulative sectors read and written across every registered device.
+#
+# Returns 0 on success and writes the two totals; -1 if the block band is
+# unreadable, which the caller must render as `n/a` rather than as zero traffic.
+fn _agnos_disk_sectors(out_read, out_writ) {
+    var si[208];
+    if (sys_sysinfo_n(&si, SYSINFO_SIZE_FULL) < 0) { return 0 - 1; }
+    var rd = 0;
+    var wr = 0;
+    var tag = AGNOS_BLK_TAG_MIN;
+    while (tag <= AGNOS_BLK_TAG_MAX) {
+        var r = sysinfo_blk_read(&si, tag);
+        var w = sysinfo_blk_write(&si, tag);
+        # A tag that never registered reads 0/0 and contributes nothing, so an
+        # unregistered device and an idle one are indistinguishable here — which is
+        # fine for a TOTAL. Both are zero traffic either way.
+        if (r > 0) { rd = rd + r; }
+        if (w > 0) { wr = wr + w; }
+        tag = tag + 1;
+    }
+    store64(out_read, rd);
+    store64(out_writ, wr);
+    return 0;
+}
+
+# True (1) when every registered device reports a 512-byte LBA, so the band's
+# sector unit and the ABI's byte conversion agree.
+#
+# ⚠ This is the guard that stops an 8x over-report. It is deliberately ALL-OR-
+# NOTHING: the band totals sectors across devices, so one 4 KiB-LBA device in the
+# set makes the total unconvertible, not merely that device's share.
+fn _agnos_disk_units_ok() {
+    var tag = AGNOS_BLK_TAG_MIN;
+    var seen = 0;
+    while (tag <= AGNOS_BLK_TAG_MAX) {
+        var h = sys_blk_open(tag, 0);
+        if (h >= 0) {
+            var info[32];
+            if (sys_blk_info(h, &info) == 0) {
+                var lba = load64(&info + 8);
+                if (lba != AGNOS_SECTOR_BYTES) { sys_blk_close(h); return 0; }
+                seen = seen + 1;
+            }
+            sys_blk_close(h);
+        }
+        tag = tag + 1;
+    }
+    # No device answered: nothing to convert, so nothing to get wrong.
+    if (seen == 0) { return 0; }
+    return 1;
+}
+
+# Is a NIC actually present and carrying traffic counters?
+#
+# ⚠ THIS GUARD IS THE WHOLE REASON THE NETWORK LINE IS TRUSTWORTHY. `net_config`#61
+# returns a legitimate 0 for fields 8-11 when no NIC is bound — not -1 — so every
+# capability probe passes and a monitor would render a confident, permanent
+# `net: rx 0 B/s tx 0 B/s` on a machine with no networking at all. Zero packets in
+# BOTH directions means "no NIC or no link", which is a different fact from "a NIC
+# that moved no bytes", and only the second one deserves a number.
+fn _agnos_net_present() {
+    var txp = sys_net_tx_packets();
+    var rxp = sys_net_rx_packets();
+    if (txp < 0) { return 0; }
+    if (rxp < 0) { return 0; }
+    if (txp == 0) {
+        if (rxp == 0) { return 0; }
+    }
+    return 1;
+}
+
+# Sum halt-excluded CPU ticks across NAMED processes in one proclist snapshot.
+# Returns -1 if the table cannot be enumerated.
+fn _agnos_named_ticks() {
+    _proclist_ensure();
+    var n = sys_proclist(_proclist_buf, PROC_MAX);
+    if (n < 0) { return 0 - 1; }
+    if (n > PROC_MAX) { n = PROC_MAX; }
+    var total = 0;
+    var i = 0;
+    while (i < n) {
+        var src = _proclist_buf + i * PROCLIST_REC_SIZE;
+        # load8(src + 24) is the first byte of name[32] — 0 means the ELF loader
+        # never named this slot, i.e. a kernel thread or an idle park.
+        if (load8(src + 24) != 0) { total = total + proclist_cpu_ticks(src); }
+        i = i + 1;
+    }
+    return total;
+}
+
+# Render the AGNOS `cpu:/disk:/net:` line from two samples `window_ms` apart.
+#
+# Each of the three fields is independently either a rate or `n/a`, so a machine
+# with a disk but no NIC still shows its disk rate. Returns 0.
+fn snap_agnos_delta_line(window_ms) {
+    var rd1 = 0;
+    var wr1 = 0;
+    var have_disk = 0;
+    if (_agnos_disk_sectors(&rd1, &wr1) == 0) {
+        if (_agnos_disk_units_ok() == 1) { have_disk = 1; }
+    }
+    var busy1 = _agnos_named_ticks();
+    var pool1 = _agnos_tick_pool();
+    var have_net = _agnos_net_present();
+    var nrx1 = 0;
+    var ntx1 = 0;
+    if (have_net == 1) {
+        nrx1 = sys_net_rx_bytes();
+        ntx1 = sys_net_tx_bytes();
+    }
+
+    sleep_ms(window_ms);
+
+    var rd2 = 0;
+    var wr2 = 0;
+    if (have_disk == 1) {
+        if (_agnos_disk_sectors(&rd2, &wr2) != 0) { have_disk = 0; }
+    }
+
+    # cpu: busy% = halt-excluded process ticks / every tick the machine took.
+    var busy2 = _agnos_named_ticks();
+    var pool2 = _agnos_tick_pool();
+    syscall(1, 1, "cpu:  ", 6);
+    var have_cpu = 0;
+    var busy_pct = 0;
+    if (busy1 >= 0) {
+        if (busy2 >= busy1) {
+            if (pool1 >= 0) {
+                if (pool2 > pool1) {
+                    busy_pct = (busy2 - busy1) * 100 / (pool2 - pool1);
+                    # A tick landing between the two band reads can push this over.
+                    if (busy_pct > 100) { busy_pct = 100; }
+                    have_cpu = 1;
+                }
+            }
+        }
+    }
+    if (have_cpu == 1) {
+        print_num(busy_pct);
+        syscall(1, 1, "%", 1);
+    } else {
+        syscall(1, 1, "n/a", 3);
+    }
+
+    syscall(1, 1, "   disk: ", 9);
+    if (have_disk == 1) {
+        syscall(1, 1, "rd ", 3);
+        _snap_print_rate_bps((rd2 - rd1) * AGNOS_SECTOR_BYTES * 1000 / window_ms);
+        syscall(1, 1, " wr ", 4);
+        _snap_print_rate_bps((wr2 - wr1) * AGNOS_SECTOR_BYTES * 1000 / window_ms);
+    } else {
+        syscall(1, 1, "n/a", 3);
+    }
+
+    syscall(1, 1, "   net: ", 8);
+    if (have_net == 1) {
+        var nrx2 = sys_net_rx_bytes();
+        var ntx2 = sys_net_tx_bytes();
+        syscall(1, 1, "rx ", 3);
+        _snap_print_rate_bps((nrx2 - nrx1) * 1000 / window_ms);
+        syscall(1, 1, " tx ", 4);
+        _snap_print_rate_bps((ntx2 - ntx1) * 1000 / window_ms);
+    } else {
+        syscall(1, 1, "n/a", 3);
+    }
+    syscall(1, 1, "\n", 1);
+    return 0;
+}
+
+#endif

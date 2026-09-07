@@ -82,7 +82,8 @@
 # every idle tick is charged to that core's idle kthread. Names are set only by the
 # ELF loader, so every kernel thread has an empty name: suppressing CPU% for nameless
 # rows is what stops a wholly idle 4-core machine rendering three phantom rows at
-# ~33% each. Invisible on the single-vCPU QEMU harness; wrong on real iron. Filed.
+# ~33% each. Invisible on the single-vCPU QEMU harness; wrong on real iron. Filed as
+# agnos docs/development/issues/2026-09-07-ap-idle-park-bypasses-halt-guard.md.
 #
 # ⚠ THE COLUMN DEPENDS ON agnoshi's LAUNCH ROUTING, not on agnos. `run /bin/shu` goes
 # through `spawn_path`#43 and gets IF=1 as an ordinary scheduled process. Under
