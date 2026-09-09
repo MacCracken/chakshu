@@ -20,7 +20,7 @@ The Sanskrit name **चक्षु** *chakṣu* means *the eye* / *the faculty 
 
 ## Status
 
-**v0.10.1 — monitor feature-complete and audited; v1.0 is gated on the criteria in
+**v0.10.2 — monitor feature-complete and audited; v1.0 is gated on the criteria in
 [docs/development/roadmap.md](docs/development/roadmap.md), not on features.** What works today:
 
 - **Plain snapshot** (`shu -p`) — host / uptime / load / mem / cpu / disk / net, GPU telemetry, and a

@@ -4,6 +4,100 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.10.2] — 2026-09-08 — a fabricated 59%, caught by running four cores for the first time
+
+### Fixed — pid 0's CPU% was its whole uptime, because `0` is the hashmap's empty-slot sentinel
+
+`MAP_U64_EMPTY` is **0** (cyrius `lib/hashmap.cyr:425`), so key 0 *is* the marker for an unused
+slot. `map_u64_set(m, 0, v)` cannot be told apart from an empty slot, and `map_u64_get_or(m, 0, -1)`
+returns the slot's **value (0)** rather than the `-1` default — its `load64(ep) != key` guard is
+`0 != 0`, which is false.
+
+chakshu keyed its per-process tick baseline by pid. **Linux has no pid 0; AGNOS does** — `kmain` —
+so only the AGNOS path was affected, and it failed silently in the worst possible direction: pid 0's
+baseline read 0, its delta became its entire cumulative-since-boot tick count, and it rendered a
+large, plausible, wrong CPU%. Measured: **59% on a wholly idle 4-core box.**
+
+Keys are now biased by +1, which moves every real pid off the sentinel and costs nothing. Filed with
+cyrius as `2026-09-08-map-u64-get-or-ignores-default-for-key-0.md` — the storage restriction is
+documented, but `get_or` ignoring its own `default_val` for that one key is a sharp edge that fails
+silently with a plausible number, and a one-line guard would close it.
+
+⭐ **What caught it is the point.** The aggregate busy% sums ticks across *all* slots and showed a
+delta of exactly **0** for the same window in which pid 0 claimed 59%. Two numbers derived from the
+same counter disagreeing is what exposed the bug — neither alone looked wrong. The debug dump read
+`pool1=14152 pool2=14554 busy1=325 busy2=325`: a 402-tick window (4 cores × 100 Hz × 1 s, exactly
+right) against a numerator that had not moved at all.
+
+### Fixed — the test harness had been single-vCPU the whole time
+
+`tests/agnos_qemu.py` passed **no `-smp` flag**, so every AGNOS test this project has ever run was
+single-core — while every multi-core guard it wrote went unexercised.
+
+That is doubly worth recording, because chakshu's v0.10.1 filing to agnos asserted the blindness was
+*theirs*: *"invisible in both our harnesses — chakshu's QEMU boot is single-vCPU and so, I believe,
+is `telemetry-test.py`"*. Their resolution corrected it — **`telemetry-test.py` has been `-smp 4`
+all along** and was blind only for want of an assertion. The single-core harness was ours. The
+harness now runs `-smp 4`, matching theirs.
+
+Two new regression guards, chakshu's peer to agnos's mutation-proven `tlm.cyr` §4d: no row may read
+≥ 25% on an idle box, and the aggregate may not either — the unguarded idle park produced ~33% per
+phantom row and ~75% aggregate. Plus a third asserting the harness really is multi-core, without
+which the other two are vacuous. `tests/agnos_qemu.py` is now **31 checks**.
+
+### Removed — the nameless-row filter, after measuring rather than assuming
+
+v0.10.0 suppressed CPU% for rows with no name, to hide phantom ticks from an AP idle park halting
+outside `arch_wait()`. chakshu filed that; **agnos 1.57.1 fixed it**, swept two further halt sites,
+and added a mutation-proven multi-core assertion. With the park fixed, the filter only hid real data
+and made the busy% numerator under-report whenever a kernel thread does work.
+
+⚠ **The first measurement said "safe to remove" and was wrong** — a single 4-core probe showed every
+nameless row at 0%. The very next run showed pid 0 at 61%. That was the hashmap bug above, not a
+surviving phantom, but it is a reminder that one sample is not a measurement; the filter had been
+masking a chakshu defect as well as an agnos one.
+
+### Fixed — by the toolchain: the AGNOS `k` kill flow was jammed shut, and nobody knew
+
+Not a chakshu edit, but a live user-visible defect this bump repairs, and it would have landed
+silently. **Cyrius 6.6.1 rebinds `clock_now_ns` from `sys_uptime_ms()` to `sys_uptime_us()`.**
+
+That matters because of something chakshu already documents about AGNOS elsewhere in this tree:
+`uptime_ms` #40 is BSP-only and **frozen while IF is clear**, and a foreground `run` program on
+AGNOS executes with IF cleared. So `clock_now_ms()` returned a *constant* for the whole run, and the
+kill-confirm dwell in `src/tui.cyr` —
+
+```
+if (clock_now_ms() - _tui_confirm_at >= TUI_CONFIRM_DWELL_MS) {   # 250 ms
+```
+
+— evaluated `0 >= 250`, always false. `confirmed` could never become 1, so **the `k` kill flow was
+permanently jammed shut on the AGNOS TUI** while looking entirely normal: the prompt appeared, `y`
+was silently treated as typeahead, nothing died. The same frozen clock meant a transient status
+message (`_tui_msg_until = clock_now_ms() + 3000`) never expired and permanently displaced the
+key-hint line.
+
+Both are fixed by the rebind — `uptime_us` #95 is rdtsc-based and unaffected by IF.
+
+⚠ **Nothing tested it**, which is why it survived six releases. `tests/agnos_qemu.py` gains a
+scenario [5] driving `k` and `kn`, asserting the prompt opens and cancel restores the hint line. It
+deliberately does not assert on a process dying — killing agnsh or shu would end the session and
+prove nothing about the dwell.
+
+⚠ **The locally installed `~/.cyrius/versions/6.6.0` tree is corrupt** — 7 of its 109 lib files hold
+6.6.1's content (`chrono`, `ganita`, `math`, `niyama`, `patra`, `sakshi`, `sankoch`), from the very
+non-atomic-install bug 6.6.1 fixes. Nothing shipped wrong: chakshu's committed v0.10.1 lock holds
+the true 6.6.0 hashes. But **any "6.6.0 baseline" A/B on this box would silently use 6.6.1 stdlib
+bytes** — reinstall 6.6.0 with the fixed `cyriusly` before trusting one. It is also why the two
+installed trees show no `chrono` diff while the git tags do.
+
+### Changed — Cyrius `6.6.0` → `6.6.1`, niyama `1.0.7` → `1.0.10`
+
+niyama is the only dep to move; darshana 1.1.1, mihi 1.2.6, ai-hwaccel 2.3.22 and bayan 1.5.5 are
+already latest. 6.6.1 folds niyama **1.0.10**, matching the pin — so the tag still names what links
+(the fold-vs-pin divergence that bit v0.9.6 has not recurred).
+
+
 ## [0.10.1] — 2026-09-07 — the AGNOS delta line stops saying `n/a`
 
 v0.9.9 audited the syscall alternatives to `/proc/diskstats` and `/proc/net/dev` and **declined both

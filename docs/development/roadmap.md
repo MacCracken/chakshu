@@ -5,7 +5,7 @@
 > [`state.md`](state.md). This file answers one question: *what is left to reach
 > v1.0, and in which release does it land?*
 >
-> **Current: v0.10.0.** | **Last Updated**: 2026-09-07
+> **Current: v0.10.2.** | **Last Updated**: 2026-09-07
 
 ---
 
@@ -33,6 +33,7 @@ inside it are additive or corrective only.
 | ~~0.9.9~~ | ~~AGNOS telemetry: MEM%~~ | **shipped 2026-09-03.** agnos 1.56.59 closed chakshu's telemetry filing in full. MEM% ships from `proclist` rss pages. CPU% and the disk rate were each **built or read, measured, and declined** — halt-inclusive ticks and a block band that misses the mainline I/O path would both have been confident wrong numbers. Cyrius 6.5.45 |
 | ~~0.10.0~~ | ~~AGNOS CPU%; Cyrius 6.6.0~~ | **shipped 2026-09-07.** agnos 1.56.60 added the halt exclusion chakshu filed for, so the CPU% column backed out at v0.9.9 now ships honestly. Cyrius 6.6.0 is a breaking minor and the deps moved with it. Lean artifact down to **399 KB** (DCE prunes again) |
 | ~~0.10.1~~ | ~~AGNOS disk + net rates~~ | **shipped 2026-09-07.** Both were declined at v0.9.9 for untrustworthy counters and both were fixed upstream in response; guarded on LBA size and NIC presence, and verified with agnos's counter-MOVED oracle |
+| ~~0.10.2~~ | ~~pid-0 sentinel fix; multi-core harness~~ | **shipped 2026-09-08.** Found a fabricated 59% CPU% by running the harness at `-smp 4` for the first time — the baseline map was keyed by pid and 0 is the hashmap empty sentinel. Filed with cyrius; nameless-row filter dropped now agnos 1.57.1 fixed the idle park. Cyrius 6.6.1 |
 | **1.0.0** | Ship as the AGNOS default monitor | Registry promotion, ISO default, announce |
 
 ---

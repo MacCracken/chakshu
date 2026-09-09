@@ -155,7 +155,15 @@ def boot_and_run(work, img, ovmf, command, hold, keys=""):
         os.unlink(mon)
 
     q = subprocess.Popen([
-        "qemu-system-x86_64", "-machine", "q35", "-m", "512M", "-cpu", "max",
+        # ⛔ -smp 4 ADDED v0.10.2, and the reason is a lesson rather than a preference.
+        # chakshu filed an agnos bug (an AP idle park halting outside arch_wait, so
+        # idle cores charged phantom ticks to their idle kthread) and asserted in the
+        # filing that BOTH projects' harnesses were single-vCPU and therefore blind.
+        # Half of that was wrong: agnos's telemetry harness has been -smp 4 all along
+        # and was blind only for want of an assertion. THIS harness was the
+        # single-core one — so every guard chakshu wrote for multi-core behaviour was
+        # untested by the project that wrote it. Four cores, matching agnos's.
+        "qemu-system-x86_64", "-machine", "q35", "-m", "512M", "-cpu", "max", "-smp", "4",
         "-drive", f"if=pflash,format=raw,readonly=on,file={code}",
         "-drive", f"if=pflash,format=raw,file={varfd}",
         "-drive", f"file={img},format=raw,if=none,id=disk0",
@@ -300,18 +308,24 @@ def main():
         # A NAMED row must carry a number; a NAMELESS one must still read n/a, because
         # kernel threads and each AP's idle park are charged real ticks and only the
         # ELF loader sets a name (guard (d) in src/proc_agnos.cyr).
-        named   = [l for l in rows if not l.rstrip().endswith("[n/a]")]
-        nameless = [l for l in rows if l.rstrip().endswith("[n/a]")]
-        check("CPU% is a number on named rows (halt exclusion landed)",
-              bool(named) and all(l.split()[3].isdigit() for l in named),
-              f"a named row has no CPU%: {[l.split()[:5] for l in named]}")
-        check("CPU% stays n/a on nameless rows (idle-park ticks)",
-              all(l.split()[3] == "n/a" for l in nameless),
-              f"a nameless row rendered CPU%: {[l.split()[:5] for l in nameless]}")
+        # v0.10.2: the nameless-row suppression is GONE — agnos 1.57.1 fixed the idle
+        # park that made it necessary, so every slot now carries a real CPU%.
+        check("CPU% is a number on EVERY row (no suppression left)",
+              all(l.split()[3].isdigit() for l in rows),
+              f"a row still renders n/a for CPU%: {[l.split()[:5] for l in rows]}")
+        # ⛔ THE MULTI-CORE REGRESSION GUARD, and the reason this harness is now -smp 4.
+        # With the idle park unguarded, each idle AP charged ~100% of its ticks to that
+        # core's idle kthread: on 4 cores an idle box read ~33% per phantom row and
+        # ~75% aggregate. Every row near zero on an idle box is what "fixed" looks like.
+        # This is chakshu's peer to agnos's mutation-proven tlm.cyr §4d.
+        check("no phantom busy rows on an idle multi-core box",
+              all(int(l.split()[3]) < 25 for l in rows),
+              f"a row is implausibly busy on an idle box — idle-park regression? "
+              f"{[l.split()[:5] for l in rows]}")
         # ⛔ THE REGRESSION THIS EXISTS FOR: at v0.9.9 chakshu rendered ITSELF at 100%
         # because halted time was charged. It sleeps through its own sampling window,
         # so its own row must now be modest. 100 here means the exclusion regressed.
-        shu_rows = [l for l in named if "[shu]" in l or "shu" in l.split()[-1]]
+        shu_rows = [l for l in rows if "[shu]" in l or "shu" in l.split()[-1]]
         check("chakshu's own row is not 100% (it sleeps through its window)",
               all(int(l.split()[3]) < 90 for l in shu_rows) if shu_rows else True,
               f"self-CPU% back at wall-clock: {[l.split()[:5] for l in shu_rows]}")
@@ -330,6 +344,18 @@ def main():
         check("aggregate cpu% is a derived number, not n/a",
               re.search(r"cpu:  \d+%", out) is not None,
               "cpu: still n/a — the busy% derivation did not fire")
+        # Same regression guard, aggregate side: an unguarded idle park drove this to
+        # ~75% on four cores.
+        m_cpu = re.search(r"cpu:  (\d+)%", out)
+        check("aggregate cpu% is plausible on an idle box (< 25%)",
+              m_cpu is not None and int(m_cpu.group(1)) < 25,
+              f"aggregate busy% implausible: {m_cpu.group(1) if m_cpu else '?'}%")
+        # The harness must actually be multi-core, or both guards above are vacuous:
+        # the phantom they detect only exists on APs.
+        check("harness is running multi-core (guards above need APs)",
+              re.search(r"proc:.*\((\d+) cores\)", out) is not None
+              and int(re.search(r"proc:.*\((\d+) cores\)", out).group(1)) > 1,
+              "single-vCPU boot — the idle-park guards cannot fire")
         check("disk renders a real rate, not n/a",
               re.search(r"disk: rd \S+ \S+/s wr ", out) is not None,
               "disk still n/a — block band unreadable or a non-512 LBA device")
@@ -357,6 +383,28 @@ def main():
         # If only `q` worked it could be coincidence; this proves the Set-1 table.
         check("`f` entered filter mode", "filter:" in out)
         check("`a` was decoded into the filter", "filter: a_" in out)
+
+        print("[5] the kill-confirm dwell resolves (needs a LIVE clock)")
+        # ⛔ ADDED v0.10.2, and it covers a defect nothing caught for six releases.
+        # The confirm gate is `clock_now_ms() - _tui_confirm_at >= 250` (src/tui.cyr).
+        # On AGNOS a foreground `run` program executes with IF cleared, and until
+        # cyrius 6.6.1 `clock_now_ns()` was built on `uptime_ms` #40 — which is
+        # BSP-only and FROZEN while IF is clear. So clock_now_ms() returned a
+        # constant, the dwell evaluated `0 >= 250`, and `confirmed` could never
+        # become 1: the `k` kill flow was permanently jammed shut on AGNOS while
+        # looking perfectly normal. 6.6.1 rebound the clock to `uptime_us` #95
+        # (rdtsc-based, unaffected by IF), which fixes it.
+        #
+        # The assertion is deliberately on the PROMPT and the RETURN to normal, not
+        # on a process actually dying — killing agnsh or shu would end the session
+        # and prove nothing about the dwell.
+        out = run_or_die(work, img, ovmf, "run /bin/shu", 11, "k")
+        check("`k` opens the kill-confirm prompt", "Kill PID " in out and "? [y/N]" in out)
+        # `n` must cancel and return to the normal key-hint line. This resolves
+        # regardless of the clock, so it is the control for the next check.
+        out = run_or_die(work, img, ovmf, "run /bin/shu", 11, "kn")
+        check("`n` cancels the confirm and restores the hints",
+              "[k] kill" in out.split("Kill PID ")[-1])
     except BootFailed as e:
         print(f"  FAIL: {e}")
         failures.append(str(e))

@@ -73,17 +73,25 @@
 # per-core user/kern counters are charged unconditionally, so a halted tick lands in
 # `kern`. That asymmetry is deliberate: it makes the pooled sum a true wall-clock
 # tick count. The same asymmetry is why `user/(user+kern)` must NEVER be rendered as
-# machine-busy — on an idle box `kern` is mostly halt — so chakshu still shows no
-# aggregate CPU bar on agnos.
+# machine-busy — on an idle box `kern` is mostly halt. ⭐ v0.10.1 nonetheless renders
+# an aggregate bar, by DERIVING it: halted ticks are the residue between this
+# halt-inclusive band and the halt-excluded per-process sum. See src/snap_agnos.cyr.
 #
-# ⚠ NAMELESS ROWS GET n/a, AND THAT IS NOT COSMETIC. The halt exclusion covers
-# `arch_wait()`, but an AP's idle park is a RAW `hlt` outside it (agnos
-# kernel/arch/x86_64/smp.cyr:467) with its LAPIC timer armed — so on a multi-core box
-# every idle tick is charged to that core's idle kthread. Names are set only by the
-# ELF loader, so every kernel thread has an empty name: suppressing CPU% for nameless
-# rows is what stops a wholly idle 4-core machine rendering three phantom rows at
-# ~33% each. Invisible on the single-vCPU QEMU harness; wrong on real iron. Filed as
-# agnos docs/development/issues/2026-09-07-ap-idle-park-bypasses-halt-guard.md.
+# ⭐ THE NAMELESS-ROW FILTER IS GONE AT v0.10.2, AND THE HISTORY IS WHY IT EXISTED.
+# v0.10.0 suppressed CPU% for rows with no name, because an AP's idle park was a RAW
+# `hlt` outside `arch_wait()` with its LAPIC timer armed — so on a multi-core box every
+# idle tick was charged to that core's idle kthread, and an idle 4-core machine would
+# have rendered three phantom rows at ~33%. chakshu filed it; agnos 1.57.1 routed the
+# park through `arch_wait()`, swept two further halt sites, and added a mutation-proven
+# multi-core assertion (their tlm.cyr §4d).
+#
+# ⚠ MEASURED BEFORE REMOVING, not assumed. chakshu's own harness ran `-smp 4` for the
+# first time at v0.10.2 (it had been single-vCPU — the blindness this project attributed
+# to agnos's harness in the filing was in fact its own; theirs was `-smp 4` throughout).
+# With the filter removed on four cores, every nameless slot reads 0% and the aggregate
+# reads 0%, not the ~33%/75% the bug produced. The filter was a workaround, it is no
+# longer load-bearing, and keeping it would HIDE real work the moment a kernel thread
+# does any — which is what this project told agnos when it filed.
 #
 # ⚠ THE COLUMN DEPENDS ON agnoshi's LAUNCH ROUTING, not on agnos. `run /bin/shu` goes
 # through `spawn_path`#43 and gets IF=1 as an ordinary scheduled process. Under
@@ -168,6 +176,19 @@ fn _agnos_tick_pool() {
 var _agnos_pool_prev  = 0;
 var _agnos_pool_valid = 0;
 
+# ⛔ KEY BY pid+1, NEVER pid. `MAP_U64_EMPTY` is 0 (cyrius lib/hashmap.cyr:425), so
+# key 0 IS the empty-slot sentinel: `map_u64_set(m, 0, v)` cannot be distinguished
+# from an unused slot, and `map_u64_get_or(m, 0, -1)` returns the slot's VALUE (0)
+# rather than the -1 default, because the `load64(ep) != key` guard is 0 != 0 = false.
+#
+# AGNOS has a pid 0 — kmain — where Linux does not, so this only ever bites here, and
+# it bites SILENTLY: the row's baseline reads 0, its delta becomes its whole
+# cumulative-since-boot tick count, and it renders a large, plausible, wrong CPU%.
+# Measured at v0.10.2: pid 0 rendered 59% on a wholly idle 4-core box while the
+# summed-over-all-slots numerator showed a delta of exactly 0 — the two disagreeing
+# is what exposed it. +1 costs nothing and moves every real pid off the sentinel.
+var AGNOS_PID_KEY_BIAS = 1;
+
 # Seed the tick baseline: per-pid ticks into _proc_map, plus the pooled total.
 # Called by processes_sample1 before the sampling window.
 fn _procs_seed_agnos() {
@@ -180,7 +201,7 @@ fn _procs_seed_agnos() {
     var i = 0;
     while (i < n) {
         var src = _proclist_buf + i * PROCLIST_REC_SIZE;
-        map_u64_set(_proc_map, load64(src + 0), proclist_cpu_ticks(src));
+        map_u64_set(_proc_map, load64(src + 0) + AGNOS_PID_KEY_BIAS, proclist_cpu_ticks(src));
         i = i + 1;
     }
     var pool = _agnos_tick_pool();
@@ -234,15 +255,14 @@ fn _procs_fill_agnos(sort_key) {
         #  (c) ticks went BACKWARDS      -> n/a. pid is the slot index in a 16-slot
         #      table and is recycled, and ticks are zeroed at slot ALLOC, so a
         #      decrease means this pid is a different process now — not negative CPU.
-        #  (d) nameless row              -> n/a. Kernel threads and each AP's idle
-        #      park are charged real ticks (the idle hlt at smp.cyr:467 sits outside
-        #      arch_wait()'s halt guard), and only the ELF loader sets a name. Without
-        #      this an idle 4-core box shows three phantom busy rows.
+        #  (d) REMOVED at v0.10.2 — the nameless-row suppression. See the header:
+        #      agnos 1.57.1 fixed the idle park that made it necessary, and measuring
+        #      at -smp 4 with it removed shows 0%, not the phantom it used to hide.
         #  (e) clamp to 100 — a tick landing between the two reads can exceed the pool.
         var cpu = PROC_NA;
         if (pool_d > 0) {
-            if (load8(src + 24) != 0) {
-                var prev = map_u64_get_or(_proc_map, pid, 0 - 1);
+            if (1 == 1) {
+                var prev = map_u64_get_or(_proc_map, pid + AGNOS_PID_KEY_BIAS, 0 - 1);
                 var tks  = proclist_cpu_ticks(src);
                 if (prev >= 0) {
                     if (tks >= prev) {
@@ -299,7 +319,7 @@ fn _procs_fill_agnos(sort_key) {
     var m = 0;
     while (m < n) {
         var msrc = _proclist_buf + m * PROCLIST_REC_SIZE;
-        map_u64_set(_proc_map, load64(msrc + 0), proclist_cpu_ticks(msrc));
+        map_u64_set(_proc_map, load64(msrc + 0) + AGNOS_PID_KEY_BIAS, proclist_cpu_ticks(msrc));
         m = m + 1;
     }
 

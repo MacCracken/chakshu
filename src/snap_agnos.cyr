@@ -41,12 +41,13 @@
 # deliberate on their side (it is what makes the band a valid denominator for the
 # per-process column); this just spends it twice.
 #
-# ⚠ NAMED PROCESSES ONLY IN THE NUMERATOR. An AP's idle park is a raw `hlt` outside
-# arch_wait()'s halt guard, so on a multi-core box its ticks ARE charged — to that
-# core's idle kthread. Counting those would report an idle 4-core machine as 75%
-# busy. Only the ELF loader names a process, so summing named rows drops every
-# kernel thread and every idle park in one test. Same guard, same reason, as the
-# per-process column in src/proc_agnos.cyr.
+# ⭐ EVERY SLOT COUNTS IN THE NUMERATOR AS OF v0.10.2. Until then this summed only
+# NAMED processes, to drop the phantom ticks an unguarded AP idle park charged to each
+# core's idle kthread — without which an idle 4-core box read ~75% busy. chakshu filed
+# that; agnos 1.57.1 routed the park through `arch_wait()`. Measured at `-smp 4` with
+# the filter removed: still 0%. Summing every slot is now both simpler and more
+# correct — a kernel thread doing real work is real utilisation, and excluding it
+# would under-report.
 #
 # ⚠ A process that EXITS mid-window loses its ticks from the numerator, so busy%
 # can under-report on a churning box. It cannot over-report, which is the direction
@@ -150,9 +151,7 @@ fn _agnos_named_ticks() {
     var i = 0;
     while (i < n) {
         var src = _proclist_buf + i * PROCLIST_REC_SIZE;
-        # load8(src + 24) is the first byte of name[32] — 0 means the ELF loader
-        # never named this slot, i.e. a kernel thread or an idle park.
-        if (load8(src + 24) != 0) { total = total + proclist_cpu_ticks(src); }
+        total = total + proclist_cpu_ticks(src);
         i = i + 1;
     }
     return total;
