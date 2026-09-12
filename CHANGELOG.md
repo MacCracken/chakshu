@@ -4,6 +4,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-09-11
+
+### Changed
+
+- **Toolchain `6.6.1` → `6.6.2`.** No source change; the value form needed none.
+  Build, tests, and any bench/fuzz/distlib target the repo ships re-verified at the new pin.
+
+
 ## [0.10.2] — 2026-09-08 — a fabricated 59%, caught by running four cores for the first time
 
 ### Fixed — pid 0's CPU% was its whole uptime, because `0` is the hashmap's empty-slot sentinel
