@@ -31,9 +31,27 @@
 # unreachable libssl branch: every preprocessor guard in that file is
 # CYRIUS_TLS_LIBSSL-only, so there is no upstream flag that compiles the libssl
 # half out. No code path can reach them — src/nolibc.cyr refuses
-# fdlopen_helper_available(), which tls.cyr:218 gates the entire path on. The
-# MACHINERY is what is gated below. Asserting their absence would be asserting
-# something false; fixing it needs a CYRIUS_TLS_NATIVE_ONLY guard upstream.
+# fdlopen_helper_available(), which lib/tls.cyr's _tls_init_resolve gates the
+# entire path on. Asserting their absence would be asserting something false;
+# fixing it needs a CYRIUS_TLS_NATIVE_ONLY guard upstream.
+#
+# ⚠ SINCE CYRIUS 6.6.9 THE SAME HOLDS FOR lib/fdlopen.cyr ITSELF (v0.11.0).
+# lib/tls.cyr now includes lib/fdlopen.cyr, so whatever ai/cyrius.cyml declares,
+# the stdlib's fdlopen is compiled into shu-ai: its loader code, the
+# `ld-linux-x86-64.so.2` path and the dlopen-helper paths are in the binary as
+# dead bytes. src/nolibc.cyr REDEFINES the four entry points lib/tls.cyr calls,
+# and cyrius 6.6.20 binds every call to the last definition — nolibc.cyr's. So
+# for shu-ai this gate no longer asserts those strings absent (it did through
+# v0.10.3, against a 6.6.2 closure that had no fdlopen at all). What replaces it:
+#   · the lean `shu` still links no TLS and no fdlopen, so ITS strings are still
+#     asserted absent below;
+#   · all four refusals must be defined in src/nolibc.cyr, and ai/main.cyr and
+#     the AI test suite must both include it;
+#   · ai/tests/chakshu-ai.tcyr ("nolibc.cyr — the libssl refusal binds") proves
+#     at run time that every call reaches nolibc.cyr's body and that the libssl
+#     backend reports unavailable. Removing the include fails it (3 assertions:
+#     the stdlib's fdlopen_init_full answers -3, and with a helper installed the
+#     libssl backend really loads).
 
 set -u
 
@@ -60,11 +78,17 @@ for b in build/shu ai/build/shu-ai; do
     interp="$(readelf -l "$b" 2>/dev/null | grep -c 'program interpreter' || true)"
     [ "$interp" = "0" ] || { echo "  $b: has a program interpreter"; FAIL=1; }
 
-    hits="$(strings "$b" | grep -xE 'dlopen|dlsym|getaddrinfo|ld-linux-x86-64\.so\.2|/lib64/ld-linux-x86-64\.so\.2' || true)"
-    [ -n "$hits" ] && { echo "  $b: links dlopen machinery:"; echo "$hits" | sed 's/^/      /'; FAIL=1; }
+    hits="$(strings "$b" | grep -xE 'dlopen|dlsym|getaddrinfo' || true)"
+    [ -n "$hits" ] && { echo "  $b: names libc's dynamic-loading symbols:"; echo "$hits" | sed 's/^/      /'; FAIL=1; }
 
-    helper="$(strings "$b" | grep -c 'dlopen-helper' || true)"
-    [ "$helper" = "0" ] || { echo "  $b: references the toolchain dlopen-helper"; FAIL=1; }
+    # The loader paths: asserted for the lean build only — see the header for why
+    # shu-ai carries them as dead bytes since cyrius 6.6.9.
+    if [ "$b" = "build/shu" ]; then
+        ldso="$(strings "$b" | grep -cE 'ld-linux-x86-64\.so\.2' || true)"
+        [ "$ldso" = "0" ] || { echo "  $b: carries the glibc loader path (fdlopen is in the lean closure)"; FAIL=1; }
+        helper="$(strings "$b" | grep -c 'dlopen-helper' || true)"
+        [ "$helper" = "0" ] || { echo "  $b: references the toolchain dlopen-helper"; FAIL=1; }
+    fi
 done
 
 # The manifest must not re-declare the on-ramps. (The lean/root manifest is
@@ -72,10 +96,18 @@ done
 ai_ffi="$(sed -n '/^\[deps\]/,/^\[/p' ai/cyrius.cyml | grep -oE '"(dynlib|fdlopen|cffi|pam)"' || true)"
 [ -n "$ai_ffi" ] && { echo "  ai/cyrius.cyml re-declares an FFI on-ramp: $ai_ffi"; FAIL=1; }
 
-# ...and the refusal that makes it all work must still be there. Deleting
-# src/nolibc.cyr would otherwise pass silently once fdlopen came back.
-grep -q 'fn fdlopen_helper_available' src/nolibc.cyr 2>/dev/null \
-    || { echo "  src/nolibc.cyr no longer defines the fdlopen refusal"; FAIL=1; }
+# ...and the refusal that makes it all work must still be there, all four entry
+# points of it, in both compilations that need it. Deleting or skipping
+# src/nolibc.cyr would otherwise pass silently: the stdlib's fdlopen is in the
+# closure regardless (see the header), and the binary stays static either way.
+for f in fdlopen_helper_available fdlopen_init_full fdlopen_dlopen fdlopen_dlsym; do
+    grep -q "^fn $f(" src/nolibc.cyr 2>/dev/null \
+        || { echo "  src/nolibc.cyr no longer defines the refusal $f"; FAIL=1; }
+done
+for f in ai/main.cyr ai/tests/chakshu-ai.tcyr; do
+    grep -q '^include "\.\./src/nolibc\.cyr"' "$f" 2>/dev/null \
+        || { echo "  $f no longer includes ../src/nolibc.cyr"; FAIL=1; }
+done
 
 # ── VACUITY FLOOR ────────────────────────────────────────────────────────────
 # A gate that enumerates binaries and asserts things about them fails the same
@@ -95,5 +127,5 @@ if [ "$FAIL" -ne 0 ]; then
     exit 1
 fi
 
-echo "nolibc-check: OK — $N binaries, static, no interpreter, no dlopen bridge"
+echo "nolibc-check: OK — $N binaries, static, no interpreter; the nolibc.cyr refusal is defined and included"
 exit 0

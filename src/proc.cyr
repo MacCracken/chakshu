@@ -711,15 +711,17 @@ fn proc_pid_stat_parse(buf, n, out_rec) {
     # prctl(PR_SET_NAME) and this kernel does NOT escape it inside /proc/<pid>/stat's
     # parens, so an unfiltered copy leaks raw ESC/newline to every consumer at once
     # (plain render, TUI table + focus, and src/ai.cyr's prompt). Unlike cmdline
-    # there is no separator semantics here, so all C0 and DEL become '?'.
-    var k = 0;
-    while (k < copy_len) {
-        var cc = load8(buf + comm_off + k);
-        if (cc < 32) { cc = 63; }
-        elif (cc == 127) { cc = 63; }
-        store8(out_rec + 24 + k, cc);
-        k = k + 1;
-    }
+    # there is no separator semantics here, so nothing is kept.
+    #
+    # v0.11.0: darshana's tty_sanitize_buf in UTF-8 mode. The hand-rolled loop it
+    # replaces mapped C0 and DEL to '?' but passed every byte >= 0x80, so the 8-bit
+    # C1 controls — 0x9B is CSI, 0x9D OSC, 0x9C ST — reached the terminal, raw or
+    # UTF-8-encoded (C2 9B). Now both forms become one '?', as does any byte that
+    # is not well-formed UTF-8 (including a sequence the kernel's 15-byte cut, or
+    # ours, split). Valid UTF-8 names are copied unchanged. The output is never
+    # longer than the input, so it fits the 15 bytes.
+    var k = tty_sanitize_buf(out_rec + 24, 0, buf + comm_off, copy_len, TTY_SANITIZE_UTF8, 0);
+    if (k < 0) { k = 0; }
     while (k < 16) {
         store8(out_rec + 24 + k, 0);
         k = k + 1;

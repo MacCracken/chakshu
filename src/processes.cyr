@@ -434,26 +434,41 @@ fn _proc_read_cmdline(pid_str, out_buf, max_len) {
     proc_pid_path(pid_str, "/cmdline", &path);
     var n = file_read_all(&path, out_buf, max_len - 1);
     if (n <= 0) { return 0; }
-    # Scrub control bytes. /proc/<pid>/cmdline is FULLY attacker-controlled —
-    # any unprivileged process can rewrite its own argv — so a raw copy lets it
-    # inject ANSI escapes into the terminal and forge extra table rows with an
-    # embedded newline (design-spec §2: plain mode emits no terminfo escapes).
-    # NUL first: it is argv's separator and must become a space, not '?', or the
-    # tokens collapse and the AI redaction pass stops seeing argument boundaries.
-    # Every other C0 byte and DEL becomes '?'. Bytes >= 0x80 pass through (UTF-8).
+    return proc_cmdline_scrub(out_buf, n);
+}
+
+# Make the `n` raw bytes of a /proc/<pid>/cmdline read at `buf` safe to display,
+# in place: NUL separators become spaces, controls become '?', trailing spaces
+# are trimmed and the result is NUL-terminated (so `buf` needs n + 1 bytes).
+# Returns the new length, which is never more than `n`. Split out of
+# _proc_read_cmdline at v0.11.0 so the rule can be unit-tested without a /proc
+# file to read.
+#
+# /proc/<pid>/cmdline is FULLY attacker-controlled — any unprivileged process can
+# rewrite its own argv — so a raw copy lets it inject ANSI escapes into the
+# terminal and forge extra table rows with an embedded newline (design-spec §2:
+# plain mode emits no terminfo escapes).
+# NUL first: it is argv's separator and must become a space, not '?', or the
+# tokens collapse and the AI redaction pass stops seeing argument boundaries.
+# Then darshana's tty_sanitize_buf in UTF-8 mode, in place (its output is never
+# longer than its input, and sanitizing in place is a documented case): every
+# other C0 byte and DEL becomes '?', and so do the C1 controls 0x80-0x9F in raw
+# and UTF-8-encoded form and any byte that is not well-formed UTF-8. Valid UTF-8
+# passes unchanged. Through v0.10.3 the loop here passed every byte >= 0x80, so
+# a process could put an 8-bit CSI (0x9B) or OSC (0x9D) on the user's terminal.
+fn proc_cmdline_scrub(buf, n) {
     var i = 0;
     while (i < n) {
-        var c = load8(out_buf + i);
-        if (c == 0) { store8(out_buf + i, 32); }
-        elif (c < 32) { store8(out_buf + i, 63); }
-        elif (c == 127) { store8(out_buf + i, 63); }
+        if (load8(buf + i) == 0) { store8(buf + i, 32); }
         i = i + 1;
     }
+    n = tty_sanitize_buf(buf, 0, buf, n, TTY_SANITIZE_UTF8, 0);
+    if (n < 0) { n = 0; }
     while (n > 0) {
-        if (load8(out_buf + n - 1) != 32) { break; }
+        if (load8(buf + n - 1) != 32) { break; }
         n = n - 1;
     }
-    store8(out_buf + n, 0);
+    store8(buf + n, 0);
     return n;
 }
 

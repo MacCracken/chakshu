@@ -218,6 +218,31 @@ def main():
         for line, keep in KEEP_CASES:
             check(f"{keep[:26]!r} survives", keep in out,
                   "the redactor blanked ordinary context")
+
+        print("[6] C1 controls in a log line do not reach the output (v0.11.0)")
+        # The log-line scrub mapped C0 and DEL to '?' but passed every byte >= 0x80,
+        # so an 8-bit CSI / OSC (0x9B / 0x9D), raw or as UTF-8 (C2 9B), reached the
+        # terminal. It now uses darshana's tty_sanitize_buf in UTF-8 mode. Bytes, not
+        # text: a decode would hide exactly the bytes this checks for.
+        c1_line = b"[14] [WARN] c1 probe \x9b31m raw \xc2\x9b2J encoded \x1b]0;t\x07 osc caf\xc3\xa9 ok\n"
+        fh = tempfile.NamedTemporaryFile(mode="wb", suffix=".log",
+                                         prefix="chakshu-withlogs-", delete=False)
+        fh.write(c1_line)
+        fh.close()
+        fixtures.append(fh.name)
+        env = dict(os.environ)
+        env["CHAKSHU_LOG_PATH"] = fh.name
+        env["CHAKSHU_HOOSH_URL"] = "http://127.0.0.1:1/v1/chat/completions"
+        p = subprocess.run([shu_ai, "--with-logs", "--explain", "1"],
+                           capture_output=True, env=env, timeout=30)
+        blob = p.stdout + p.stderr
+        check("the C1 probe line reached the prompt", b"c1 probe" in blob,
+              "no 'c1 probe' in the output — the case would be vacuous")
+        check("no raw 0x9B (8-bit CSI)", b"\x9b" not in blob.replace(b"\xc2\x9b", b""))
+        check("no UTF-8-encoded U+009B (C2 9B)", b"\xc2\x9b" not in blob)
+        check("no ESC from the log line", b"\x1b" not in blob)
+        check("no BEL from the log line", b"\x07" not in blob)
+        check("valid UTF-8 kept ('caf\u00e9')", b"caf\xc3\xa9 ok" in blob)
     finally:
         for path in fixtures:
             try:

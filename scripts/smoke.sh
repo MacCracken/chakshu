@@ -202,7 +202,11 @@ pass "per-core / per-device / per-interface / swap / cache lines present"
 
 # The USER column must resolve to a NAME, not be left blank or numeric-only. Every
 # Linux box has root, and pid 1 is root's, so this is stable across runners.
-grep -qE '^ +1 root ' "$TMPDIR/snap" || fail "USER column did not resolve pid 1 to 'root'"
+# ⚠ v0.11.0: read from a `--sort pid` snapshot, not the default one. The default
+# sort is CPU, and on a busy host pid 1 is nowhere near the top 10 — this gate
+# failed on a loaded dev box for that reason alone. pid order puts pid 1 first.
+"$BIN" -p --sort pid > "$TMPDIR/snap-pid" 2>/dev/null || fail "-p --sort pid exited non-zero"
+grep -qE '^ +1 root ' "$TMPDIR/snap-pid" || fail "USER column did not resolve pid 1 to 'root'"
 pass "USER column resolves uid -> name"
 
 # v0.9.1: when a gpu line is present AND the driver publishes DRM telemetry,

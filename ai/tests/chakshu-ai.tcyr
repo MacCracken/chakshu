@@ -198,6 +198,51 @@ fn main() {
     var resp_err = "{\"error\":{\"message\":\"bad model\"}}";
     assert_eq(_ai_extract_content(resp_err, strlen(resp_err), &cb, 256), 0 - 1, "no content field returns -1");
 
+    # ----- model output is untrusted terminal input (v0.11.0) ----------
+    # hoosh relays the model's text, and the model was prompted with process
+    # names and cmdlines any local process chooses. A JSON string may carry
+    # U+0080-U+009F literally and _ai_extract_content passes raw bytes through,
+    # so until v0.11.0 a reply could put a CSI / OSC, a raw ESC or a CR on the
+    # terminal through `--explain` or the `?` overlay. TAB and LF are kept: an
+    # answer needs them. Every assertion here fails against a raw write.
+    test_group("ai.cyr — model text is sanitized before it reaches the terminal");
+    # in : "A" 1B "[2J" 9B "B" C2 9D "C" 0D "D" 09 "E" 0A "F" C3 A9   (18 bytes)
+    # out: "A?[2J?B?C?D" 09 "E" 0A "F" C3 A9                           (17 bytes)
+    var mb[64];
+    memcpy(&mb, "A\x1b[2J\x9bB\xc2\x9dC\rD\tE\nF\xc3\xa9", 18);
+    var mn = ai_answer_scrub(&mb, 18);
+    assert_eq(mn, 17, "answer scrubbed to 17 bytes (the encoded OSC pair became one byte)");
+    assert_eq(memeq(&mb, "A?[2J?B?C?D\tE\nF\xc3\xa9", 17), 1, "ESC, raw CSI, encoded OSC and CR -> '?'; TAB, LF, UTF-8 kept");
+    assert_eq(load8(&mb + 17), 0, "answer NUL-terminated at its new length");
+    # The extractor really does hand raw C1 / ESC bytes through — the reason the
+    # scrub has to be on the OUTPUT side.
+    var mj = "{\"content\":\"x\xc2\x9by\x1bz\"}";
+    var mx[64];
+    var mxn = _ai_extract_content(mj, strlen(mj), &mx, 64);
+    assert_eq(mxn, 6, "extractor passes the raw bytes (x C2 9B y 1B z)");
+    assert_eq(ai_answer_scrub(&mx, mxn), 5, "and the scrub neutralizes both");
+    assert_eq(memeq(&mx, "x?y?z", 5), 1, "encoded CSI and ESC from a reply -> '?'");
+
+    # ----- the no-libc refusal (v0.11.0) --------------------------------
+    # Since cyrius 6.6.9 lib/tls.cyr includes lib/fdlopen.cyr itself, so the
+    # stdlib's four fdlopen entry points are always in this closure, and
+    # src/nolibc.cyr's refusals are REDEFINITIONS. cyrius 6.6.20 binds every call
+    # to the last definition; these assertions prove that is nolibc.cyr's. They
+    # hold on any host: the stdlib's fdlopen_init_full(0) answers -3 (null
+    # state), nolibc.cyr's answers -1, so the first one tells the two bodies apart
+    # whether or not a dlopen-helper is installed here.
+    test_group("nolibc.cyr — the libssl refusal binds");
+    assert_eq(fdlopen_init_full(0), 0 - 1, "fdlopen_init_full binds to nolibc.cyr (stdlib's answers -3)");
+    assert_eq(fdlopen_helper_available(), 0, "fdlopen_helper_available answers 0");
+    assert_eq(fdlopen_dlopen(0), 0, "fdlopen_dlopen answers 0");
+    assert_eq(fdlopen_dlsym(0), 0, "fdlopen_dlsym answers 0");
+    # End to end: ask for the libssl backend outright. With the stdlib's fdlopen
+    # and a helper installed, this loads libssl.so.3 through a real glibc dlopen.
+    assert_eq(tls_set_backend(TLS_BACKEND_LIBSSL), 0, "libssl backend selectable (compiled in)");
+    assert_eq(tls_available(), 0, "libssl backend reports unavailable: nothing was dlopened");
+    assert_eq(tls_set_backend(TLS_BACKEND_NATIVE), 0, "native backend restored");
+    assert_eq(tls_available(), 1, "native backend available");
+
     return assert_summary();
 }
 

@@ -16,6 +16,9 @@ include "src/rate.cyr"
 include "src/processes.cyr"
 include "src/gpu.cyr"
 include "src/watch.cyr"
+# v0.11.0: the epoll-record read, split out of tui.cyr so it runs here on every
+# arch the suite is built for.
+include "src/tui_event.cyr"
 # darshana — for the signalfd teardown regression guard below. It is already a
 # [deps.darshana] module of this manifest, so no new dependency is introduced.
 include "lib/darshana.cyr"
@@ -93,6 +96,51 @@ fn main() {
     assert(_sfd_w >= 0, "tty_open_signalfd(TTY_SIGMASK_WINCH) returns an fd");
     tty_close_signalfd(_sfd_w, TTY_SIGMASK_WINCH);
     assert_eq(_test_sigblk_clear(), 1, "WINCH mask released too");
+
+    # v0.11.0: tui_run's exit fd carries SIGPIPE as well (TTY_SIGMASK_PIPE), so
+    # `shu | head -c 1` restores the terminal instead of dying raw at the next
+    # frame write. Two live signalfds need DISJOINT masks — closing one unblocks
+    # its whole mask, and would deafen the other to any shared signal — so the
+    # combined exit mask must not overlap WINCH, and the pair must open and
+    # release together exactly as tui_run does it (WINCH closed first, EXIT last).
+    var _exit_mask = TTY_SIGMASK_EXIT | TTY_SIGMASK_PIPE;
+    assert_eq(_exit_mask & TTY_SIGMASK_WINCH, 0, "EXIT|PIPE and WINCH masks are disjoint");
+    assert(_exit_mask != TTY_SIGMASK_EXIT, "the PIPE bit is not already in EXIT");
+    var _sfd_ep = tty_open_signalfd(_exit_mask);
+    assert(_sfd_ep >= 0, "tty_open_signalfd(EXIT|PIPE) returns an fd");
+    var _sfd_w2 = tty_open_signalfd(TTY_SIGMASK_WINCH);
+    assert(_sfd_w2 >= 0, "a second, WINCH signalfd opens beside it");
+    assert_eq(tty_close_signalfd(_sfd_w2, TTY_SIGMASK_WINCH), 0, "WINCH fd closes first");
+    assert_eq(_test_sigblk_clear(), 0, "EXIT|PIPE still blocked after the WINCH close");
+    assert_eq(tty_close_signalfd(_sfd_ep, _exit_mask), 0, "EXIT|PIPE fd closes last");
+    assert_eq(_test_sigblk_clear(), 1, "both masks released");
+
+    # ----- tui_event.cyr — the epoll data tag (v0.11.0) ---------------
+    # tui_run tells stdin (tag 0), the exit signalfd (1) and the WINCH signalfd
+    # (2) apart by the `data` field epoll_wait returns, and that field sits at +4
+    # on x86_64 (packed struct) but +8 on aarch64. tui_run read +4 everywhere
+    # until v0.11.0. A real epoll round trip on a pipe, with the record
+    # pre-filled with junk as a reused stack slot would be, so a read at the
+    # wrong offset cannot pass by accident: on aarch64 the old +4 read gives
+    # 0x000000025A5A5A5A here (four bytes of padding, then the tag), not 2.
+    test_group("tui_event.cyr — epoll data tag read at the arch's offset");
+    var _pf[8];
+    assert_eq(sys_pipe(&_pf), 0, "pipe created");
+    var _prd = load32(&_pf);
+    var _pwr = load32(&_pf + 4);
+    var _ep = sys_epoll_create();
+    assert(_ep >= 0, "epoll instance created");
+    var _ev = epoll_event_new(EPOLLIN, 2);
+    assert_eq(sys_epoll_ctl(_ep, EPOLL_CTL_ADD, _prd, _ev), 0, "pipe read end registered with tag 2");
+    syscall(1, _pwr, "x", 1);
+    var _evs[16];
+    store64(&_evs, 0x5A5A5A5A5A5A5A5A);
+    store64(&_evs + 8, 0x5A5A5A5A5A5A5A5A);
+    assert_eq(sys_epoll_wait(_ep, &_evs, 1, 1000), 1, "one event ready");
+    assert_eq(tui_epoll_data(&_evs), 2, "tag 2 read back");
+    file_close(_ep);
+    file_close(_prd);
+    file_close(_pwr);
 
     # ----- watch.cyr — the anomaly stream (v0.8.0) ---------------------
     # These parse REAL aegis 1.1.7 output. The record below is verbatim from a
@@ -360,6 +408,58 @@ fn main() {
         ci = ci + 1;
     }
     assert_eq(esc_free, 1, "no C0/DEL byte survives anywhere in the comm field");
+
+    # ----- C1 controls (v0.11.0, found by darshana's consumer survey) --
+    # The comm, cmdline and watch-ring scrubbers (and src/ai.cyr's log lines)
+    # mapped C0 and DEL to '?' but passed every byte >= 0x80 "so UTF-8 survives"
+    # — which also passed the 8-bit C1 controls 0x80-0x9F: 0x9B is a one-byte
+    # CSI, 0x9D OSC, 0x9C ST, acted on raw by a Latin-1 terminal and as U+009B
+    # (C2 9B) by a UTF-8 one. All four now use darshana's tty_sanitize_buf in
+    # UTF-8 mode: each C1 form becomes ONE '?', valid UTF-8 is untouched. Every
+    # assertion marked [C1] below fails against the v0.10.3 loops.
+    test_group("C1 controls are neutralized — comm, cmdline, watch ring (v0.11.0)");
+    # comm = a 9B b C2 9B c C3 A9  ->  a ? b ? c C3 A9  (8 bytes in, 7 out)
+    var c1_stat = "100 (a\x9bb\xc2\x9bc\xc3\xa9) S 1 1 1 0 -1 0 0 0 0 0 5 6 0 0 20 0 1 0 100 1024 99 0\n";
+    var c1rec[48];
+    assert_eq(proc_pid_stat_parse(c1_stat, strlen(c1_stat), &c1rec), 0, "C1 comm parses");
+    assert_eq(load8(&c1rec + 24 + 1), 63, "[C1] raw 0x9B (CSI) in comm -> '?'");
+    assert_eq(load8(&c1rec + 24 + 2), 98, "'b' after it kept");
+    assert_eq(load8(&c1rec + 24 + 3), 63, "[C1] UTF-8 U+009B (C2 9B) in comm -> one '?'");
+    assert_eq(load8(&c1rec + 24 + 4), 99, "'c' after it kept (the pair became ONE byte)");
+    assert_eq(memeq(&c1rec + 24 + 5, "\xc3\xa9", 2), 1, "valid UTF-8 'e-acute' kept byte for byte");
+    assert_eq(load8(&c1rec + 24 + 7), 0, "comm NUL-terminated at its sanitized length");
+    # A UTF-8 sequence cut by the 15-byte comm cap is malformed, not text.
+    var c1_cut = "100 (abcdefghijklmn\xc3\xa9) S 1 1 1 0 -1 0 0 0 0 0 5 6 0 0 20 0 1 0 100 1024 99 0\n";
+    var c1rec2[48];
+    proc_pid_stat_parse(c1_cut, strlen(c1_cut), &c1rec2);
+    assert_eq(load8(&c1rec2 + 24 + 14), 63, "[C1] a lead byte cut off by the 15-byte cap -> '?'");
+    assert_eq(load8(&c1rec2 + 24 + 15), 0, "and the field stays NUL-terminated");
+
+    # cmdline: NUL separators -> spaces, then the same rule; trailing NULs trimmed.
+    # in : l s 00 1B [ 2 J 00 9B 3 1 m 00 C2 9D X 00 E2 82 AC 00 00   (22 bytes)
+    # out: "ls ?[2J ?31m ?X " + E2 82 AC                               (19 bytes)
+    var c1cmd[64];
+    memcpy(&c1cmd, "ls\x00\x1b[2J\x00\x9b31m\x00\xc2\x9dX\x00\xe2\x82\xac\x00\x00", 22);
+    var c1n = proc_cmdline_scrub(&c1cmd, 22);
+    assert_eq(c1n, 19, "cmdline scrubbed to 19 bytes (one C1 pair -> one byte, trailing spaces trimmed)");
+    assert_eq(memeq(&c1cmd, "ls ?[2J ?31m ?X \xe2\x82\xac", 19), 1, "[C1] cmdline: ESC, raw CSI and encoded OSC each -> '?', euro sign kept");
+    assert_eq(load8(&c1cmd + 19), 0, "cmdline NUL-terminated");
+    var c1hi = 0;
+    var c1i = 0;
+    while (c1i < c1n) {
+        var c1b = load8(&c1cmd + c1i);
+        if (c1b >= 128) { if (c1b < 160) { c1hi = c1hi + 1; } }
+        c1i = c1i + 1;
+    }
+    assert_eq(c1hi, 1, "the only byte left in 0x80-0x9F is the euro sign's 0x82 continuation");
+
+    # watch ring: a daemon-authored description carrying both C1 forms.
+    watch_reset();
+    watch_ingest_line("{\"event_type\":\"K\",\"description\":\"p\x9bq\xc2\x9br\xc3\xa9\",\"threat_level\":\"Low\"}");
+    assert_eq(watch_count(), 1, "C1 record ingested");
+    assert(strstr(watch_text_at(0), "p?q?r") >= 0, "[C1] both C1 forms in an event -> '?'");
+    assert(strstr(watch_text_at(0), "\xc3\xa9") >= 0, "valid UTF-8 in an event kept");
+    watch_reset();
 
     # ----- sort comparators (v0.7.13 P-1 sweep) -----------------------
     # Sort DIRECTION had zero coverage. Mutation-tested during the sweep:

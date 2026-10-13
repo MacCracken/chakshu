@@ -69,8 +69,17 @@
 #
 # All TTY primitives come from darshana — `tty_raw` / `tty_cooked` /
 # `tty_alt_enter` / `tty_alt_leave` / `tty_clear` / `tty_cursor_*` /
-# `tty_winsize` / `tty_open_signalfd` / `tty_clear_to_eol/eos`.
+# `tty_winsize_or` / `tty_flush_input` / `tty_open_signalfd` /
+# `tty_read_signal` / `tty_close_signalfd` / `tty_clear_to_eol/eos`, and every
+# SGR escape through `tty_sgr` / `tty_sgr_buf` / `tty_sgr_reset(_buf)` with the
+# TTY_FG_* / TTY_SGR_* codes (v0.11.0, darshana 1.3.0 — chakshu had hand-rolled
+# its SGR literals, the TCIFLUSH ioctl and the signalfd_siginfo read until then).
 # The dist bundle lands at `lib/darshana.cyr` via cyrius deps.
+#
+# The one input-side piece that stays chakshu's own is key decoding: the CSI
+# arrow parse below and the AGNOS kbscan decoder in src/tui_agnos.cyr. darshana
+# will never ship input decoding (its charter: output, termios and signals), so
+# this is deliberate, not a missed extraction.
 
 # Input buffer for _tui_read_key. Why we need this:
 #   1. file_read(0, &b, 4) with VMIN=1 returns 1-4 bytes — whatever
@@ -129,13 +138,25 @@ fn _tui_input_pending() {
 
 # Restore terminal state. Idempotent — safe to call from multiple
 # cleanup sites (q-quit, Ctrl-C in raw mode, signalfd handler).
-# Order matters: cursor-show before cooked-mode so the visible
-# cursor reappears in the user's shell, alt-leave last so the
-# user's previous shell content comes back undistorted.
+#
+# Order is darshana's recommended teardown (ADR 0002 as amended in darshana
+# 1.1.4), and it matters:
+#   1. tty_cooked()      FIRST — it is an ioctl, not a write;
+#   2. tty_cursor_show()
+#   3. tty_alt_leave()
+#   4. tty_sgr_reset()   chakshu sets colours and reverse video;
+#   5. tty_close_signalfd(..) LAST — done by tui_run after this returns.
+# Steps 2-4 are writes to fd 1. When fd 1 is a pipe whose reader has gone
+# (`shu | head -c 1`), the first such write raises SIGPIPE, and with SIGPIPE at
+# its default action that kills the process on the spot. Through v0.10.3 this
+# fn wrote cursor-show BEFORE restoring cooked mode, so that death left the
+# user's terminal raw. Cooked-first means the worst case is a dead process and
+# a working shell.
 fn _tui_teardown() {
-    tty_cursor_show();
     tty_cooked();
+    tty_cursor_show();
     tty_alt_leave();
+    tty_sgr_reset();
     return 0;
 }
 
@@ -156,18 +177,18 @@ var _tui_cols = 80;
 # pty.fork() without TIOCSWINSZ) return that "successful zero" — we'd
 # end up writing the status line at row 0 (= row 1 per VT spec) and
 # stomping the header, plus clipping all status text to 0 bytes.
-# Falls through to the cached defaults (24x80) when this happens.
+# Falls through to the cached values (initially 24x80) when this happens.
+#
+# v0.11.0: darshana 1.2.0's `tty_winsize_or` is exactly this guard — failure
+# OR a zero dimension writes the caller's defaults — and chakshu is one of the
+# four consumers it was extracted from. The defaults passed are the CURRENT
+# cache, so a failed query keeps the last good size, as before.
 fn _tui_update_winsize() {
     var rows = 0;
     var cols = 0;
-    if (tty_winsize(0, &rows, &cols) == 0) {
-        if (rows > 0) {
-            if (cols > 0) {
-                _tui_rows = rows;
-                _tui_cols = cols;
-            }
-        }
-    }
+    tty_winsize_or(0, &rows, &cols, _tui_rows, _tui_cols);
+    _tui_rows = rows;
+    _tui_cols = cols;
     return 0;
 }
 
@@ -201,12 +222,11 @@ var KEY_LEFT  = 1002;
 var KEY_RIGHT = 1003;
 
 # Reverse-video on/off (CSI 7m / CSI 0m). Used to highlight the
-# selected row in the process table. Deliberately inline rather than in
-# darshana: the extraction trigger is a SECOND consumer wanting the same
-# primitive, and cyim's syntax highlighting needs richer attributes, so it is
-# not that consumer. Extraction deferred — docs/development/roadmap.md "Post-v1".
-fn _tui_invert_on()  { syscall(1, 1, "\x1b[7m", 4); return 0; }
-fn _tui_invert_off() { syscall(1, 1, "\x1b[0m", 4); return 0; }
+# selected row in the process table. These were hand-written escapes until
+# v0.11.0, waiting on a second consumer to justify a darshana primitive; darshana
+# 1.2.0 shipped TTY_SGR_REVERSE for chakshu, cyim and thoth together. Same bytes.
+fn _tui_invert_on()  { tty_sgr(TTY_SGR_REVERSE); return 0; }
+fn _tui_invert_off() { tty_sgr_reset(); return 0; }
 
 # ---- color theme (Slice G.2) -------------------------------------
 # _tui_color_enabled: 1 → emit ANSI color escapes; 0 → no-op.
@@ -238,11 +258,21 @@ var _tui_color_suppress = 0;
 # theme. Bold is background-independent and is also unchanged.
 var _tui_theme = 0;
 
-fn _tui_c_low()   { if (_tui_theme == 1) { return "\x1b[32m"; } return "\x1b[32m"; }
-fn _tui_c_mid()   { if (_tui_theme == 1) { return "\x1b[35m"; } return "\x1b[33m"; }
-fn _tui_c_high()  { if (_tui_theme == 1) { return "\x1b[31m"; } return "\x1b[31m"; }
-fn _tui_c_idle()  { if (_tui_theme == 1) { return "\x1b[34m"; } return "\x1b[36m"; }
-fn _tui_c_faint() { if (_tui_theme == 1) { return "\x1b[0m";  } return "\x1b[2m";  }
+#
+# v0.11.0: the palette is SGR CODES (darshana's TTY_FG_* / TTY_SGR_*), composed
+# by tty_sgr_buf / tty_sgr, rather than hand-written escape literals. The bytes
+# on the wire are identical: a PTY capture of v0.10.3 and v0.11.0 emits the same
+# SGR set in both themes, and PTY scenario 13 gates the theme-specific codes.
+#
+# SGR 0 for the light theme's "faint": normal weight. It is also a full reset,
+# which is harmless here — every faint field is followed by a reset anyway.
+var TUI_SGR_NORMAL = 0;
+
+fn _tui_c_low()   { return TTY_FG_GREEN; }                                             # both themes
+fn _tui_c_mid()   { if (_tui_theme == 1) { return TTY_FG_MAGENTA; } return TTY_FG_YELLOW; }
+fn _tui_c_high()  { return TTY_FG_RED; }                                               # both themes
+fn _tui_c_idle()  { if (_tui_theme == 1) { return TTY_FG_BLUE; } return TTY_FG_CYAN; }
+fn _tui_c_faint() { if (_tui_theme == 1) { return TUI_SGR_NORMAL; } return TTY_SGR_DIM; }
 
 # Emit a raw ANSI escape if color is on AND not suppressed. Single
 # choke point — keeps the apply sites readable (`_tui_color_red()`
@@ -274,11 +304,22 @@ fn _tui_row_app(buf, pos, max, s) {
     return pos;
 }
 
-# Append a colour escape, honouring the same gates as _tui_color_emit.
-fn _tui_row_col(buf, pos, max, s) {
+# Append the SGR escape for `code`, honouring the same gates as _tui_color_emit.
+# An escape that would not fit whole is skipped rather than cut: tty_sgr_buf
+# writes up to 6 bytes and takes no capacity, so the room is checked here.
+fn _tui_row_col(buf, pos, max, code) {
     if (_tui_color_enabled == 0) { return pos; }
     if (_tui_color_suppress == 1) { return pos; }
-    return _tui_row_app(buf, pos, max, s);
+    if (pos + 6 > max) { return pos; }
+    return tty_sgr_buf(buf, pos, code);
+}
+
+# Append `CSI 0m`, under the same gates. tty_sgr_reset_buf writes exactly 4.
+fn _tui_row_reset(buf, pos, max) {
+    if (_tui_color_enabled == 0) { return pos; }
+    if (_tui_color_suppress == 1) { return pos; }
+    if (pos + 4 > max) { return pos; }
+    return tty_sgr_reset_buf(buf, pos);
 }
 
 fn _tui_row_col_band(buf, pos, max, pct, low, mid) {
@@ -360,24 +401,29 @@ fn _tui_theme_auto() {
     return 0;
 }
 
-fn _tui_color_emit(s) {
+fn _tui_color_emit(code) {
     if (_tui_color_enabled == 0) { return 0; }
     if (_tui_color_suppress == 1) { return 0; }
-    syscall(1, 1, s, strlen(s));
+    tty_sgr(code);
     return 0;
 }
 
 # CSI SGR shortcuts. Reset uses CSI 0m (full attribute reset) — the
 # render is structured so reset never fires inside reverse-video
 # regions (suppress flag), so we don't need a "fg-only reset" variant.
-fn _tui_color_red()    { _tui_color_emit("\x1b[31m"); return 0; }
+fn _tui_color_red()    { _tui_color_emit(TTY_FG_RED);    return 0; }
 fn _tui_color_green()  { _tui_color_emit(_tui_c_low());  return 0; }
 fn _tui_color_yellow() { _tui_color_emit(_tui_c_mid());  return 0; }
-fn _tui_color_blue()   { _tui_color_emit("\x1b[34m"); return 0; }
+fn _tui_color_blue()   { _tui_color_emit(TTY_FG_BLUE);   return 0; }
 fn _tui_color_cyan()   { _tui_color_emit(_tui_c_idle()); return 0; }
 fn _tui_color_dim()    { _tui_color_emit(_tui_c_faint()); return 0; }
-fn _tui_color_bold()   { _tui_color_emit("\x1b[1m");  return 0; }
-fn _tui_color_reset()  { _tui_color_emit("\x1b[0m");  return 0; }
+fn _tui_color_bold()   { _tui_color_emit(TTY_SGR_BOLD);  return 0; }
+fn _tui_color_reset()  {
+    if (_tui_color_enabled == 0) { return 0; }
+    if (_tui_color_suppress == 1) { return 0; }
+    tty_sgr_reset();
+    return 0;
+}
 
 # Pick a color for a percent value: green below `low`, yellow below
 # `mid`, red at `mid` or above. Used for CPU% and MEM% column tints.
@@ -431,9 +477,6 @@ var _tui_confirm_at      = 0;
 var _tui_msg       = 0;
 var _tui_msg_until = 0;
 
-# TCFLSH ioctl, queue selector TCIFLUSH (0) — discard unread input already
-# sitting in the KERNEL tty queue. Flushing only the userspace readahead
-# buffer is not enough: a burst can still be waiting in the line discipline.
 # Rolling delta baseline (v0.7.15). The TUI used to take TWO full /proc walks
 # per frame — seed, sleep 100 ms, walk again — to measure a 100 ms window inside
 # a 1000 ms refresh interval. That cost ~562 per-pid stat reads/sec at 1 Hz and
@@ -492,9 +535,6 @@ var _tui_ncores       = 1;
 var _tui_total_delta  = 0;
 var _tui_resampled    = 0;
 
-var TUI_TCFLSH   = 0x540B;
-var TUI_TCIFLUSH = 0;
-
 # R14 (v0.7.13 P-1 sweep): the exit signalfd, published so the `?` overlay can
 # wait on it alongside stdin. The overlay parks in a blocking read(0,..,1) while
 # HUP/INT/TERM are SIG_BLOCKed by that very signalfd and nothing is draining it,
@@ -510,15 +550,14 @@ fn _tui_enter_confirm_kill(pid) {
     _tui_mode     = TUI_MODE_CONFIRM_KILL;
     # Drop anything already typed, in both buffers.
     _tui_input_pos = _tui_input_n;
-    #ifndef CYRIUS_TARGET_AGNOS
-    # Kernel tty queue. Linux-only: agnos's frozen syscall surface has no
-    # ioctl at all, so SYS_IOCTL does not resolve there. The userspace flush
-    # above still runs, and the dwell guard below is the portable half of the
-    # typeahead defence — so the agnos build is protected, just not belt-and-
-    # braces. (agnos also runs its own line discipline on the kernel console,
-    # so there is no termios queue of ours to flush in the first place.)
-    syscall(SYS_IOCTL, 0, TUI_TCFLSH, TUI_TCIFLUSH);
-    #endif
+    # Kernel tty queue: TCFLSH / TCIFLUSH discards unread input already sitting
+    # in the line discipline — flushing only the userspace readahead above is not
+    # enough, a burst can still be waiting there. darshana 1.3.0's
+    # tty_flush_input; chakshu issued the same ioctl by hand (behind an
+    # #ifndef CYRIUS_TARGET_AGNOS, since agnos has no ioctl) until v0.11.0.
+    # On agnos it returns -1 and does nothing — the kernel's keyboard buffer has
+    # no flush call — so the dwell guard below is the typeahead defence there.
+    tty_flush_input(0);
     _tui_confirm_at = clock_now_ms();
     tui_render_frame();
     return 0;
@@ -1307,7 +1346,7 @@ fn tui_render_table_frame() {
         var rp = 0;
         rp = _tui_row_col(&rowbuf, rp, 512, _tui_c_faint());
         rp = _tui_row_pad(&rowbuf, rp, 512, pid, 6);
-        rp = _tui_row_col(&rowbuf, rp, 512, "\x1b[0m");
+        rp = _tui_row_reset(&rowbuf, rp, 512);
         rp = _tui_row_app(&rowbuf, rp, 512, " ");
         # v0.9.5: USER, left-aligned in a 9-wide column, dim like the pid — it is
         # context for the row, not the row's subject. Clipped rather than widened:
@@ -1317,7 +1356,7 @@ fn tui_render_table_frame() {
         if (ul > 9) { ul = 9; store8(&unm + 9, 0); }
         rp = _tui_row_col(&rowbuf, rp, 512, _tui_c_faint());
         rp = _tui_row_app(&rowbuf, rp, 512, &unm);
-        rp = _tui_row_col(&rowbuf, rp, 512, "\x1b[0m");
+        rp = _tui_row_reset(&rowbuf, rp, 512);
         var upad = 10 - ul;
         while (upad > 0) { rp = _tui_row_app(&rowbuf, rp, 512, " "); upad = upad - 1; }
         var sc[2];
@@ -1325,13 +1364,13 @@ fn tui_render_table_frame() {
         store8(&sc + 1, 0);
         rp = _tui_row_col_state(&rowbuf, rp, 512, st);
         rp = _tui_row_app(&rowbuf, rp, 512, &sc);
-        rp = _tui_row_col(&rowbuf, rp, 512, "\x1b[0m");
+        rp = _tui_row_reset(&rowbuf, rp, 512);
         rp = _tui_row_col_band(&rowbuf, rp, 512, cpu, 25, 70);
         rp = _tui_row_pad(&rowbuf, rp, 512, cpu, 6);
-        rp = _tui_row_col(&rowbuf, rp, 512, "\x1b[0m");
+        rp = _tui_row_reset(&rowbuf, rp, 512);
         rp = _tui_row_col_band(&rowbuf, rp, 512, mem, 50, 80);
         rp = _tui_row_pad(&rowbuf, rp, 512, mem, 6);
-        rp = _tui_row_col(&rowbuf, rp, 512, "\x1b[0m");
+        rp = _tui_row_reset(&rowbuf, rp, 512);
         rp = _tui_row_app(&rowbuf, rp, 512, " ");
         if (rp > 0) { syscall(1, 1, &rowbuf, rp); }
         # cmdline read (top-N only — same as plain mode). Clip to terminal
@@ -1782,7 +1821,17 @@ fn tui_run(refresh_ms, sort_key, top_n, color_mode, focus_pid) {
     # Each step degrades gracefully on failure: if signalfd setup
     # fails, drop to direct stdin (Slice A behavior). Better to
     # launch with reduced signal handling than refuse to launch.
-    var sfd_exit  = tty_open_signalfd(TTY_SIGMASK_EXIT);
+    #
+    # v0.11.0: SIGPIPE rides the exit signalfd (darshana 1.3.0's
+    # TTY_SIGMASK_PIPE). Before, `shu | head -c 1` — stdin a TTY, stdout a pipe
+    # whose reader leaves — died of SIGPIPE at the next frame write with the
+    # terminal still RAW and on the alt screen. Blocked, SIGPIPE turns that write
+    # into an EPIPE return and wakes the loop like any exit signal, so the normal
+    # teardown restores the terminal. The three darshana masks are disjoint, so
+    # EXIT|PIPE on one fd and WINCH on the other keeps the two live signalfds
+    # disjoint, which tty_close_signalfd requires.
+    var exit_mask = TTY_SIGMASK_EXIT | TTY_SIGMASK_PIPE;
+    var sfd_exit  = tty_open_signalfd(exit_mask);
     _tui_sfd_exit = sfd_exit;
     var sfd_winch = tty_open_signalfd(TTY_SIGMASK_WINCH);
     var epfd = 0 - 1;
@@ -1814,7 +1863,7 @@ fn tui_run(refresh_ms, sort_key, top_n, color_mode, focus_pid) {
     # signal disposition and Ctrl-C/kill work again.
     if (epfd < 0) {
         if (sfd_exit >= 0) {
-            tty_close_signalfd(sfd_exit, TTY_SIGMASK_EXIT);
+            tty_close_signalfd(sfd_exit, exit_mask);
             sfd_exit = 0 - 1;
             _tui_sfd_exit = 0 - 1;
         }
@@ -1865,12 +1914,15 @@ fn tui_run(refresh_ms, sort_key, top_n, color_mode, focus_pid) {
                 continue;
             }
             if (n < 0) { continue; }
-            var which = load64(&events + 4);
+            # The data tag's offset is per ARCH (see src/tui_event.cyr). This
+            # read was `load64(&events + 4)` — x86_64's packed layout — on every
+            # arch until v0.11.0, so on aarch64 no wakeup matched its tag.
+            var which = tui_epoll_data(&events);
             if (which == 1) {
-                # Exit signalfd — drain (struct signalfd_siginfo = 128
-                # bytes) then exit cleanly.
-                var siginfo_exit[128];
-                file_read(sfd_exit, &siginfo_exit, 128);
+                # Exit signalfd — consume the signal (darshana's
+                # tty_read_signal reads the 128-byte signalfd_siginfo) then
+                # exit cleanly. HUP/INT/TERM, or PIPE: all mean "stop".
+                tty_read_signal(sfd_exit);
                 loop = 0;
             }
             elif (which == 2) {
@@ -1878,8 +1930,7 @@ fn tui_run(refresh_ms, sort_key, top_n, color_mode, focus_pid) {
                 # (terminal geometry changed; old positions may be
                 # stale), then re-render. tty_clear avoids ghost text
                 # in the now-shifted alt-screen buffer.
-                var siginfo_winch[128];
-                file_read(sfd_winch, &siginfo_winch, 128);
+                tty_read_signal(sfd_winch);
                 _tui_update_winsize();
                 tty_clear();
                 tui_render_frame();
@@ -1898,6 +1949,7 @@ fn tui_run(refresh_ms, sort_key, top_n, color_mode, focus_pid) {
     }
 
     _tui_teardown();
+    if (epfd >= 0) { file_close(epfd); }
     # Close the signalfds through darshana's teardown counterpart, NOT a bare
     # `file_close`. `tty_open_signalfd` does a SIG_BLOCK before creating the fd;
     # closing the fd alone leaves HUP/INT/TERM (and WINCH) blocked for the rest
@@ -1914,9 +1966,16 @@ fn tui_run(refresh_ms, sort_key, top_n, color_mode, focus_pid) {
     # the kernel discards the mask with the process) — but it is a real defect
     # the moment tui_run returns to anything that keeps running, and a blocked
     # mask survives execve. Fixed here rather than left as a trap for `--watch`.
-    if (sfd_exit  >= 0) { tty_close_signalfd(sfd_exit,  TTY_SIGMASK_EXIT); }
+    # (chakshu spawns no child, so the other half of that hazard — a child
+    # inheriting the block across fork/execve — has no site here.)
+    #
+    # These are the LAST steps of the teardown (darshana 1.1.4's order), and the
+    # exit fd goes last of all: its unblock delivers any signal that arrived but
+    # was never read, at its default action — for SIGPIPE, raised by the
+    # teardown's own writes to a vanished reader, that ends the process. Done
+    # last, that is harmless: _tui_teardown has already restored the terminal.
     if (sfd_winch >= 0) { tty_close_signalfd(sfd_winch, TTY_SIGMASK_WINCH); }
-    if (epfd      >= 0) { file_close(epfd); }
+    if (sfd_exit  >= 0) { tty_close_signalfd(sfd_exit,  exit_mask); }
     return EXIT_OK;
     #endif
 }

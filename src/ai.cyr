@@ -775,16 +775,16 @@ fn _ai_append_log_context(out, pos, cap) {
             # and gave it no equivalent filter. A log line carrying OSC/CSI reached
             # stdout raw, and on the `?` overlay path it reaches a terminal already
             # in raw mode on the alt screen. Same map, same reason: C0 and DEL -> '?'.
-            var c = 0;
-            while (c < len) {
-                var lb = load8(&lbuf + k + c);
-                if (lb < 32) { lb = 63; }
-                elif (lb == 127) { lb = 63; }
-                store8(&lineb + c, lb);
-                c = c + 1;
-            }
-            store8(&lineb + len, 0);
-            ai_redact_cmdline(&lineb, len, &red2, 256);
+            #
+            # v0.11.0: and C1. This copy passed every byte >= 0x80, so an 8-bit
+            # CSI / OSC / ST (0x9B / 0x9D / 0x9C, raw or as UTF-8 C2 9B) went
+            # through; darshana's tty_sanitize_buf in UTF-8 mode neutralizes both
+            # forms and any malformed byte, and copies valid UTF-8 unchanged. Its
+            # output is never longer than `len`, so it fits lineb.
+            var sl = tty_sanitize_buf(&lineb, 0, &lbuf + k, len, TTY_SANITIZE_UTF8, 0);
+            if (sl < 0) { sl = 0; }
+            store8(&lineb + sl, 0);
+            ai_redact_cmdline(&lineb, sl, &red2, 256);
             pos = _ai_app(out, pos, cap, "  ");
             pos = _ai_app(out, pos, cap, &red2);
             pos = _ai_app(out, pos, cap, "\n");
@@ -1103,7 +1103,8 @@ fn ai_explain(pid) {
     var answer[16384];
     var rc = ai_hoosh_explain(&prompt, plen, &answer, 16384);
     if (rc >= 0) {
-        syscall(1, 1, &answer, rc);
+        var an = ai_answer_scrub(&answer, rc);
+        syscall(1, 1, &answer, an);
         syscall(1, 1, "\n", 1);
         return EXIT_OK;
     }
@@ -1130,20 +1131,65 @@ fn _ai_puts(s) {
     return 0;
 }
 
+# ⛔ THE MODEL'S TEXT IS UNTRUSTED TERMINAL INPUT (v0.11.0). hoosh relays what
+# the model wrote, and the model was prompted with process names and cmdlines —
+# text any local process chooses. A JSON string may carry U+0080-U+009F literally
+# (only U+0000-U+001F must be escaped), and _ai_extract_content passes raw bytes
+# through, so a reply could put an 8-bit CSI or OSC, a raw ESC, a CR that
+# overwrites the line, on the user's terminal. Until v0.11.0 both the `--explain`
+# answer and the `?` overlay were written raw; the overlay's terminal is in raw
+# mode on the alt screen. Both now go through darshana's tty_sanitize_buf in
+# UTF-8 mode, which keeps valid UTF-8 and the TAB / LF a readable answer needs.
+
+# Sanitize the `n`-byte `--explain` answer at `buf` in place, keeping TAB and LF;
+# NUL-terminates and returns the new length (never more than `n`).
+fn ai_answer_scrub(buf, n) {
+    var m = tty_sanitize_buf(buf, 0, buf, n, TTY_SANITIZE_UTF8, TTY_KEEP_TAB | TTY_KEEP_LF);
+    if (m < 0) { m = 0; }
+    store8(buf + m, 0);
+    return m;
+}
+
+# Write `len` bytes at `src` — one overlay line, no LF in it — sanitized (TAB
+# kept), through a stack buffer so the caller's text is left untouched. A long
+# line is cut into chunks at a UTF-8 boundary, so a cut never turns a valid
+# multi-byte character into two '?'s.
+fn _ai_overlay_put(src, len) {
+    var tmp[512];
+    var off = 0;
+    while (off < len) {
+        var take = len - off;
+        if (take > 512) {
+            take = 512;
+            var back = 0;
+            while (back < 3) {
+                if ((load8(src + off + take) & 192) != 128) { break; }
+                take = take - 1;
+                back = back + 1;
+            }
+        }
+        var m = tty_sanitize_buf(&tmp, 0, src + off, take, TTY_SANITIZE_UTF8, TTY_KEEP_TAB);
+        if (m > 0) { syscall(1, 1, &tmp, m); }
+        off = off + take;
+    }
+    return 0;
+}
+
 # Print `n` bytes of `buf` for the overlay, translating bare \n → \r\n so
 # each line starts at column 0 in raw mode. Long lines wrap in the term.
+# Every line is sanitized on the way out (see above).
 fn _ai_overlay_print(buf, n) {
     var i = 0;
     var start = 0;
     while (i < n) {
         if (load8(buf + i) == 10) {
-            if (i > start) { syscall(1, 1, buf + start, i - start); }
+            if (i > start) { _ai_overlay_put(buf + start, i - start); }
             syscall(1, 1, "\r\n", 2);
             start = i + 1;
         }
         i = i + 1;
     }
-    if (n > start) { syscall(1, 1, buf + start, n - start); }
+    if (n > start) { _ai_overlay_put(buf + start, n - start); }
     return 0;
 }
 
@@ -1157,6 +1203,16 @@ fn _ai_overlay_print(buf, n) {
 # arrived so the caller can unwind through tui_run's normal teardown (tearing
 # down here would skip tty_close_signalfd and strand the mask).
 fn _ai_overlay_wait_key() {
+    #ifdef CYRIUS_TARGET_AGNOS
+    # v0.11.0: agnos keys come from kbscan via the TUI's decoder, not fd 0, and
+    # there is no signalfd. ⛔ Through v0.10.3 this took the branch below, whose
+    # `syscall(0, ...)` is read(2) on Linux but EXIT (#0) on agnos — any `?`
+    # answer ended shu-ai with the console still on the alt screen. Same defect
+    # and fix as src/ai_stub.cyr's _ai_stub_wait_key.
+    while (_ag_next_key() < 0) { sleep_ms(30); }
+    return 0;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     if (_tui_sfd_exit < 0) {
         var kb0[4];
         syscall(0, 0, &kb0, 1);
@@ -1172,11 +1228,25 @@ fn _ai_overlay_wait_key() {
         syscall(0, 0, &kb, 1);
     }
     return 0;
+    #endif
 }
 
 # Non-blocking check for a cancel keypress (Esc or q) on stdin. poll(2)
 # with a 0 ms timeout so it never blocks the stream. Returns 1 to cancel.
 fn _ai_stream_check_cancel() {
+    #ifdef CYRIUS_TARGET_AGNOS
+    # v0.11.0: on agnos, drain the kbscan decoder instead (non-blocking). The
+    # Linux body below issued poll as raw #7, which is OPEN on agnos, and on a
+    # positive answer read(2) as raw #0, which is EXIT.
+    var ak = _ag_next_key();
+    while (ak >= 0) {
+        if (ak == 27)  { return 1; }   # Esc
+        if (ak == 113) { return 1; }   # q
+        ak = _ag_next_key();
+    }
+    return 0;
+    #endif
+    #ifndef CYRIUS_TARGET_AGNOS
     # R14: also watch the exit signalfd, so `kill` cancels a long streamed
     # answer instead of being ignored until the stream ends.
     if (_tui_sfd_exit >= 0) {
@@ -1197,6 +1267,7 @@ fn _ai_stream_check_cancel() {
         }
     }
     return 0;
+    #endif
 }
 
 # Per-event SSE callback. sandhi parses the stream and calls this with each

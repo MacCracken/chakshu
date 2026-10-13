@@ -1,0 +1,38 @@
+# tui_event.cyr — the Linux TUI event loop's epoll-record read (v0.11.0).
+#
+# WHY ITS OWN FILE. tests/chakshu.tcyr cannot include src/tui.cyr — it pulls in
+# the render path, mihi, the snapshot helpers and the AI stub — so anything that
+# lives only there is reachable from the PTY suite alone, which runs on x86_64.
+# This is the one piece of the event loop whose correctness depends on the CPU
+# architecture, so it is split out where the unit suite can run it on every arch
+# the toolchain targets. Same split, same reason, as rate.cyr (v0.9.4).
+#
+# THE LAYOUT. `struct epoll_event` is `{ u32 events; u64 data; }`, and its
+# layout is per architecture:
+#
+#   x86_64   declared packed (EPOLL_PACKED)   data at +4, record 12 bytes
+#   aarch64  natural alignment                data at +8, record 16 bytes
+#
+# The stdlib's `epoll_event_new` writes each arch's layout
+# (lib/syscalls_x86_64_linux.cyr, lib/syscalls_aarch64_linux.cyr); it has no
+# reader, so this is it.
+#
+# ⛔ THE DEFECT THIS FIXES. Through v0.10.3 tui_run read the tag with
+# `load64(&events + 4)` on every arch. On aarch64 that loads the four bytes of
+# padding after `events` plus the low half of `data`, so no wakeup ever matched
+# its tag and every one fell through to the stdin branch: an exit signal or a
+# resize was handled as a keystroke, and the blocking read(0) that followed
+# waited for a real key — `kill` did nothing until someone typed, and a resize
+# was never repainted. Found by darshana's consumer survey (2026-10-12); cyim
+# gates the same read per arch.
+
+# The `data` field of the first `struct epoll_event` at `ev`, as filled in by
+# epoll_wait(2). Linux only — agnos has no epoll and its TUI loop polls instead.
+fn tui_epoll_data(ev) {
+    #ifdef CYRIUS_ARCH_AARCH64
+    return load64(ev + 8);
+    #endif
+    #ifndef CYRIUS_ARCH_AARCH64
+    return load64(ev + 4);
+    #endif
+}

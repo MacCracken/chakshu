@@ -343,8 +343,8 @@ fn snapshot_print(sort_key, top_n) {
         # ⚠ On agnos this line is printed by snap_agnos_delta_line, from
         # snapshot_finish_no_delta below — NOT here. agnos has no procfs but it does
         # have syscall counters for disk and net, so the line is per-field rather
-        # than a blanket n/a, and it needs a sampling window this early-bail has not
-        # yet taken. Printing here too would emit the line twice.
+        # than a blanket n/a, and it needs a sampling window, which this early bail-out
+        # never opens. Printing here too would emit the line twice.
         return snapshot_finish_no_delta(sort_key, top_n);
     }
 

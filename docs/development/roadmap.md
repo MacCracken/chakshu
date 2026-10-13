@@ -5,7 +5,7 @@
 > [`state.md`](state.md). This file answers one question: *what is left to reach
 > v1.0, and in which release does it land?*
 >
-> **Current: v0.10.2.** | **Last Updated**: 2026-09-07
+> **Current: v0.11.0.** | **Last Updated**: 2026-10-12
 
 ---
 
@@ -34,6 +34,8 @@ inside it are additive or corrective only.
 | ~~0.10.0~~ | ~~AGNOS CPU%; Cyrius 6.6.0~~ | **shipped 2026-09-07.** agnos 1.56.60 added the halt exclusion chakshu filed for, so the CPU% column backed out at v0.9.9 now ships honestly. Cyrius 6.6.0 is a breaking minor and the deps moved with it. Lean artifact down to **399 KB** (DCE prunes again) |
 | ~~0.10.1~~ | ~~AGNOS disk + net rates~~ | **shipped 2026-09-07.** Both were declined at v0.9.9 for untrustworthy counters and both were fixed upstream in response; guarded on LBA size and NIC presence, and verified with agnos's counter-MOVED oracle |
 | ~~0.10.2~~ | ~~pid-0 sentinel fix; multi-core harness~~ | **shipped 2026-09-08.** Found a fabricated 59% CPU% by running the harness at `-smp 4` for the first time — the baseline map was keyed by pid and 0 is the hashmap empty sentinel. Filed with cyrius; nameless-row filter dropped now agnos 1.57.1 fixed the idle park. Cyrius 6.6.1 |
+| ~~0.10.3~~ | ~~Cyrius 6.6.2~~ | **shipped 2026-09-11.** Toolchain patch only; no source change |
+| ~~0.11.0~~ | ~~Cyrius 6.7.9; darshana 1.3.0; the darshana survey's defects~~ | **shipped 2026-10-12.** The 6.7 language minor needed no source change; it surfaced three build-config repairs (the `ai/` manifest's `${file:../VERSION}`, nolibc.cyr's refusals becoming redefinitions, niyama/bayan tags off the toolchain folds). darshana 1.3.0 replaced the hand-rolled SGR, TCIFLUSH, siginfo read and winsize guard; fixed C1 controls in every untrusted-text path, the aarch64 epoll tag, `shu \| head` leaving the terminal raw, the teardown order, and `?` killing shu on AGNOS |
 | **1.0.0** | Ship as the AGNOS default monitor | Registry promotion, ISO default, announce |
 
 ---
@@ -119,6 +121,27 @@ inside it are additive or corrective only.
 
 ---
 
+## Found at v0.11.0, not scheduled
+
+- [ ] **aarch64: the process table never renders.** `shu -p` on a Raspberry Pi 4 (Linux
+      7.0.0-1020-raspi) prints every header line through `net:` and then spins at 100% CPU
+      until killed; under qemu-aarch64 the same binary exits 2 at the same point; the TUI hangs
+      mid-way through its first frame. **Pre-existing**: the v0.10.3 tree built with cyrius
+      6.6.2 behaves identically, so it is not a 6.7 regression. `dir_list_into` over `/proc` and
+      `map_u64_*` work on aarch64 in isolation, and the unit suite passes on the Pi itself
+      (208/208), so the fault is somewhere in the per-pid sample → sort → render path. aarch64 is
+      not a supported target (state.md), so this is recorded rather than scheduled — but it blocks
+      proving the v0.11.0 epoll-tag fix end to end on ARM. That fix is proven by the unit suite on
+      the Pi instead: with the old `+4` read the tag comes back as `0x25A5A5A5A`, not 2.
+- [ ] **Move mihi / ai-hwaccel when mihi pins a 6.7-built ai-hwaccel.** ai-hwaccel 2.3.22
+      calls `bayan_json_v_obj_get`, which the 6.7.9 bayan fold marks `#deprecated` — three
+      warnings in the `shu-ai` build — and its optional-bayan code is what leaves seven
+      `undefined function 'bayan_json_v_*'` warnings in the lean build. Both are dependency code
+      and both clear at a dep bump; the tracking rule (ai-hwaccel follows mihi's own pin) means
+      mihi moves first. mihi 1.2.7 still pins 2.3.22.
+
+---
+
 ## Blocked upstream (not schedulable here)
 
 - ~~**Process table on AGNOS.**~~ **RESOLVED at v0.9.8** — `#99 proclist` (agnos
@@ -144,9 +167,6 @@ inside it are additive or corrective only.
 - Focus-panel depth: threads list, fd enumeration, and per-focused-pid CPU%
   (`src/tui.cyr` head comment). None gates v1.0 — the focus panel already shows
   status, cmdline and the kill flow.
-- Promote reverse-video (`_tui_invert_on`/`_off`) into darshana. The trigger is a
-  SECOND consumer wanting the same primitive; cyim's syntax highlighting needs
-  richer attributes, so it is not that consumer (`src/tui.cyr:~200`).
 - Plugin surface for custom panels.
 
 ---

@@ -172,21 +172,20 @@ fn _watch_push(rank, text) {
             else { break; }
         }
     }
-    var i = 0;
-    while (i < n) {
-        # Scrub control bytes on the way in. These records are written by
-        # another process and can carry attacker-influenced text (a filename, a
-        # rule name), so an unfiltered copy would let an event repaint the
-        # terminal or forge a row — the same defect fixed for /proc cmdline and
-        # comm in v0.7.13. NUL terminates; every other C0 byte and DEL becomes
-        # '?'; bytes >= 0x80 pass through so UTF-8 survives.
-        var c = load8(text + i);
-        if (c < 32) { c = 63; }
-        if (c == 127) { c = 63; }
-        store8(slot + i, c);
-        i = i + 1;
-    }
-    store8(slot + n, 0);
+    # Scrub control bytes on the way in. These records are written by another
+    # process and can carry attacker-influenced text (a filename, a rule name),
+    # so an unfiltered copy would let an event repaint the terminal or forge a
+    # row — the same defect fixed for /proc cmdline and comm in v0.7.13. NUL
+    # terminates (strlen above); every other C0 byte and DEL becomes '?'.
+    #
+    # v0.11.0: so do the C1 controls. The old loop passed every byte >= 0x80 "so
+    # UTF-8 survives", which also passed an 8-bit CSI / OSC / ST (0x9B / 0x9D /
+    # 0x9C) raw or UTF-8-encoded (C2 9B). darshana's tty_sanitize_buf in UTF-8
+    # mode keeps valid UTF-8 byte-for-byte and neutralizes both C1 forms and any
+    # malformed byte. Its output is never longer than `n`, so it fits the slot.
+    var m = tty_sanitize_buf(slot, 0, text, n, TTY_SANITIZE_UTF8, 0);
+    if (m < 0) { m = 0; }
+    store8(slot + m, 0);
     store64(&_watch_threat + _watch_head * 8, rank);
     _watch_head = _watch_head + 1;
     if (_watch_head >= WATCH_MAX) { _watch_head = 0; }

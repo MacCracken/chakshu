@@ -143,7 +143,10 @@ def build_image(work, shu):
 
 
 def boot_and_run(work, img, ovmf, command, hold, keys=""):
-    """Boot, type `command` at the agnsh prompt, send `keys`, return serial text."""
+    """Boot, type `command` at the agnsh prompt, send `keys`, return serial text.
+
+    `keys` is a string of characters, or a list of QEMU `sendkey` names for keys
+    with no single-character spelling here (`["shift-slash"]` is `?`)."""
     code, vars_src = ovmf
     ser = os.path.join(work, "serial.log")
     mon = os.path.join(work, "mon.sock")
@@ -405,6 +408,21 @@ def main():
         out = run_or_die(work, img, ovmf, "run /bin/shu", 11, "kn")
         check("`n` cancels the confirm and restores the hints",
               "[k] kill" in out.split("Kill PID ")[-1])
+
+        print("[6] the `?` overlay closes on a key and the TUI keeps running")
+        # ⛔ ADDED v0.11.0. The overlay's key wait was a raw `syscall(0, ...)` —
+        # read(2) on Linux, but EXIT (#0) on agnos, where the TUI also opens no
+        # signalfd and so always took that branch. Pressing `?` ended shu on the
+        # spot: the agnsh prompt came back with the console still on the alt
+        # screen and the cursor hidden. It now waits on the kbscan decoder. Keys
+        # are sendkey names, so `?` is shift-slash; `x` is an inert key that
+        # closes the overlay, and `q` must then quit through the normal teardown.
+        out = run_or_die(work, img, ovmf, "run /bin/shu", 10, ["shift-slash", "x", "q"])
+        after = out.split("[any key to close]")[-1]
+        check("`?` opens the overlay", "[any key to close]" in out)
+        check("the TUI repaints after the overlay closes", "[q] quit" in after)
+        check("`q` then quits cleanly: alt screen left", "\x1b[?1049l" in after)
+        check("`q` then quits cleanly: cursor restored", "\x1b[?25h" in after)
     except BootFailed as e:
         print(f"  FAIL: {e}")
         failures.append(str(e))

@@ -18,48 +18,71 @@
 # `CYRIUS_TLS_LIBSSL`-only — there is no upstream flag that compiles the libssl
 # half OUT.
 #
-# So chakshu removes it from below instead. `fdlopen` is no longer declared in
-# ai/cyrius.cyml, and these four definitions take its place in the closure.
-# `tls.cyr:218` gates the whole libssl path on `fdlopen_helper_available()`:
+# So chakshu removes it from below instead. `fdlopen` is not declared in
+# ai/cyrius.cyml, and these four definitions REPLACE the stdlib's.
+# `_tls_init_resolve()` in lib/tls.cyr gates the whole libssl path on
+# `fdlopen_helper_available()`:
 #
 #     if (fdlopen_helper_available() == 0) { return 0; }
 #
 # Returning 0 makes `_tls_init()` bail before `fdlopen_init_full`, before the
-# two `dlopen`s and before every `dlsym`. The remaining three are defined only
-# because the compiler must resolve the call sites; they are unreachable, and
-# each returns the failure value its caller already checks for, so the libssl
-# backend degrades to "unavailable" rather than misbehaving if that ever
-# changes upstream.
+# two `dlopen`s and before every `dlsym`. The remaining three replace the other
+# entry points lib/tls.cyr calls; each returns the failure value its caller
+# already checks for, so the libssl backend degrades to "unavailable" rather
+# than misbehaving if the gate above ever moves upstream.
 #
-# NET EFFECT: `shu-ai` links no dlopen machinery of any kind. TLS is served by
-# the native stack, DNS by sandhi's own UDP resolver, entropy by `getrandom(2)`
-# via the `random` stdlib module. Both binaries are now pure-syscall, and the
-# no-libc rule has no exception. `scripts/check.sh` and ci.yml gate this: the
-# shu-ai binary must have zero NEEDED entries and must not link fdlopen.
+# ── SINCE CYRIUS 6.6.9 / 6.6.20 THESE ARE REDEFINITIONS (v0.11.0) ─────────────
+# Through the 6.6.2 pin these four were the ONLY definitions in the closure:
+# fdlopen was undeclared, so nothing else defined them. cyrius 6.6.9 made every
+# stdlib module include what it calls, and lib/tls.cyr now includes
+# lib/fdlopen.cyr itself — so the stdlib definitions are always compiled in,
+# whatever the manifest says, and there is no flag that leaves them out.
+# cyrius 6.6.20 then made a redefinition bind EVERY call to the LAST definition,
+# and this file is compiled after the auto-included stdlib, so these four are
+# the ones every call reaches. The build therefore prints, for this file:
+#
+#     duplicate fn 'fdlopen_helper_available' (last definition wins; first
+#     defined in lib/fdlopen.cyr)
+#
+# and the same for the other three. ⚠ Those FOUR warnings are expected and are
+# the refusal working; a fifth, or one naming a different winner, is not.
+# ai/tests/chakshu-ai.tcyr proves the binding at run time ("nolibc.cyr —
+# the libssl refusal binds"), on any host, helper installed or not.
+#
+# What it costs: lib/fdlopen.cyr's loader code and its path strings
+# (`ld-linux-x86-64.so.2`, the dlopen-helper paths) now sit in shu-ai as dead
+# bytes — reachable only through the four stdlib bodies no call binds to.
+# scripts/nolibc-check.sh states this rather than asserting their absence.
+#
+# NET EFFECT: `shu-ai` reaches no dlopen machinery. TLS is served by the native
+# stack, DNS by sandhi's own UDP resolver, entropy by `getrandom(2)` via the
+# `random` stdlib module. Both binaries are pure-syscall — zero NEEDED entries,
+# no program interpreter — and the no-libc rule has no exception.
+# `scripts/nolibc-check.sh` (run by ci.yml and scripts/check.sh) gates both.
 #
 # ⛔ DO NOT "fix" a TLS problem by re-declaring `fdlopen` in ai/cyrius.cyml.
 # That silently restores the libc bridge and the AGNOS regression with it. If
 # the native backend cannot do something, fix it in the native backend.
 
-# tls.cyr:218 — the single gate the whole libssl path hangs on. 0 = "the
-# dlopen-helper is not available", which is the truth here: it is not linked.
+# `_tls_init_resolve`'s gate — the one the whole libssl path hangs on. 0 = "the
+# dlopen-helper is not available", which is the truth here: nothing may use it.
 fn fdlopen_helper_available(): i64 {
     return 0;
 }
 
-# tls.cyr:220 — unreachable (guarded above). Non-zero = init failed, which is
-# the branch `_tls_init` already handles by returning 0.
+# `_tls_init_resolve`, right after the gate above — unreachable while the gate
+# answers 0. Non-zero = init failed, which it already handles by returning 0.
 fn fdlopen_init_full(state): i64 {
     return 0 - 1;
 }
 
-# tls.cyr:223 — unreachable. 0 = "no dlopen function", checked at tls.cyr:225.
+# `_tls_init_resolve` — unreachable. 0 = "no dlopen function", which it checks.
 fn fdlopen_dlopen(state): i64 {
     return 0;
 }
 
-# tls.cyr:224 and tls.cyr:614 — unreachable. 0 = "no dlsym function", checked
-# at tls.cyr:226 and tls.cyr:615.
+# `_tls_init_resolve` and `tls_dlsym` — unreachable (`tls_dlsym` returns first
+# unless libssl loaded). 0 = "no dlsym function", which both check.
 fn fdlopen_dlsym(state): i64 {
     return 0;
 }

@@ -292,11 +292,17 @@ fn _procs_fill_agnos(sort_key) {
         # first null, and an unterminated 16th byte would run into the uid slot.
         var k = 0;
         while (k < 15) {
-            var c = load8(src + 24 + k);
-            if (c == 0) { break; }
-            store8(rec + 32 + k, c);
+            if (load8(src + 24 + k) == 0) { break; }
             k = k + 1;
         }
+        # v0.11.0: and scrub it, as the Linux parser does. The name is the ELF's
+        # basename as the loader recorded it — whoever names the file chooses it —
+        # and this copy was the one comm path with NO control-byte filter at all,
+        # so an ESC in a filename reached the agnos console (TUI and `-p`) raw.
+        # darshana's tty_sanitize_buf, UTF-8 mode: the output is never longer
+        # than the input, so the 15-byte cap still holds.
+        k = tty_sanitize_buf(rec + 32, 0, src + 24, k, TTY_SANITIZE_UTF8, 0);
+        if (k < 0) { k = 0; }
         store8(rec + 32 + k, 0);
 
         _proc_n = _proc_n + 1;

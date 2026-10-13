@@ -4,6 +4,194 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-10-12 — cyrius 6.7.9, darshana 1.3.0, and the defects darshana's survey found
+
+A minor: the toolchain moves across the 6.7 **language** minor, darshana moves 1.1.1 → 1.3.0, and
+every item in roadmap.md's "Defects found by darshana's consumer survey (2026-10-12)" is closed.
+The user-visible changes are all deliberate, and each is gated by a test that fails against v0.10.3:
+untrusted text loses its C1 controls (and malformed UTF-8 shows as `?`), `shu | head` no longer
+leaves the terminal raw, `?` no longer ends shu on AGNOS, and the TUI now resets SGR on exit.
+
+### Changed — cyrius `6.6.2` → `6.7.9` (both manifests)
+
+**No source change was needed for the language itself.** 6.7.x reserves `const` / `true` / `false`
+/ `do` / `dyn` / `trait`, makes `!` a real operator (before 6.7.3 a lone `!` was silently dropped),
+refuses `OP=` on a bare `var b[N]`, changes `*p` through narrow pointers (6.7.8), binds unary `-` /
+`~` on constants tighter (6.7.9), and fixes a long run of silent miscompiles (6.7.6, 6.7.9). Every
+one of those was searched for in `src/`, `ai/`, `tests/` and `ai/tests/`, not assumed: chakshu has
+no lone `!`, no `~`, no unary minus on a name, no typed pointer, no compound assignment on an array,
+no struct / impl / trait / generic, and no reserved word as an identifier. `loop` is a variable in
+`tui_run` and stays legal — it is contextual (a keyword only as `loop {`). So the silent-change
+classes have no site here, and the unit suite's 179 pre-existing assertions pass unchanged.
+
+The bump surfaced four repairs, all build configuration or gates rather than code:
+
+1. ⛔ **`ai/cyrius.cyml` would not resolve.** `version = "${file:../VERSION}"` is refused since
+   cyrius 6.6.20 — *"the path climbs out with ..; a ${file:} path stays inside the project"*, and a
+   symlink is refused the same way. The key is **removed**: the sub-project has no version of its
+   own (shu-ai reports `CHAKSHU_VERSION` from `src/cli.cyr`, the same literal as shu, and nothing
+   reads the ai package version), so the root `VERSION` stays the one source of truth rather than
+   gaining a copy that could drift.
+2. ⛔ **`src/nolibc.cyr`'s libssl refusals are now redefinitions, and say so.** cyrius 6.6.9 made
+   every stdlib module include what it calls, so `lib/tls.cyr` now includes `lib/fdlopen.cyr`
+   itself and the stdlib's four fdlopen entry points are in shu-ai's closure whatever the manifest
+   declares. cyrius 6.6.20 binds every call to the LAST definition, and nolibc.cyr is compiled after
+   the auto-included stdlib, so its refusals still win — at the cost of four `duplicate fn
+   'fdlopen_*' (last definition wins; first defined in lib/fdlopen.cyr)` warnings, which are the
+   refusal working and are documented as expected in the file. This is **proven, not inferred**:
+   a new AI-suite group asserts `fdlopen_init_full(0)` answers nolibc.cyr's -1 (the stdlib's
+   answers -3) and that selecting the libssl backend leaves `tls_available()` at 0. With the
+   include removed, three of those assertions fail — and on this box, where a dlopen-helper is
+   installed, the libssl backend **really loads**. `scripts/nolibc-check.sh` stops asserting the
+   loader-path and dlopen-helper strings absent from shu-ai, because they are now dead bytes of
+   lib/fdlopen.cyr there (it still asserts them absent from the lean `shu`), and instead requires all
+   four refusals defined and nolibc.cyr included by both `ai/main.cyr` and the AI suite. Both
+   binaries are still static: zero `NEEDED`, no program interpreter.
+3. **niyama `1.0.10` → `1.1.0` and bayan `1.5.5` → `1.5.13`** (`ai/cyrius.cyml`), so the tags name
+   what links again. 6.7.9 folds niyama 1.1.0 and bayan 1.5.13; both tags' `dist/` files are
+   byte-identical to the folds (`cmp`). For niyama this is not cosmetic: a different tag makes every
+   AI build warn that `./lib/` shadows the version-pinned lib. niyama 1.1.0 changes pcre answers
+   only; chakshu uses re2, whose entry points are unchanged, and the redaction tests pass as before.
+4. **`src/snapshot.cyr:346` reworded.** cyrlint ≥ 6.6.5 joins a phrase wrapped across comment lines,
+   so "…has not / yet taken" read as an untracked "not yet" deferral and failed `check.sh`'s lint
+   gate. It was prose; it now says the bail-out "never opens" the sampling window.
+
+Both lockfiles are regenerated (`cyrius deps`). `cyrius build -v` names
+`~/.cyrius/versions/6.7.9/bin/cycc`.
+
+**Warnings that remain, each pre-existing or dependency code, none in chakshu's own logic:** the
+four nolibc.cyr redefinitions above (expected); `refusing to overwrite stdlib leaf 'bayan'` (AI
+build; documented in state.md since v0.9.6); `large static data` (both builds; `_tui_filtered_idx`
+is sized to PROC_MAX by the v0.7.13 R5-vs-R11 decision, recorded at its declaration); seven
+`undefined function 'bayan_json_v_*'` in the lean build and three `'bayan_json_v_obj_get' is
+deprecated` in the AI build, all inside ai-hwaccel 2.3.22 — pinned to mihi's tag, so they clear when
+mihi moves (roadmap); and `lib/sigil.cyr:28103` getting static storage for a 256 KiB array local —
+stdlib code; 6.6.2 reported the same oversized-local condition as a `note:`.
+
+### Changed — darshana `1.1.1` → `1.3.0`, and chakshu stops hand-rolling what it provides
+
+darshana's API has been frozen since 1.0 and 1.2/1.3 are additive, so the bump itself needed no
+change (built and tested before anything below). Then each hand-rolled piece was replaced where
+darshana's version is equal or better:
+
+| was | now | bytes on the wire |
+|---|---|---|
+| 21 SGR escape literals in `src/tui.cyr` (`"\x1b[32m"`, `"\x1b[7m"`, `"\x1b[0m"`, …) | `tty_sgr` / `tty_sgr_buf` / `tty_sgr_reset(_buf)` with `TTY_FG_*` / `TTY_SGR_BOLD` / `TTY_SGR_DIM` / `TTY_SGR_REVERSE`; the palette is codes, not strings | identical — a PTY capture of v0.10.3 and v0.11.0 under `--color always` emits the same SGR set in dark, light and both pid-sorted; scenario 13 gates the theme codes |
+| `syscall(SYS_IOCTL, 0, TCFLSH, TCIFLUSH)` behind `#ifndef CYRIUS_TARGET_AGNOS` | `tty_flush_input(0)` — platform-blind; a no-op returning -1 on AGNOS | identical ioctl |
+| two hand-sized 128-byte `signalfd_siginfo` reads | `tty_read_signal` | — |
+| the `rows > 0 && cols > 0` winsize guard | `tty_winsize_or`, with the current cache as the default | — |
+| four control-byte scrub loops | `tty_sanitize_buf` (see Fixed) | changed, deliberately |
+
+The post-v1 roadmap item "promote reverse-video into darshana" is closed: darshana 1.2.0 shipped
+`TTY_SGR_REVERSE` for chakshu, cyim and thoth together.
+
+⭐ **Kept, deliberately: key decoding.** The CSI arrow parse in `_tui_read_key` and the AGNOS
+kbscan Set-1 decoder in `src/tui_agnos.cyr` stay chakshu's own — darshana's charter is output,
+termios and signals, and it will never ship input decoding (owner ruling, 2026-10-12).
+
+### Fixed — C1 control bytes reached the terminal from every untrusted-text path
+
+The comm scrubber (`src/proc.cyr`), the cmdline scrubber (`src/processes.cyr`), the `--with-logs`
+log-line scrubber (`src/ai.cyr`) and the `--watch` ring (`src/watch.cyr`) mapped C0 and DEL to `?`
+but passed **every byte ≥ 0x80** "so UTF-8 survives". That also passed the 8-bit C1 controls
+0x80-0x9F — 0x9B is a one-byte CSI, 0x9D OSC, 0x9C ST — which a Latin-1 terminal acts on raw and a
+UTF-8 one acts on as U+009B (`C2 9B`). comm and cmdline are set by any process. All four now use
+darshana's `tty_sanitize_buf` in UTF-8 mode: each C1 form becomes ONE `?`, every byte that is not
+well-formed UTF-8 becomes `?`, and valid UTF-8 is copied byte for byte. The audit of the paths found
+two more, fixed the same way:
+
+- **the AGNOS process name was not scrubbed at all** (`src/proc_agnos.cyr`) — proclist's name is the
+  ELF basename, chosen by whoever names the file, and it went to the console raw;
+- **the model's own answer was written raw** — `--explain`'s output and every line of the `?`
+  overlay. hoosh relays text from a model prompted with process names and cmdlines, a JSON string
+  may carry U+0080-U+009F literally, and `_ai_extract_content` passes raw bytes through (a new test
+  shows it handing back `C2 9B` and ESC). Both now go through `tty_sanitize_buf` keeping TAB and LF
+  (`ai_answer_scrub`, `_ai_overlay_put`, which cuts long lines only at a UTF-8 boundary).
+
+⚠ **Visible change:** a name or argument holding C1 controls, or malformed UTF-8, now shows `?`
+where it used to send raw bytes; a comm whose last character the kernel's 15-byte cut split shows
+`?` for the orphaned lead byte; a CR in a model answer shows `?` instead of returning the cursor to
+column 0 over the line. Valid UTF-8 renders exactly as before.
+
+### Fixed — `shu | head -c 1` left the terminal raw
+
+stdin a TTY and stdout a pipe whose reader leaves: the next frame write raised SIGPIPE, whose
+default action killed shu on the spot — raw mode on, alt screen up. SIGPIPE now rides the exit
+signalfd (darshana 1.3.0's `TTY_SIGMASK_PIPE`, OR'd into `TTY_SIGMASK_EXIT`; the masks are disjoint,
+so the two live signalfds stay disjoint as `tty_close_signalfd` requires). The write fails with
+EPIPE, the loop wakes, and the normal teardown runs. The process then ends by the SIGPIPE its own
+teardown writes raise once the exit fd's mask is unblocked — the conventional result for a pipeline
+writer — with the terminal already restored. PTY scenario 15.
+
+### Fixed — the teardown restored cooked mode AFTER writing to the terminal
+
+`_tui_teardown` wrote cursor-show before `tty_cooked()`, so a teardown write that died of SIGPIPE
+(the degraded no-signalfd loop, or a reader that left at exactly the wrong moment) killed shu with
+the terminal raw. It now follows darshana 1.1.4's recommended order — `tty_cooked()` first, then
+cursor-show, alt-leave and an `SGR 0` reset, and `tty_close_signalfd` last, WINCH before EXIT —
+and the epoll fd is closed before the signalfds rather than after. PTY scenario 16 drives exactly
+that case (RLIMIT_NOFILE=5 forces the degraded loop) and fails against the old order alone. ⚠
+**Visible change:** shu now writes `ESC[0m` after leaving the alt screen.
+
+chakshu spawns no child, so darshana's other 1.1.4 hazard — a child inheriting the signalfd's
+block across fork/execve — has no site here (checked: no exec/spawn/fork anywhere in `src/`).
+
+### Fixed — epoll events were misread on aarch64
+
+`tui_run` read the epoll data tag as `load64(&events + 4)` — x86_64's packed `struct epoll_event`.
+aarch64 aligns `data` to +8, so the read took four bytes of padding plus the low half of the tag, no
+wakeup matched, and every exit signal and resize was handled as a keystroke (the blocking read that
+followed then waited for a real key). The read moved to `tui_epoll_data` in the new
+`src/tui_event.cyr`, gated per arch as cyim does, and split out so the unit suite can run it: a
+real epoll round trip on a pipe, the record pre-filled with junk. It passes on x86_64, under
+qemu-aarch64 and on a real Raspberry Pi 4; with the old `+4` read it fails on both aarch64 runs
+with `0x25A5A5A5A`. ⚠ aarch64 is still not a supported target — see the roadmap for a pre-existing
+aarch64 defect (the process table never renders, at 6.6.2 as at 6.7.9) that keeps this from being
+shown end to end there.
+
+### Fixed — `?` ended shu on AGNOS, leaving the console on the alt screen
+
+The overlay's key wait was a raw `syscall(0, …)` — read(2) on Linux, but **EXIT (#0) on agnos**,
+where the TUI opens no signalfd and so always took that branch. Pressing `?` in the lean `shu` (or
+answering the overlay in `shu-ai`) ended the process immediately; the agnsh prompt came back with
+the cursor hidden and the alt screen up. Reproduced under QEMU before the fix. The AGNOS branches of
+`_ai_stub_wait_key`, `_ai_overlay_wait_key` and `_ai_stream_check_cancel` now wait on the same
+kbscan decoder the TUI loop polls; the Linux paths are unchanged. `tests/agnos_qemu.py` gains
+scenario [6] (four checks; three fail against the pre-fix build).
+
+### Tests
+
+- monitor suite **179 → 208**: C1 in comm / cmdline / the watch ring, a comm cut mid-sequence, the
+  EXIT|PIPE + WINCH signalfd pair, the epoll tag. Every `[C1]` assertion fails against the v0.10.3
+  scrub rule (mutation-checked); so does the epoll test on aarch64 with the old offset.
+- AI suite **39 → 53**: model-text sanitization (with the extractor shown passing raw C1 through)
+  and the nolibc binding (fails without the include).
+- PTY suite **14 → 16** scenarios: [15] reader gone, [16] teardown order — each fails against
+  v0.10.3, and each fails alone against a build that reverts only its own fix. Scenario [1] also
+  asserts the teardown's write sequence, cursor-show → alt-leave → `SGR 0` (fails on v0.10.3).
+- with-logs smoke gains [6], C1 in a log line; it fails against v0.10.3's shu-ai.
+- `tests/agnos_qemu.py` **31 → 35** checks.
+- ⚠ Two existing gates assumed an idle host and failed on a loaded one, before and after this
+  change: smoke's "pid 1 resolves to root" read the default CPU-sorted top 10, and PTY scenario 13
+  needed an idle (`I`) kernel thread among the CPU-sorted rows. Both now read a `--sort pid` frame,
+  where the low pids are deterministic on every Linux. The assertions are unchanged.
+
+### Sizes
+
+| artifact | 0.10.3 (6.6.2) | 0.11.0 (6.7.9) |
+|---|---|---|
+| lean `shu`, plain | 612,440 B | 688,520 B |
+| lean `shu`, DCE'd — **what release.yml ships** | 399,448 B | 434,568 B |
+| AGNOS `shu` | 614,472 B | 694,904 B |
+| `shu-ai`, plain | 2,945,944 B | 3,222,184 B |
+| `shu-ai`, DCE'd — **what release.yml ships** | 2,945,944 B | **1,907,368 B** |
+
+Decomposed, lean plain: **+67,584 B is the toolchain alone** (the v0.10.3 source with darshana 1.1.1
+under 6.7.9 measures 680,024 B), +8,552 B the darshana 1.3.0 bundle, −56 B this release's code. The
+shipped lean artifact stays inside design-spec §8's revised < 768 KB. ⭐ **DCE now prunes the AI
+build** — it was byte-identical before — so the `shu-ai` download drops by 1.04 MB; the DCE'd
+binary passes smoke, the with-logs privacy smoke and the hoosh-stub smoke.
+
 ## [0.10.3] - 2026-09-11
 
 ### Changed

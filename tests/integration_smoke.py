@@ -327,6 +327,64 @@ def _overlay_signal_exits(shu_path):
     return died
 
 
+def _stdout_reader_gone(shu_path, args, nofile=None, keys=b""):
+    """v0.11.0. Run the TUI with stdin (and stderr) on a PTY slave but STDOUT ON
+    A PIPE — `shu | head -c N` — then make the reader go away once the first
+    frame has started, optionally type `keys`, and wait for the process to end.
+
+    Returns (frame_bytes, was_raw, exited, status, lflag_after): `was_raw` is
+    whether the terminal really was in raw mode while the reader was still there
+    (without it, a "cooked afterwards" verdict proves nothing), `lflag_after` the
+    slave's c_lflag once the process is gone — the state the user's shell gets.
+
+    `nofile` caps RLIMIT_NOFILE so that tui_run's epoll_create fails and it runs
+    its degraded, signalfd-less loop (the R15 path, reproduced at ulimit -n 5).
+    """
+    import resource
+    import subprocess
+
+    master, slave = os.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+    rd, wr = os.pipe()
+
+    def pre():
+        if nofile is not None:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (nofile, nofile))
+
+    env = dict(os.environ)
+    env.setdefault("TERM", "xterm")
+    proc = subprocess.Popen([shu_path] + args, stdin=slave, stdout=wr, stderr=slave,
+                            env=env, preexec_fn=pre, close_fds=True,
+                            start_new_session=True)
+    os.close(wr)
+    got = b""
+    deadline = time.time() + 4.0
+    while time.time() < deadline and b"\x1b[?1049h" not in got:
+        r, _, _ = select.select([rd], [], [], 0.2)
+        if r:
+            d = os.read(rd, 4096)
+            if not d:
+                break
+            got += d
+    time.sleep(0.3)
+    was_raw = (termios.tcgetattr(slave)[3] & termios.ICANON) == 0
+    os.close(rd)                       # the reader is gone
+    if keys:
+        time.sleep(0.3)
+        os.write(master, keys)
+    try:
+        status = proc.wait(timeout=5.0)
+        exited = True
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        status = proc.wait()
+        exited = False
+    lflag = termios.tcgetattr(slave)[3]
+    os.close(slave)
+    os.close(master)
+    return got, was_raw, exited, status, lflag
+
+
 def _kill_scenario(shu_path, burst):
     """Drive `shu --pid <victim>` and answer the kill confirm.
 
@@ -412,6 +470,11 @@ def main():
     expect_in("'PID' header in render", b"PID", out, failures)
     expect_in("alt-screen enter (CSI ?1049h)", b"\x1b[?1049h", out, failures)
     expect_in("alt-screen leave (CSI ?1049l)", b"\x1b[?1049l", out, failures)
+    # v0.11.0: the teardown's writes, in darshana 1.1.4's order and ending in an
+    # SGR reset (tty_cooked() comes first but writes nothing). v0.10.3 emitted no
+    # reset here.
+    expect_in("teardown writes cursor-show, alt-leave, SGR 0 in that order",
+              b"\x1b[?25h\x1b[?1049l\x1b[0m", out, failures)
 
     # ---------------- 2: Ctrl-C exit ----------------
     print("[2] Ctrl-C exit")
@@ -523,8 +586,12 @@ def main():
     # light substitutes magenta, blue and normal-weight. Asserting on the WIRE
     # is what makes this checkable — whether it looks better is in MANUAL.md.
     print("[13] --theme light re-tints the unreadable colours")
-    dark = _capture_escapes(shu, [])
-    light = _capture_escapes(shu, ["--theme", "light"])
+    # `--sort pid` (v0.11.0): the cyan assertion needs an idle-state (`I`) kernel
+    # thread among the visible rows, and the default CPU sort puts the busiest
+    # processes there — on a loaded host, none of them idle. The low pids are
+    # kthreadd's workers on every Linux, so the pid order is deterministic.
+    dark = _capture_escapes(shu, ["--sort", "pid"])
+    light = _capture_escapes(shu, ["--theme", "light", "--sort", "pid"])
     ok = True
     why = []
     if "\x1b[36m" not in dark:
@@ -566,9 +633,55 @@ def main():
         fail("--color auto", "; ".join(why))
         failures.append("--color auto: " + "; ".join(why))
 
+    # ---------------- 15: stdout reader goes away mid-run ----------------
+    # v0.11.0. `shu | head -c N`: stdin is the terminal, stdout a pipe whose
+    # reader leaves. Through v0.10.3 the next frame write raised SIGPIPE, whose
+    # default action killed the process with the terminal still RAW. SIGPIPE now
+    # rides the exit signalfd (darshana's TTY_SIGMASK_PIPE): the write fails with
+    # EPIPE, the loop wakes, and the normal teardown restores the terminal.
+    print("[15] stdout pipe reader goes away: terminal restored")
+    got, was_raw, exited, status, lflag = _stdout_reader_gone(shu, ["--rate", "5"])
+    why = []
+    if b"\x1b[?1049h" not in got:
+        why.append("never saw the first frame on the pipe")
+    if not was_raw:
+        why.append("terminal was not raw while running (scenario vacuous)")
+    if not exited:
+        why.append("process did not exit after its reader left")
+    if not (lflag & termios.ICANON) or not (lflag & termios.ECHO):
+        why.append(f"terminal left raw (c_lflag={lflag:#x}, exit status {status})")
+    if why:
+        fail("reader gone", "; ".join(why))
+        failures.append("reader gone: " + "; ".join(why))
+    else:
+        passed(f"exited (status {status}) with ICANON|ECHO restored")
+
+    # ---------------- 16: teardown restores cooked mode FIRST ----------------
+    # v0.11.0, darshana 1.1.4's teardown order. With signalfds unavailable (the
+    # degraded loop, forced with RLIMIT_NOFILE=5), SIGPIPE keeps its default
+    # action, so the FIRST teardown write to a vanished reader kills the process.
+    # The old order wrote cursor-show before tty_cooked() and died raw; cooked
+    # first, the same death leaves the terminal usable.
+    print("[16] teardown restores cooked mode before it writes")
+    got, was_raw, exited, status, lflag = _stdout_reader_gone(shu, [], nofile=5, keys=b"q")
+    why = []
+    if b"\x1b[?1049h" not in got:
+        why.append("never saw the first frame on the pipe")
+    if not was_raw:
+        why.append("terminal was not raw while running (scenario vacuous)")
+    if not exited:
+        why.append("process did not exit on q")
+    if not (lflag & termios.ICANON) or not (lflag & termios.ECHO):
+        why.append(f"terminal left raw (c_lflag={lflag:#x}, exit status {status})")
+    if why:
+        fail("teardown order", "; ".join(why))
+        failures.append("teardown order: " + "; ".join(why))
+    else:
+        passed(f"q with the reader gone: exit status {status}, ICANON|ECHO restored")
+
     # ---------------- summary ----------------
     print()
-    total = 14
+    total = 16
     if failures:
         print(f"PTY smoke: FAIL ({len(failures)} of {total} tests)")
         for f in failures:
