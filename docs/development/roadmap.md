@@ -1,184 +1,265 @@
 # chakshu — Roadmap
 
-> **Forward-looking only.** Everything shipped lives in [`CHANGELOG.md`](../../CHANGELOG.md);
-> current volatile state (version, pins, sizes, test counts) lives in
-> [`state.md`](state.md). This file answers one question: *what is left to reach
-> v1.0, and in which release does it land?*
+> **Forward-looking only.** What shipped is in [`CHANGELOG.md`](../../CHANGELOG.md). Current
+> volatile state (version, pins, sizes, test counts) is in [`state.md`](state.md). This file
+> answers one question: *what is left to reach v1.0, and in which release does it land?*
 >
-> **Current: v0.11.1.** | **Last Updated**: 2026-10-31
+> **Current: v0.12.0.** | **Last Updated**: 2026-10-31 (the CLI on cmdit; every contract question
+> decided)
 
 ---
 
-## Release plan to v1.0
+## Where v1.0 stands
 
-Work is batched so each cut is independently shippable and independently
-verifiable — build + lean tests + AI tests + smoke + PTY green at every tag. A
-minor (`0.8.0`, `0.9.0`) opens a milestone and may change surface; patches
-inside it are additive or corrective only.
+The monitor is feature-complete. Five of the six v1.0 criteria are met. What remains is **settling
+and freezing the CLI contract**, on cmdit; **fixing what the freeze would lock in wrong**;
+**refreshing the evidence** (benchmarks and a security audit, both older than three toolchain
+minors); and **the distribution acts**. No new monitor features are planned before 1.0.
 
-| Release | Theme | Gate |
+The release numbers below are proposals. Each version bump stays the owner's call.
+
+| Release | Theme | Exit gate |
 |---|---|---|
-| ~~0.8.0~~ | ~~`--watch` anomaly stream~~ | **shipped 2026-08-24 — M3 closed.** Consumer in the lean `shu`; producer is aegis 1.1.7's NDJSON sink |
-| ~~0.8.1~~ | ~~`--with-logs` log + anomaly context~~ | **shipped 2026-08-24.** Per-pid attribution proved impossible (sakshi carries no pid); ships system-level context + the anomaly ring |
-| ~~0.8.2~~ | ~~AI hardening + hoosh gate promotion~~ | **shipped 2026-08-24.** The blocker was a whitespace-intolerant JSON parse misreported as a transport error, not libc |
-| ~~0.9.0~~ | ~~Perf + size close-out~~ | **shipped 2026-08-24.** All §8 targets met; the size target formally revised 256 KB → 768 KB with the reason recorded |
-| ~~0.9.1~~ | ~~GPU telemetry depth~~ | **shipped 2026-08-24.** Live busy%/VRAM/temp from DRM sysfs, matched to devices by PCI id |
-| ~~0.9.2~~ | ~~Theming + display polish~~ | **shipped 2026-08-24.** `--theme dark\|light\|auto`; `--color auto` now honours NO_COLOR/TERM/isatty instead of aliasing `always` |
-| ~~0.9.3~~ | ~~AGNOS parity~~ | **shipped 2026-08-24.** TUI runs on AGNOS via `kbscan`/`winsize` polling. Root-caused an AGNOS kernel bug (12 KB usable of a 2 MB stack page) and fixed it upstream in cycle 1.56.46 |
-| ~~0.9.4~~ | ~~v1.0 readiness~~ | **shipped 2026-08-25.** Security audit PASS (14 confirmed of 38 raised); fractional `--rate`; swap/cached/buffers; benchmarks + audit artifacts; an `--agnos` CI gate and the literal-length gate the P-1 sweep specified. Two v1.0 criteria went unmet → met |
-| ~~0.9.5~~ | ~~design-spec §1 close-out~~ | **shipped 2026-08-25.** All six §1 features that were in scope since M0 now ship; found and fixed a double-count in the aggregate disk rate; `docs/cli-contract.md` written (criterion 1) and criterion 4 decided |
-| ~~0.9.6~~ | ~~toolchain + dependency refresh~~ | **shipped 2026-09-02.** cyrius `6.5.35` → `6.5.41` (one stdlib addition, zero removals; folded sandhi 1.9.15 fixes silent SSE event loss on the `?` overlay). `bayan` 1.5.2 → 1.5.4 after cyrius 6.5.39 reversed stdlib-vs-dep precedence and left the pin naming a file that no longer linked; **ai-hwaccel held at 2.3.19** per the mihi tracking rule, though 2.3.20 exists. Both manifests cut 328 → 130 lines. `scripts/check.sh` had drifted from `ci.yml` a third time — DCE parity, three security assertions, the `ai/*.cyr` glob and three required files were all missing locally; now 20 gates |
-| ~~0.9.7~~ | ~~no-libc for `shu-ai`~~ | **shipped 2026-09-02.** Removed the last libc bridge: `src/nolibc.cyr` refuses the libssl `dlopen` path, `fdlopen`/`dynlib` left `ai/cyrius.cyml`. Both binaries are pure-syscall (0 `NEEDED`), verified by capturing a real TLS 1.3 ClientHello. **`shu-ai` builds for AGNOS** — striking one of the three AGNOS blockers below |
-| ~~0.9.8~~ | ~~AGNOS process table~~ | **shipped 2026-09-02.** `proclist` #99 — the table renders on AGNOS for the first time, striking the second of the three v1.0 AGNOS blockers. Untracked columns read `n/a`, never a fabricated 0. Remaining gaps audited and filed in the agnos repo |
-| ~~0.9.9~~ | ~~AGNOS telemetry: MEM%~~ | **shipped 2026-09-03.** agnos 1.56.59 closed chakshu's telemetry filing in full. MEM% ships from `proclist` rss pages. CPU% and the disk rate were each **built or read, measured, and declined** — halt-inclusive ticks and a block band that misses the mainline I/O path would both have been confident wrong numbers. Cyrius 6.5.45 |
-| ~~0.10.0~~ | ~~AGNOS CPU%; Cyrius 6.6.0~~ | **shipped 2026-09-07.** agnos 1.56.60 added the halt exclusion chakshu filed for, so the CPU% column backed out at v0.9.9 now ships honestly. Cyrius 6.6.0 is a breaking minor and the deps moved with it. Lean artifact down to **399 KB** (DCE prunes again) |
-| ~~0.10.1~~ | ~~AGNOS disk + net rates~~ | **shipped 2026-09-07.** Both were declined at v0.9.9 for untrustworthy counters and both were fixed upstream in response; guarded on LBA size and NIC presence, and verified with agnos's counter-MOVED oracle |
-| ~~0.10.2~~ | ~~pid-0 sentinel fix; multi-core harness~~ | **shipped 2026-09-08.** Found a fabricated 59% CPU% by running the harness at `-smp 4` for the first time — the baseline map was keyed by pid and 0 is the hashmap empty sentinel. Filed with cyrius; nameless-row filter dropped now agnos 1.57.1 fixed the idle park. Cyrius 6.6.1 |
-| ~~0.10.3~~ | ~~Cyrius 6.6.2~~ | **shipped 2026-09-11.** Toolchain patch only; no source change |
-| ~~0.11.0~~ | ~~Cyrius 6.7.9; darshana 1.3.0; the darshana survey's defects~~ | **shipped 2026-10-12.** The 6.7 language minor needed no source change; it surfaced three build-config repairs (the `ai/` manifest's `${file:../VERSION}`, nolibc.cyr's refusals becoming redefinitions, niyama/bayan tags off the toolchain folds). darshana 1.3.0 replaced the hand-rolled SGR, TCIFLUSH, siginfo read and winsize guard; fixed C1 controls in every untrusted-text path, the aarch64 epoll tag, `shu \| head` leaving the terminal raw, the teardown order, and `?` killing shu on AGNOS |
-| ~~0.11.1~~ | ~~Cyrius 6.7.18; every dep at its latest~~ | **shipped 2026-10-31.** No logic change. darshana 1.7.0, mihi 1.3.2, ai-hwaccel 2.5.5 (mihi's pin), bayan 1.11.1 (the 6.7.18 fold); niyama already latest. darshana 1.5.0's AGNOS arm makes `tty_isatty` per-fd and `tty_flush_input` real on agnos ≥ 1.57.13. Shipped lean `shu` 458,520 B: the toolchain took 60 KB off, mihi/ai-hwaccel added 84 KB |
-| **1.0.0** | Ship as the AGNOS default monitor | Registry promotion, ISO default, announce |
+| ~~0.12.0~~ | ~~The CLI on cmdit; every contract question decided~~ | ✅ **shipped 2026-10-31.** No open question in `cli-contract.md`; identity bar run; `check.sh` green |
+| **0.12.1** | Fix what the freeze would lock in | `-p` line shape correct for every pid width; no byte-clipped UTF-8 anywhere |
+| **0.13.0** | v1.0 evidence and hygiene | §8 fully defined and re-measured; delta audit filed; required root files; AGNOS artifacts in `release.yml` |
+| **1.0.0** | Freeze and ship | contract marked frozen; distribution acts done |
 
 ---
 
 ## v1.0 criteria
 
 > Published here because [first-party-documentation.md:240] requires every repo to carry its own
-> v1.0 criteria list in its roadmap. chakshu did not have one until v0.9.4, and that omission is
-> exactly why the gaps below went unseen: the 1.0.0 section tracked five *distribution* acts and
-> not one quality gate, so the repo could look finished from the inside while its published
-> contract was wrong.
->
-> The ecosystem has no central bar — each repo publishes its own, and the count varies (rosnet six,
-> darshana five, hapi eight, kii twelve). Six is the modal shape and rosnet's list is the canonical
-> instance, adapted below for a **binary**, which freezes a CLI rather than a function surface.
+> list. A binary freezes a CLI rather than a function surface, so criterion 1 is the CLI contract.
+> The list follows rosnet's six, the modal shape in the ecosystem.
 
 | # | Criterion | State |
 |---|---|---|
-| 1 | **CLI surface frozen and documented** — every flag's argument shape, the exit-code matrix, and the semver policy for what forces a v2 | ⚠️ **documented (v0.9.5), not yet frozen.** [`docs/cli-contract.md`](../cli-contract.md) states the whole surface and the freeze/no-freeze split. It ends with **7 open questions** that must be settled before a 1.0 tag, because each is a breaking change afterwards — `--watch`'s optional argument, no `--`, no `--flag=value`, `-p` colliding with both incumbents, `--top` reading as a mode, `--explain` exiting 0 on an unreachable gateway, and inconsistent mode-incompatible-flag handling |
-| 2 | **Test coverage adequate for the surface** | ✅ **met (v0.9.5).** **179** monitor + 39 AI unit tests, 29 smoke gates, 14 PTY scenarios, 17 AGNOS-QEMU checks, plus the literal-length and toolchain-pin gates. Every flag in the frozen surface now has an exit-code gate, and the v0.9.5 parsers (per-core, per-device, per-interface, partition filter) are fixture-tested rather than only exercised against this host |
-| 3 | **Benchmarks captured** in `docs/benchmarks.md` | ✅ **met (v0.9.4).** Captured with a stated method and a committed harness (`tests/bench_tui.py`), including what is deliberately *not* benchmarked. Surfaced two unsettled §8 rows in the process: the 1 Hz CPU budget is met only by rounding and has no stated process count, and "first TUI frame < 50 ms" has no work-vs-wall definition |
-| 4 | **≥1 downstream consumer green** | ✅ **decided (v0.9.5) — substituted, with the reason recorded.** The criterion is meaningless as written for a binary with no library surface: nothing can import chakshu. Two candidates were considered and rejected — the AGNOS ISO (chakshu is not on it yet, so it would be circular) and "the smoke suite" (self-referential; a project cannot be its own downstream). The substitute is the property the criterion actually exists to check — *that the frozen surface is exercised by something other than its own unit tests*: `-p`'s pipe-safe output and the full flag surface are driven end-to-end on every push by `scripts/smoke.sh` (29 gates), `tests/integration_smoke.py` (14 PTY scenarios) and `tests/agnos_qemu.py` (17 checks on a real AGNOS kernel). ⚠ Reversible: if chakshu ever grows a library surface, restore the original criterion |
-| 5 | **CHANGELOG complete** from v0.1.0 onward | ✅ **met** |
-| 6 | **Security audit PASS** in `docs/audit/YYYY-MM-DD-audit.md` | ✅ **met (v0.9.4).** [`docs/audit/2026-08-25-audit.md`](../audit/2026-08-25-audit.md) — 4 surfaces, 38 raised, **14 confirmed** (24 refuted by an adversarial pass), all fixed and gated. Two HIGH: `--watch` silently dropped 23.7% of security events, and `$CHAKSHU_LOG_PATH` put the process environment into the AI prompt. GPU telemetry came back clean. Known gaps stated rather than hidden |
-
-**Additional gate, specific to this project's milestone —** see the decision block below.
+| 1 | **CLI surface frozen and documented**: every flag's argument shape, the exit-code matrix, the semver policy | ⚠️ **Settled, not frozen.** Every question in [`docs/cli-contract.md`](../cli-contract.md) was decided at v0.12.0 and is recorded there. It freezes at 1.0.0 |
+| 2 | **Test coverage adequate for the surface** | ✅ **Met.** 357 monitor + 53 AI unit assertions, smoke, 16 PTY scenarios, 35 AGNOS-QEMU checks, plus the literal-length, toolchain-pin and no-libc gates. The argument parser has its own unit groups since v0.12.0 (149 assertions through `cmdit_parse_argv`, mutation-checked 11/11) |
+| 3 | **Benchmarks captured** in `docs/benchmarks.md` | ⚠️ **Captured, but stale.** Taken at v0.9.6 on cyrius 6.5.41, three toolchain minors ago. It records a **miss** on the 1 Hz CPU budget (0.600 % against < 0.5 %), and §8's first-frame row has no definition. Re-measured in 0.13.0 |
+| 4 | **≥1 downstream consumer green** | ✅ **Substituted (v0.9.5), reason recorded.** Nothing can import a binary. The substitute checks what the criterion exists to check: the frozen surface is driven end to end on every push by `scripts/smoke.sh`, `tests/integration_smoke.py` and, on a real AGNOS kernel, `tests/agnos_qemu.py`. ⚠ Reversible: restore the original criterion if chakshu ever grows a library surface |
+| 5 | **CHANGELOG complete** from v0.1.0 onward | ✅ **Met** |
+| 6 | **Security audit PASS** in `docs/audit/` | ⚠️ **Met at v0.9.4** ([`2026-08-25-audit.md`](../audit/2026-08-25-audit.md): 38 raised, 14 confirmed, all fixed and gated). The standards require an audit before every release, and the AGNOS proclist parser, the C1/UTF-8 scrubbers, the no-libc refusal and sandhi 1.13 all postdate it. A delta audit lands in 0.13.0 |
 
 ---
 
-## 1.0.0 — Ship as the AGNOS default monitor
+## 0.12.0 — the CLI on cmdit, every contract question decided ✅ shipped 2026-10-31
 
-> ⛔ **BLOCKED ON A DECISION — the milestone's premise does not currently hold.**
->
-> The milestone is *"ship as the AGNOS default monitor"* and the announcement line is *"AGNOS ships
-> its own AI-augmented system monitor"*. On AGNOS today, verified by `tests/agnos_qemu.py` against a
-> real kernel:
->
-> - ~~the **process table is empty** and cannot be fixed from this repo — AGNOS exposes no procfs and
->   no process-enumeration syscall.~~
->   ⭐ **STRUCK at v0.9.8 — stale, like the libc reason before it.** agnos 1.56.47 minted
->   `#99 proclist` and the cyrius wrapper shipped in **6.5.35**, i.e. it was available under the pin
->   chakshu held *before* v0.9.6. Nothing re-read the syscall table, so the blocker outlived its own
->   fix. `src/proc_agnos.cyr` implements it; the table renders on a real kernel under QEMU and is
->   gated by three new `agnos_qemu.py` assertions. CPU%/MEM%/USER read `n/a` — the kernel tracks no
->   per-process cpu/rss and proclist carries no uid.
-> - **load, cpu, disk and net still render `n/a`** — these are genuine gaps, filed upstream;
-> - ~~**`shu-ai` cannot run at all** — sandhi dlopens libc, which AGNOS has no host for.~~
->   ⭐ **STRUCK at v0.9.7 — this reason was stale and is now false.** cyrius 6.1.21 had already made
->   the native TLS stack the default backend; chakshu was linking the libssl bridge only because
->   `lib/tls.cyr` compiles both transports in. `src/nolibc.cyr` removed it: `shu-ai` is pure-syscall
->   and `cyrius build --agnos main.cyr` produces a 2,880,824 B AGNOS ELF, gated in CI. `--with-logs`
->   fails closed on AGNOS (its validator needs procfs); `--explain` and the `?` overlay work.
->   **Two of the three reasons below still stand, and both are upstream.**
->
-> So on AGNOS the "AI-augmented system monitor" shows hostname, kernel, memory total, and a bare
-> column header with no rows — and neither half of the announcement is true there. Separately, the
-> release pipeline **produces no AGNOS artifact at all** (`release.yml`'s matrix is `x86_64-linux`
-> only), so there is currently nothing to make an ISO default.
->
-> Three honest options; the choice must be recorded here before a tag:
->
-> 1. **Hold 1.0** until AGNOS ships a process-enumeration syscall, then ship the milestone as written.
-> 2. **Cut 1.0 as the Linux monitor** — drop "AGNOS default" from the milestone and the
->    announcement, keep AGNOS as a supported-but-degraded target, and revisit the default at 1.1.
-> 3. **Ship as the AGNOS default anyway**, with the degradation documented and surfaced in the UI,
->    on the argument that hostname/kernel/memory beats no first-party monitor at all.
->
-> Whichever is chosen, these are prerequisites for *any* of them: an AGNOS target in the release
-> matrix (or a written statement that AGNOS users build from source), the kernel-cycle-1.56.46
-> requirement encoded in the zugot recipe, and a user-facing message where the process table is
-> empty — `src/tui.cyr` already argues in its own comments that an empty field "reads as a render
-> bug" while `n/a` is "the honest answer", and then does not apply that rule to the primary panel.
+Detail in the CHANGELOG's `[0.12.0]`. The parser is `src/cli_parse.cyr` (pure, on cmdit 1.5.0,
+unit-tested); `src/cli.cyr` dispatches.
 
-- [ ] Promote in agnosticos `shared-crates.md`: Pre-1.0 → v1.0+ Stable Index.
-- [ ] Add `docs/applications/libs/chakshu.md` in agnosticos (flat `.md`, **not** a directory), **and**
-      a row in `docs/applications/binaries.md` — chakshu ships a binary, and omitting the destination
-      row while deleting the pre-1.0 row is the half-done-graduation failure `shared-crates.md`'s own
-      header warns about. Note the standards doc lives at
-      `docs/development/first-party/first-party-standards.md` (CLAUDE.md links a path that does not exist).
-- [ ] zugot recipe → AGNOS ISO default.
-- [ ] Keep the Bazaar `htop` / `btop` recipes available — don't break user choice.
-- [ ] Announce: AGNOS ships its own AI-augmented system monitor.
+- [x] Q1–Q10 decided and recorded in `docs/cli-contract.md`.
+- [x] `[deps.cmdit] tag = "1.5.0"` in both manifests.
+- [x] `chakshu_main` split into parse → config and dispatch; the parse is driven with synthetic argv
+      in `tests/chakshu.tcyr`.
+- [x] `--rows`/`--top`, `--pid` and `--explain` are strict integers (`5x` and overflow refused).
+- [x] `--pid N --help` prints help.
+- [x] `--` and `--flag=value`.
+- [x] Identity bar against v0.11.1: 68 lean and 9 `shu-ai` invocations; every difference is a
+      decision above or a deliberate wording change, listed in the CHANGELOG.
+- [x] design-spec §5 and §7 match `shu --help`.
+
+## 0.12.1 — fix what the freeze would lock in
+
+A patch, corrective only. Each item is either part of the `-p` line contract, which freezes at
+1.0, or a render defect.
+
+- [ ] **The `-p` PID column overflows at 7 digits.** It is 6 wide (`   PID`), and Linux's
+      `pid_max` reaches 4,194,304, so a 7-digit pid pushes its whole row one column right. Seen on
+      this box at v0.11.1. Size it to the widest pid in the frame, as the TUI does (`pid_w`,
+      `src/tui.cyr:1401`), or fix it at 7.
+- [ ] **`-p`'s `disk:` and `net:` lines end in two spaces.** A pipe-safe line contract should not
+      freeze trailing whitespace.
+- [ ] **The CMD column and the focus panel clip by bytes**, not characters (`src/tui.cyr:1401`,
+      `:894`). A UTF-8 cmdline can be cut mid-sequence and leave a lone lead byte at the line's
+      end. `_ai_overlay_put` (`src/ai.cyr:1157`) already cuts only at a UTF-8 boundary, but
+      `src/ai.cyr` is AI-build only, so move that cut into shared code. Byte-clipping never
+      overflows the line, because no UTF-8 character is wider in columns than in bytes.
+- [ ] **The AGNOS TUI entry should check `tty_isatty(1)`.** `tui_run`'s AGNOS arm
+      (`src/tui.cyr:1679`) gates on the console grid alone, because agnos had no isatty. agnos
+      1.57.13 added `fd_kind#111`, which darshana ≥ 1.5.0's `tty_isatty` uses, so `shu > file`
+      on AGNOS is detectable. Gate it on `tty_isatty_is_per_fd() == 1` so an older kernel keeps
+      today's behaviour.
+- [ ] A PTY scenario for each render fix: a 7-digit pid row, a multibyte cmdline cut at the
+      width. The TUI render path is the least-covered surface (state.md).
+
+## 0.13.0 — v1.0 evidence and hygiene
+
+A minor, because §8 changes. Nothing here adds a feature.
+
+- [ ] **Settle §8's two undefined rows** (decisions D1 and D2), then re-capture
+      `docs/benchmarks.md` on the current toolchain with `tests/bench_tui.py`. If the CPU budget
+      is still missed at the named workload, apply benchmarks.md's own lead: make the rest of the
+      per-pid walk lazy, as the USER read was (0.866 % → 0.517 %).
+- [ ] **Make §8's size row name the shipped (DCE'd) binary.** With cmdit the plain lean build is
+      791,016 B, over 768 KB, while the shipped one is 483,816 B. The row has always meant the
+      shipped binary, but it does not say so.
+- [ ] **Delta security audit** → `docs/audit/YYYY-MM-DD-audit.md`, covering what postdates
+      2026-08-25:
+  - the AGNOS proclist parser (`src/proc_agnos.cyr`);
+  - every `tty_sanitize_buf` path (comm, cmdline, log lines, the watch ring, the model's answer);
+  - the `src/nolibc.cyr` refusal under 6.6.20's last-definition binding;
+  - the cmdit parse surface;
+  - sandhi 1.10 → 1.13 (the hoosh transport);
+  - `--watch`'s NDJSON reader and `--with-logs`' path validator, re-read against today's code.
+- [ ] **Required root files**: `SECURITY.md` and `CODE_OF_CONDUCT.md`. The standards say every
+      repo ships them and that `cyrius init` scaffolds them; take them from its templates rather
+      than hand-rolling.
+- [ ] **AGNOS artifacts in `release.yml`**: `shu-agnos` and `shu-ai-agnos`, as owl and kii already
+      ship theirs. The runner cannot execute them, so the release job checks the ELF and
+      `agnos_qemu.py` stays a pre-tag step.
+- [ ] **`scripts/version-bump.sh`**, from the standards' layout. A cut edits `VERSION`,
+      `CHAKSHU_VERSION` and the CHANGELOG by hand today, and `check.sh` only catches a mismatch
+      afterwards.
+- [ ] **State the process ceiling.** `PROC_MAX` is a hard 8,192 (`src/processes.cyr:35`), coupled
+      to `_tui_filtered_idx`. Past it, processes are left out of the table, the busiest
+      included. Either document it under the contract's limits or size both from the live count.
+- [ ] Record the AGNOS decision (D3) and the versioning ADR (D4).
+
+## 1.0.0 — freeze and ship
+
+- [ ] `docs/cli-contract.md` status → **frozen**. Criterion 1 met.
+- [ ] Run the manual checklist (`tests/MANUAL.md`) and `tests/agnos_qemu.py` on the release
+      candidate.
+- [ ] agnosticos: move chakshu from the Pre-1.0 table in
+      `docs/development/planning/shared-crates.md` to the v1.0+ index. Add
+      `docs/applications/libs/chakshu.md` (a flat `.md`, like `cyim.md` and `iam.md`) **and** a row
+      in `docs/applications/binaries.md`. Leaving out the destination row while deleting the
+      pre-1.0 row is the half-done graduation `shared-crates.md` warns about.
+- [ ] zugot: `base/chakshu.cyml`, on the `base/owl.cyml` pattern (install the release tarball),
+      in groups `base` / `core` / `tier1`. Encode the minimum agnos kernel: ≥ 1.57.1 for everything
+      `agnos_qemu.py` checks, ≥ 1.57.13 for darshana's per-fd isatty and typeahead flush. Confirm
+      the floor by running the harness on that kernel before writing it in.
+- [ ] AGNOS ISO: chakshu is already planned as a T1 base-CLI component
+      (`agnosticos/docs/development/iso-stage4-plan.md`).
+- [ ] Keep the Bazaar `htop` / `btop` recipes available. Don't break user choice.
+- [ ] Announce. The wording follows D3.
 
 ---
 
-## Found at v0.11.0, not scheduled
+## Decisions before the freeze
 
-- [ ] **aarch64: the process table never renders.** `shu -p` on a Raspberry Pi 4 (Linux
-      7.0.0-1020-raspi) prints every header line through `net:` and then spins at 100% CPU
-      until killed; under qemu-aarch64 the same binary exits 2 at the same point; the TUI hangs
-      mid-way through its first frame. **Pre-existing**: the v0.10.3 tree built with cyrius
-      6.6.2 behaves identically, so it is not a 6.7 regression. `dir_list_into` over `/proc` and
-      `map_u64_*` work on aarch64 in isolation, and the unit suite passes on the Pi itself
-      (208/208), so the fault is somewhere in the per-pid sample → sort → render path. aarch64 is
-      not a supported target (state.md), so this is recorded rather than scheduled — but it blocks
-      proving the v0.11.0 epoll-tag fix end to end on ARM. That fix is proven by the unit suite on
-      the Pi instead: with the old `+4` read the tag comes back as `0x25A5A5A5A`, not 2.
-- [x] **Move mihi / ai-hwaccel when mihi pins a 6.7-built ai-hwaccel.** Done at v0.11.1
-      (mihi 1.3.2, ai-hwaccel 2.5.5). The three `bayan_json_v_obj_get` deprecation warnings in
-      `shu-ai` are gone. ⚠ This item's other claim was wrong: the lean build's `undefined function
-      'bayan_json_v_*'` warnings did not clear. They rose from 7 to 10, because 2.5.5's
-      `profile_from_json` checks reference three more. They are unreachable and DCE removes them,
-      as mihi 1.3.1 documents. They clear only if ai-hwaccel stops referencing bayan without
-      requiring it, or if chakshu supplies `bayan-json`, which would add bytes to silence a warning.
+Each decision becomes a breaking change once 1.0 is tagged. Recommendations are proposals; the
+owner decides.
 
-## Found at v0.11.1, not scheduled
+### The CLI — decided and implemented at v0.12.0
 
-- [ ] **The AGNOS TUI entry could check `tty_isatty(1)`.** `tui_run`'s AGNOS arm gates on the
-      console grid alone, because agnos had no isatty equivalent. agnos 1.57.13 added `fd_kind#111`,
-      and darshana ≥ 1.5.0's `tty_isatty` uses it, so `shu > file` on AGNOS is detectable now.
-      Gate it on `tty_isatty_is_per_fd() == 1` so an older kernel, where `tty_isatty` answers
-      about the console, keeps today's behaviour. This is a behaviour change, so it is not part of
-      a dependency patch.
+Each recommendation below was taken as written; `docs/cli-contract.md` records the outcome.
+
+| # | Question | Before 0.12.0 | Recommendation (taken) |
+|---|---|---|---|
+| Q1 | `--watch`'s optional argument | swallows the next non-`-` token: `shu --watch 5` opens a file named `5` (exit 1) | A required-value `--watch-path P` beside a bare `--watch`. cmdit has no optional-value flags (its v2 backlog). `CHAKSHU_WATCH_PATH` keeps working through `watch_resolve_path`, not `cmdit_env` (see below) |
+| Q2 | `--` end of options | `shu --` exits 2 | Accept it (free with cmdit) |
+| Q3 | `--flag=value` | `--sort=cpu` exits 2 | Accept it (free with cmdit). htop's surface is all `--key=value` |
+| Q4 | `-p` has no long form, and collides with `htop -p` and `btop -p` | `--plain` exits 2 | Add `--plain`; `-p` stays as its short form |
+| Q5 | `--top` reads as a mode and collides with `top(1)` | — | Add `--rows`, keeping `--top` as a `cmdit_long_alias`. cmdit 1.3.6 added long aliases for flags; the old plan said only verbs had them |
+| Q6 | `--explain` exits 0 when hoosh is unreachable | exit 0, prints the redacted context | Exit 1, still printing the context. `with_logs_smoke.py` needs only the printed context, so check it rather than the status |
+| Q7 | Mode-incompatible flags | `-p --pid 1` exits 2, but `-p --rate 5`, `-p --color always`, `-p --theme light` and `--explain 1 -p` are silent no-ops | One rule: a flag given explicitly to a mode that ignores it exits 2. `cmdit_seen` makes "given explicitly" checkable. Note `--color` and `--theme` do apply to `--watch` |
+| Q8 | AI-only flags in the lean `shu` | `--with-logs` exits **2** ("needs the AI build"); `--explain 1` exits **1** ("not in this build") | Both exit 2. The invocation is wrong for this binary, and that is known before any work starts |
+| Q9 | A flag given twice | last wins (`--top 3 --top 4` → 4), undocumented | Keep last-wins, and document it. Use `cmdit_once` only if this is reversed |
+| Q10 | Enum case | `--sort CPU` exits 2 | Keep it case-sensitive; `cmdit_enum_nocase` exists if wanted |
+
+### The design contract (land in 0.13.0)
+
+| # | Question | Recommendation |
+|---|---|---|
+| D1 | §8's CPU budget (< 0.5 % of a core at 1 Hz) names no workload, and its cost is linear in the process count | State it per process count, e.g. "< 0.5 % at 300 processes", and benchmark at that count |
+| D2 | §8's "first TUI frame < 50 ms" has no definition: first bytes take 1.0 ms, the first complete frame ~109 ms (the 100 ms sample window) | Define it as first bytes, plus a separate row for the first complete frame stated as window + work, as the `-p` row already is |
+| D3 | The milestone premise: "ship as the AGNOS default monitor" | See below |
+| D4 | Versioning: the standards put binaries on CalVer; chakshu, like hapi, kii, owl and cyim, is SemVer with a CLI contract | Keep SemVer; record it in ADR 0002 |
+
+### D3 — the AGNOS premise, re-read on 2026-10-31
+
+The decision block this file carried until v0.11.1 listed three blockers. **Two are struck** and
+the third is down to one field. On agnos 1.57.14 under QEMU (`agnos_qemu.py`, 35/35):
+
+- the process table renders (`proclist` #99), with CPU%, MEM% and USER;
+- the cpu, disk and net rates are real numbers;
+- the TUI, the filter, the kill confirm and the `?` overlay all work;
+- `shu-ai` builds for AGNOS.
+
+What remains degraded on AGNOS: **load average reads `n/a`** (upstream; see below), and
+`--with-logs` fails closed, because its path validator needs procfs.
+
+⚠ **New constraint.** The first base ISO deliberately excludes the T4 AI layer, hoosh included
+(`iso-stage4-plan.md`). So on the base image `shu-ai` would have no gateway, and "AI-augmented"
+would not be true there.
+
+**Recommendation:** ship 1.0 as the AGNOS default monitor with the lean `shu` in the T1 base image.
+`shu-ai` joins the AI profile when hoosh ships. The announcement then reads "AGNOS ships its own
+system monitor", plus "AI-augmented under the AI profile".
 
 ---
 
-## Blocked upstream (not schedulable here)
+## Adopting cmdit 1.5.0 — done
 
-- ~~**Process table on AGNOS.**~~ **RESOLVED at v0.9.8** — `#99 proclist` (agnos
-  1.56.47, cyrius wrapper since 6.5.35). Implemented in `src/proc_agnos.cyr`.
-- **Per-process CPU time, RSS and uid on AGNOS.** proclist reserves `+56` for cpu
-  and rss and the kernel does not track them yet; the record carries no uid. So
-  CPU%, MEM% and USER read `n/a`. Filed upstream.
-- **Disk and network I/O counters on AGNOS.** No equivalent of `/proc/diskstats`
-  or `/proc/net/dev`, so the `disk:` and `net:` RATE lines read `n/a`. Volume
-  *capacity* is available (`statfs` #103, `blk_enum` #75) and is a separate,
-  implementable panel. Filed upstream.
-- **Load average on AGNOS.** agnos `sysinfo` #35 is a 40-byte struct with no
-  `loads[]`. Filed upstream.
+Implemented at v0.12.0. The site map this section held is now code:
+`src/cli_parse.cyr` registers every flag on cmdit, maps its errors onto chakshu's messages (the
+flag named as typed, echoed text sanitized), and applies the mode rules; `src/cli.cyr` keeps
+`print_help` / `print_version` (stdout, `Usage: shu`) and dispatches. Two choices worth knowing:
+
+- **`CHAKSHU_WATCH_PATH` is not a `cmdit_env` fallback.** `cmdit_seen` counts an env-set value as
+  seen, so `CHAKSHU_WATCH_PATH=… shu -p` would have tripped Q7's rule. The env fallback stays in
+  `watch_resolve_path` (`src/watch_render.cyr`).
+- **`--rate` stays a `cmdit_str`** validated by `parse_rate_mhz`: float flags are on cmdit's v2
+  backlog.
+
+---
+
+## Improvements — optional, additive in any 1.x
+
+None gates 1.0; each is allowed after the freeze by the contract's semver policy.
+
+- **Shell completions** from `cmdit_completions(h, shell)` (bash, zsh, fish), behind a
+  `--completions SHELL` flag or as files in the release tarball.
+- **A man page.** Low value on AGNOS, which has no man viewer in any ISO tier, but expected by
+  Linux packagers.
+- **aarch64: the process table never renders.** `shu -p` on a Raspberry Pi 4 prints every header
+  line through `net:`, then spins at 100 % CPU; under qemu-aarch64 it exits 2 at the same point.
+  It is pre-existing (v0.10.3 behaves the same). The unit suite passes on the Pi (208/208), so the
+  fault is in the per-pid sample → sort → render path. aarch64 is not a supported target, and its
+  lean build is over the 768 KB target. Fix before adding it to the release matrix.
+- **The lean build's ten `undefined function 'bayan_json_v_*'` warnings** are ai-hwaccel 2.5.5
+  code that is never reached, and DCE removes it. They clear when ai-hwaccel stops referencing
+  bayan without requiring it. Supplying `bayan-json` would add bytes only to silence a warning.
+
+---
+
+## Blocked upstream
+
+- **Load average on AGNOS.** agnos `sysinfo` #35 is a 40-byte struct with no `loads[]`, so `load:`
+  reads `n/a`. Filed upstream. (The process table, per-process CPU% / MEM%, and the disk and net
+  counters that used to be listed here were all resolved by v0.10.1; see the CHANGELOG.)
 
 ---
 
 ## Post-v1 (deferred — do not pull into earlier milestones)
 
-- Per-cgroup view, without becoming a container monitor (different scope).
-- Historical replay — chakshu over a sakshi-backed time-series store.
-- Mobile / dashboard frontends: same backend, different render layer.
-- Themed glyphs / non-ASCII art mode (btop-style).
-- Focus-panel depth: threads list, fd enumeration, and per-focused-pid CPU%
-  (`src/tui.cyr` head comment). None gates v1.0 — the focus panel already shows
-  status, cmdline and the kill flow.
-- Plugin surface for custom panels.
+- Per-cgroup view, without becoming a container monitor.
+- Historical replay: chakshu over a sakshi-backed time-series store.
+- Mobile / dashboard frontends: same backend, a different render layer.
+- Themed glyphs / a non-ASCII art mode (btop-style).
+- Focus-panel depth: a thread list, fd enumeration, per-pid CPU% for the focused process. The
+  focus panel already shows status, cmdline and the kill flow.
+- A plugin surface for custom panels.
+
+---
+
+## Completed milestones
+
+Per-release detail is in the CHANGELOG.
+
+| Milestone | Closed | |
+|---|---|---|
+| M0 Scaffold | v0.1.x | build, test, `--version` / `--help` |
+| M1 Plain snapshot | v0.2.0 | `shu -p` |
+| M2 Full TUI | v0.5.0 | on darshana; no termios or ANSI of chakshu's own |
+| M2.5 mihi integration | v0.6.0 | identity probes, the GPU panel |
+| M3 AI integration | v0.8.2 | `--explain`, the `?` overlay, `--watch`, `--with-logs`, the hoosh gate |
+| M4 Polish + perf | v0.9.0 – v0.9.3 | §8 runtime targets, GPU depth, theming, AGNOS parity |
+| AGNOS target | v0.9.3 – v0.10.1 | TUI, process table, CPU% / MEM%, disk and net rates on a real kernel |
+| M5 v1.0 ship | *open* | this file |
 
 ---
 
@@ -186,112 +267,11 @@ inside it are additive or corrective only.
 
 These bind every release above; they are not work items.
 
-- **No libc, no FFI, no ncurses in the lean `shu`.** Documented exception:
-  ~~`shu-ai` pulls sandhi, which dlopens libc~~ — **exception removed at v0.9.7**;
-  both binaries are now statically linked, pure-syscall, zero `NEEDED`.
-- **AI is opt-in at the binary level** — the lean `shu` cannot reach the network
-  at all. Enforced in CI since v0.7.13.
-- **Privacy**: prompts carry only what the user can already see in the TUI. No
-  `/home` contents, no env vars, no unredacted cmdline.
-- **Version bumps at milestone close, not per feature** — patches inside a minor
-  are additive or corrective only.
-
----
-
-## Adopting cmdit (CLI parsing)
-
-This is demand-gated, not a forced sweep, but the **timing** matters. v1.0 criterion 1 freezes the
-CLI (`docs/cli-contract.md`). Before that, syntax changes cost nothing; after it, each one is a
-semver event. chakshu is a Tier-3 candidate in the 2026-06-25 ecosystem CLI review
-(`agnosticos/docs/development/planning/cmdit.md`).
-
-**What is hand-rolled.** `chakshu_main` (`src/cli.cyr:88-392`) is shared by both entries
-(`src/main.cyr`, `ai/main.cyr`). It already has cmdit's shape: accumulate, then dispatch. Underneath
-it is `args_init`/`argc`/`argv` + `streq`, values must be space-separated, there is no `--`, and
-any non-flag token is reported as `unknown flag` (`:345`). The exit codes 0/1/2 (`:13-15`) are
-exactly `CMDIT_EXIT_OK/RUN/USAGE`. Help (`:22-61`) and version (`:17-20`) go to **stdout**. Every
-error is a custom `chakshu: …` line on stderr that echoes the bad token or value (`:81-86`,
-`:167-169`, `:235-237`, `:254-256`).
-
-**Site → cmdit.**
-
-- [ ] `cmdit_new("chakshu")`. The automatic `-h`/`--help` and `-V`/`--version` match exactly, and
-      so does help-before-version (`:349-350`). Keep `CHAKSHU_VERSION` at `:10`, because
-      `.github/workflows/ci.yml:474`, `release.yml:55` and `scripts/check.sh:191` grep for it there.
-- [ ] `-p` → `cmdit_bool(h, 112, 0, …)`, since cmdit allows a short-only flag. The `--plain` from
-      open question 4 is the same call with a long name.
-- [ ] `--sort cpu|mem|pid|name|user` (`:155-174`) → `cmdit_enum`; the index is
-      `SORT_CPU..SORT_USER` (`src/processes.cyr:43-47`). `--theme dark|light|auto` (`:225-242`) is
-      0/1/2 the same way. `--color auto|always|never` (`:244-261`) stores 1/2/0, so it needs a
-      small mapping table.
-- [ ] `--top`, `--pid` and `--explain` (`:203-216`, `:267-276`, `:298-307`) → `cmdit_int` +
-      `cmdit_range(h, f, 1, <i64 max>)`. Stdlib `atoi` accepts `5x` as 5 and wraps on overflow,
-      and cmdit rejects both. Move the `--pid` `/proc` probe (`:277-288`, exit 1) to after
-      help/version dispatch. Then `--pid 99999 --help` prints help, following the contract's
-      "help wins" rule.
-- [ ] `--with-logs` → `cmdit_bool`. The pre-scan (`:101-113`) exists only for order independence,
-      and reading the flag after the parse already gives that. In the lean build,
-      `shu --with-logs --bogus` then reports the unknown flag instead of "needs the AI build"
-      (both exit 2).
-- [ ] Mode precedence (`:348-391`) and the `--watch` × `-p`/`--pid` and `-p` × `--pid` rejections
-      (`:366-383`) stay as they are. The comment at `:120-122` says "the last one wins", but the
-      code implements a fixed precedence.
-
-**Gaps.**
-
-- **`--watch [PATH]` (`:328-339`) has no cmdit equivalent**, because optional-value flags are in the
-  v2 backlog. This is contract open question 1, so settle it first. Both options the contract
-  names can be expressed in cmdit:
-  - **`--watch-path P`**: `cmdit_env(h, f, "CHAKSHU_WATCH_PATH")` reproduces the CLI → env →
-    default order of `src/watch_render.cyr:15-19`.
-  - **A required argument**: a plain `cmdit_str`.
-  - **Stopgap closest to today**: `--watch` as a bool plus at most one positional
-    (`cmdit_require_positionals_max(h, 1)`), rejected unless `--watch` is set. It is looser than
-    today, because PATH no longer has to follow `--watch` directly.
-- `--rate` is a float flag (v2 backlog): fixed-point milli-Hz, 0.2–10, parsed in
-  `src/rate.cyr:33`. It stays `cmdit_str` + `parse_rate_mhz` + the bounds at `:188-195`, and does
-  not block adoption.
-- Open question 5, renaming `--top` but keeping it as an alias, would take two registrations,
-  because cmdit only supports long aliases for verbs.
-- `NO_COLOR`/`TERM`/`COLORFGBG` (`src/tui.cyr:367-386`) drive `auto` resolution and are not
-  fallbacks for any flag. `CHAKSHU_HOOSH_*`/`CHAKSHU_MODEL`/`CHAKSHU_LOG_PATH`
-  (`src/ai.cyr:850`, `:960`) are read from the environment only. All of these stay caller-side.
-  The `CHAKSHU_*` allowlist at `check.sh:177` scans the AI source, not `lib/`, so cmdit's own
-  `getenv` does not trip it.
-- Adopting cmdit also answers open questions 2 and 3: `--` and `--flag=value` start working. The
-  contract counts both as additive. Its line "`--flag=value` is **not** accepted" must change in the
-  same commit.
-
-**Output identity.** Keep `print_help`/`print_version` and the custom messages, and branch on
-`cmdit_error(h)` + `cmdit_err_flag(h)`. `cmdit_help_flags` writes to stderr. The contract puts help
-on stdout, and `scripts/smoke.sh:53-58` captures it there. `cmdit_help` would print `Usage:
-chakshu`, while the binary is `shu`. `cmdit_print_error` echoes no token, and cmdit does not store
-the unknown token or the rejected value. So the `'foo'`/`--bogus` echoes must come from
-`cmdit_raw_argv`.
-
-**Manifests — both of them.** The AI build has its own manifest (`ai/cyrius.cyml`). Neither manifest
-declares stdlib `flags`, and both already carry `"args"` and `"io"`. kii and anuenue already pin
-cmdit under cyrius 6.7.9. Add this to `cyrius.cyml` **and** `ai/cyrius.cyml`:
-
-    [deps.cmdit]
-    git = "https://github.com/MacCracken/cmdit.git"
-    tag = "1.3.0"
-    modules = ["dist/cmdit.cyr"]
-
-**Tests and gates.** No unit test drives `chakshu_main`. `tests/chakshu.tcyr` includes modules
-directly (`:4-6`). Its `parse_rate_mhz` group (`:601-621`) stays, and `:58-59` are cosmetic `streq`
-checks. The bar is `scripts/smoke.sh`, which `scripts/check.sh` runs against `shu`, `shu-ai` and the
-DCE'd `shu` (`:76`, `:89`, `:122`). It checks help parity on stdout (`:53-58`), that an unknown flag
-exits 2 with stderr only (`:76-82`), build-aware `--with-logs` (`:96-108`), `--watch` combinations
-(`:161-168`), `--top` (`:262-273`), `--sort foo` with "unknown key" (`:298-304`) and the rejection
-matrix (`:309-328`). The PTY gates drive flags too: `tests/integration_smoke.py:167`, `:246`, `:406`,
-`:593-594`, `:620`, `tests/with_logs_smoke.py:124-125` and `tests/hoosh_stub_smoke.py:93`.
-
-- [ ] Identity bar: byte-compare stdout, stderr and exit status before and after, for every
-      invocation above plus `--bogus`, `foo`, `--sort` (no value), `--top 5x` and
-      `--pid 99999 --help`. Each changed line must be either intended, and recorded in the CHANGELOG
-      and `docs/cli-contract.md`, or fixed.
-
-References: cmdit `README.md` (API reference), `docs/adr/0001-flag-modifiers.md` (scope),
-`docs/development/roadmap.md` (v2 backlog: optional-value and float flags). Worked examples: kii,
-anuenue (custom help framing), dig (Tier-3).
+- **No libc, no FFI, no ncurses**, in either binary. Both are static, pure-syscall, zero `NEEDED`
+  (since v0.9.7).
+- **AI is opt-in at the binary level.** The lean `shu` cannot reach the network at all; enforced in
+  CI.
+- **Privacy:** prompts carry only what the user can already see in the TUI. No `/home` contents, no
+  environment variables, no unredacted cmdline.
+- **Version bumps at milestone close, not per feature**, and always the owner's call. Patches
+  inside a minor are additive or corrective only.

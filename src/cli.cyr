@@ -1,5 +1,5 @@
-# cli.cyr — shared CLI surface: version/help, stderr helpers, arg
-# parsing + mode dispatch. Included by BOTH build entries:
+# cli.cyr — shared CLI surface: version/help, stderr helpers, and mode
+# dispatch. The parsing is src/cli_parse.cyr (pure, on cmdit, unit-tested). Included by BOTH build entries:
 #   - src/main.cyr  → lean `shu`   (monitor only; ai_stub.cyr)
 #   - ai/main.cyr   → `shu-ai`     (adds src/ai.cyr + sandhi/niyama)
 # Both call chakshu_main(). The only difference between the binaries is
@@ -7,7 +7,7 @@
 # logic lives here once. `ai_explain` resolves to whichever is included.
 
 # Keep CHAKSHU_VERSION in sync with the VERSION file.
-var CHAKSHU_VERSION = "chakshu 0.11.1";
+var CHAKSHU_VERSION = "chakshu 0.12.0";
 
 # Exit codes per design-spec §9
 var EXIT_OK    = 0;
@@ -27,33 +27,39 @@ fn print_help() {
     println("  shu -p                   Plain snapshot (host/uptime/load/mem/cpu/disk/net + top-N process table)");
     println("  shu --pid <PID>          Focus a single process (status / cmdline / k to kill)");
     println("  shu --explain <PID>      AI explain via hoosh (shu-ai build only)");
-    println("  shu --watch [PATH]       Anomaly stream — tail aegis security events");
+    println("  shu --watch              Anomaly stream — tail aegis security events");
     println("");
     println("Options:");
-    println("  -p                        Plain snapshot mode (single frame to stdout)");
+    println("  -p, --plain               Plain snapshot mode (single frame to stdout)");
     println("  --sort cpu|mem|pid|name|user  Process-table sort key (default cpu)");
-    println("  --top N                   Process-table row count (default 10)");
-    println("  --rate <HZ>               TUI refresh rate, 0.2-10, default 1. Fractional");
-    println("                            accepted: 0.5 = 2s (btop's default), 0.667 = 1.5s");
-    println("                            (htop's default).");
-    println("  --color <when>            auto | always | never (default auto; TUI only)");
+    println("  --rows N                  Process-table row count (default 10). --top is the");
+    println("                            same flag.");
+    println("  --rate <HZ>               Refresh rate for the TUI and --watch, 0.2-10,");
+    println("                            default 1. Fractional accepted: 0.5 = 2s (btop's");
+    println("                            default), 0.667 = 1.5s (htop's default).");
+    println("  --color <when>            auto | always | never (default auto; TUI, --watch)");
     println("                            auto honours $NO_COLOR, $TERM and whether");
     println("                            stdout is a terminal.");
-    println("  --theme <name>            dark | light | auto (default dark; TUI only)");
+    println("  --theme <name>            dark | light | auto (default dark; TUI, --watch)");
     println("                            light re-tints the colours that are unreadable");
     println("                            on a white background; auto reads $COLORFGBG.");
     println("  --pid <PID>               Focus a single process (validates PID exists at startup)");
-    println("  --explain <PID>           Ask hoosh to explain PID and exit (shu-ai build; redacted context)");
-    println("  --watch [PATH]            Anomaly stream mode. Reads aegis's append-only");
-    println("                            NDJSON event log. Path resolution: this argument,");
-    println("                            then $CHAKSHU_WATCH_PATH, then");
-    println("                            /var/log/aegis/events.jsonl. Non-TTY prints a");
-    println("                            plain dump; a TTY gets the live panel.");
+    println("  --explain <PID>           Ask hoosh to explain PID and exit (shu-ai build;");
+    println("                            redacted context). Exits 1 if hoosh does not answer,");
+    println("                            after printing the context it would have sent.");
+    println("  --watch                   Anomaly stream mode. Reads aegis's append-only");
+    println("                            NDJSON event log. Non-TTY prints a plain dump;");
+    println("                            a TTY gets the live panel.");
+    println("  --watch-path <PATH>       The log --watch reads. Default: $CHAKSHU_WATCH_PATH,");
+    println("                            then /var/log/aegis/events.jsonl.");
     println("  --with-logs               Fold recent log + anomaly context into AI prompts");
     println("                            (shu-ai only; off by default). Log path:");
     println("                            $CHAKSHU_LOG_PATH, else /var/log/aegis/aegis.log.");
     println("  -h, --help                Show this help");
     println("  -V, --version             Show version");
+    println("");
+    println("A value may follow its flag or be attached: --sort mem, --sort=mem. `--`");
+    println("ends the options. A flag the chosen mode does not use is an error.");
     println("");
     println("Builds: lean `shu` is the monitor; `shu-ai` adds the AI panel");
     println("(--explain / ? via the hoosh gateway). See docs/development/roadmap.md.");
@@ -78,316 +84,57 @@ fn eprintln(s) {
     return 0;
 }
 
-fn print_unknown_flag(flag) {
-    eprint_cstr("chakshu: unknown flag: ");
-    eprintln(flag);
-    eprintln("Try 'shu --help' for usage.");
-    return EXIT_USAGE;
+# --pid's existence probe. It opens /proc, so it is not in the pure parser, and
+# it runs only once the TUI is the chosen mode: help, version and every usage
+# error come first (`--pid 99999 --help` prints help).
+fn _cli_pid_exists(pid) {
+    var pid_str_v[24];
+    _proc_int_to_cstr(pid, &pid_str_v);
+    var stat_path_v[64];
+    proc_pid_path(&pid_str_v, "/stat", &stat_path_v);
+    var fd_v = file_open(&stat_path_v, 0, 0);
+    if (fd_v < 0) {
+        eprint_cstr("chakshu: --pid ");
+        eprint_cstr(&pid_str_v);
+        eprintln(": no such process");
+        return 0;
+    }
+    file_close(fd_v);
+    return 1;
 }
 
+# Parse (src/cli_parse.cyr, on cmdit), then run the one mode the command line
+# chose. Mode precedence and every combination rule live in the parser; this
+# function only maps results to exit codes and calls the mode.
 fn chakshu_main() {
-    args_init();
-
-    var n = argc();
-
-    # v0.8.1: --with-logs is resolved in a PRE-SCAN, before the main arg loop.
-    # ⚠ The ORIGINAL reason no longer applies — `--explain` accumulated into a
-    # mode at v0.9.4 and no longer returns from inside the loop, so a modifier
-    # applied at dispatch time WOULD now reach it. The pre-scan stays because of
-    # its second property, which is the one that actually matters: it makes the
-    # modifier ORDER-INDEPENDENT, so `--with-logs --explain 1` and
-    # `--explain 1 --with-logs` behave identically without --with-logs having to
-    # be parsed before every mode it can modify.
-    var wl = 0;
-    var wi = 1;
-    while (wi < n) {
-        if (streq(argv(wi), "--with-logs") == 1) { wl = 1; }
-        wi = wi + 1;
+    var rc = cli_parse_process(ai_build());
+    if (rc == CLI_HELP)    { return print_help(); }
+    if (rc == CLI_VERSION) { return print_version(); }
+    if (rc == CLI_USAGE) {
+        eprintln(cli_err());
+        return EXIT_USAGE;
     }
-    if (wl == 1) {
-        if (ai_set_with_logs(1) != 0) {
-            eprintln("chakshu: --with-logs needs the AI build.");
-            eprintln("chakshu: run `shu-ai` for --explain / ? with log context.");
-            return EXIT_USAGE;
-        }
+    if (rc != CLI_RUN) {
+        eprintln(cli_err());
+        return EXIT_ERR;
     }
 
-    # Bare `shu` (no args) falls through to the dispatch at the
-    # bottom — the args loop just doesn't iterate, no mode flag gets
-    # set, and the default-mode line at the bottom launches the TUI
-    # with default sort/top/rate. Single dispatch path.
+    # The parser has already refused --with-logs on the lean build, so this
+    # reaches ai.cyr's setter only.
+    if (cli_with_logs == 1) { ai_set_with_logs(1); }
 
-    # Accumulate flags first, then dispatch at the bottom. Mode flags
-    # (-h, -V, -p) are mutually exclusive; the last one in the args
-    # list wins (matches the convention of most CLIs).
-    var mode_help    = 0;
-    var mode_version = 0;
-    var mode_p       = 0;
-    var mode_watch   = 0;
-    var watch_path   = 0;
-    var mode_explain = 0;
-    var explain_pid  = 0;
-
-    var sort_key    = SORT_CPU;
-    var top_n       = PROC_DEFAULT_TOPN;
-    var tui_rate_mhz = 1000;            # default 1 Hz = 1000 mHz (1000 ms refresh)
-    # color_mode: 0 = never, 1 = auto (TUI: on; plain: off), 2 = always
-    # (TUI: on; plain: on — but plain mode currently ignores color
-    # entirely per design-spec §2.2 deterministic-bytes rule).
-    var color_mode  = 1;
-    # 0 = dark (default), 1 = light, 2 = auto (resolved in tui_run)
-    var theme_mode  = 0;
-    # --pid N → 0 means default (table mode); else focus that pid.
-    # Validation happens at flag-parse time below (must exist in /proc).
-    var focus_pid   = 0;
-
-    var i = 1;
-    while (i < n) {
-        var a = argv(i);
-
-        if (streq(a, "-h") == 1)        { mode_help = 1;    i = i + 1; continue; }
-        if (streq(a, "--help") == 1)    { mode_help = 1;    i = i + 1; continue; }
-        if (streq(a, "-V") == 1)        { mode_version = 1; i = i + 1; continue; }
-        if (streq(a, "--version") == 1) { mode_version = 1; i = i + 1; continue; }
-        if (streq(a, "-p") == 1)        { mode_p = 1;       i = i + 1; continue; }
-
-        # --sort cpu|mem|pid|name|user (default cpu).
-        if (streq(a, "--sort") == 1) {
-            if (i + 1 >= n) {
-                eprintln("chakshu: --sort requires a value (cpu|mem|pid|name|user)");
-                return EXIT_USAGE;
-            }
-            var v = argv(i + 1);
-            if      (streq(v, "cpu")  == 1) { sort_key = SORT_CPU; }
-            elif    (streq(v, "mem")  == 1) { sort_key = SORT_MEM; }
-            elif    (streq(v, "pid")  == 1) { sort_key = SORT_PID; }
-            elif    (streq(v, "name") == 1) { sort_key = SORT_NAME; }
-            elif    (streq(v, "user") == 1) { sort_key = SORT_USER; }
-            else {
-                eprint_cstr("chakshu: --sort: unknown key '");
-                eprint_cstr(v);
-                eprintln("' (want cpu|mem|pid|name|user)");
-                return EXIT_USAGE;
-            }
-            i = i + 2;
-            continue;
-        }
-
-        # --rate <Hz> — fractional accepted since v0.9.4 (0.2-10), which is what
-        # design-spec §7 promised from the start. See parse_rate_mhz.
-        if (streq(a, "--rate") == 1) {
-            if (i + 1 >= n) {
-                eprintln("chakshu: --rate requires Hz (0.2-10, e.g. 1, 1.5, 0.5)");
-                return EXIT_USAGE;
-            }
-            var rv = parse_rate_mhz(argv(i + 1));
-            if (rv < 0) {
-                eprintln("chakshu: --rate: not a number (expected e.g. 1, 1.5, 0.5)");
-                return EXIT_USAGE;
-            }
-            if (rv < 200) {
-                eprintln("chakshu: --rate: Hz must be >= 0.2 (one frame per 5s is the floor)");
-                return EXIT_USAGE;
-            }
-            if (rv > 10000) {
-                eprintln("chakshu: --rate: Hz must be <= 10 (above this each frame can't fit its 100ms sample window)");
-                return EXIT_USAGE;
-            }
-            tui_rate_mhz = rv;
-            i = i + 2;
-            continue;
-        }
-
-        # --top N (default 10). Negative or zero is rejected — those
-        # would show no rows and waste the parse work.
-        if (streq(a, "--top") == 1) {
-            if (i + 1 >= n) {
-                eprintln("chakshu: --top requires N (positive integer)");
-                return EXIT_USAGE;
-            }
-            var nv = atoi(argv(i + 1));
-            if (nv < 1) {
-                eprintln("chakshu: --top: N must be >= 1");
-                return EXIT_USAGE;
-            }
-            top_n = nv;
-            i = i + 2;
-            continue;
-        }
-
-        # --color auto|always|never (default auto). Plain mode ignores
-        # this entirely (deterministic bytes per design-spec §2.2);
-        # TUI mode uses it to gate ANSI color escapes. "auto" currently
-        # honours NO_COLOR / TERM / isatty(stdout) since v0.9.2 (PTY scenario 14).
-        # --theme dark|light|auto (v0.9.2). Default dark: it is what shipped,
-        # and re-tinting an existing user's monitor on upgrade would be worse
-        # than making them ask for light.
-        if (streq(a, "--theme") == 1) {
-            if (i + 1 >= argc()) {
-                eprintln("chakshu: --theme requires a value (dark|light|auto)");
-                return EXIT_USAGE;
-            }
-            var tv = argv(i + 1);
-            if      (streq(tv, "dark")  == 1) { theme_mode = 0; }
-            elif    (streq(tv, "light") == 1) { theme_mode = 1; }
-            elif    (streq(tv, "auto")  == 1) { theme_mode = 2; }
-            else {
-                eprint_cstr("chakshu: --theme: unknown value '");
-                eprint_cstr(tv);
-                eprintln("' (want dark|light|auto)");
-                return EXIT_USAGE;
-            }
-            i = i + 2;
-            continue;
-        }
-
-        if (streq(a, "--color") == 1) {
-            if (i + 1 >= n) {
-                eprintln("chakshu: --color requires a value (auto|always|never)");
-                return EXIT_USAGE;
-            }
-            var cv = argv(i + 1);
-            if      (streq(cv, "auto")   == 1) { color_mode = 1; }
-            elif    (streq(cv, "always") == 1) { color_mode = 2; }
-            elif    (streq(cv, "never")  == 1) { color_mode = 0; }
-            else {
-                eprint_cstr("chakshu: --color: unknown value '");
-                eprint_cstr(cv);
-                eprintln("' (want auto|always|never)");
-                return EXIT_USAGE;
-            }
-            i = i + 2;
-            continue;
-        }
-
-        # --pid N — focus mode. Validates that /proc/N/stat is openable
-        # at parse time so the user gets immediate feedback if the pid
-        # doesn't exist; if the pid exits later (during refresh),
-        # tui_render_focus_frame shows a "PID N has exited" message.
-        if (streq(a, "--pid") == 1) {
-            if (i + 1 >= n) {
-                eprintln("chakshu: --pid requires N (positive integer)");
-                return EXIT_USAGE;
-            }
-            var pv = atoi(argv(i + 1));
-            if (pv < 1) {
-                eprintln("chakshu: --pid: N must be >= 1");
-                return EXIT_USAGE;
-            }
-            # Validate by attempting to open /proc/<pid>/stat.
-            var pid_str_v[24];
-            _proc_int_to_cstr(pv, &pid_str_v);
-            var stat_path_v[64];
-            proc_pid_path(&pid_str_v, "/stat", &stat_path_v);
-            var fd_v = file_open(&stat_path_v, 0, 0);
-            if (fd_v < 0) {
-                eprint_cstr("chakshu: --pid ");
-                eprint_cstr(&pid_str_v);
-                eprintln(": no such process");
-                return EXIT_ERR;
-            }
-            file_close(fd_v);
-            focus_pid = pv;
-            i = i + 2;
-            continue;
-        }
-
-        # --explain <PID> — AI explain one-shot (terminal mode). Resolves
-        # to src/ai.cyr in the shu-ai build (POSTs to hoosh, prints the
-        # answer) or src/ai_stub.cyr in lean `shu` (points at shu-ai).
-        if (streq(a, "--explain") == 1) {
-            if (i + 1 >= n) {
-                eprintln("chakshu: --explain requires <PID> (positive integer)");
-                return EXIT_USAGE;
-            }
-            var ev = atoi(argv(i + 1));
-            if (ev < 1) {
-                eprintln("chakshu: --explain: PID must be >= 1");
-                return EXIT_USAGE;
-            }
-            # v0.9.4: ACCUMULATE, do not return from inside the loop. The early
-            # return here was the last surviving instance of the trap the block
-            # at the top of this function documents — it made `--explain` the one
-            # path that never validated the rest of the command line, so
-            # `shu-ai --explain 1 --bogusflag` ran the AI call and exited 0 while
-            # every other mode rejected the flag with EXIT_USAGE. Freezing a CLI
-            # that validates on every path except one is a defect, not a quirk.
-            # Fixed the same way `--watch` was at v0.8.0 and `--with-logs` was
-            # worked around at v0.8.1 — those two are now the rule, not exceptions.
-            mode_explain = 1;
-            explain_pid  = ev;
-            i = i + 2;
-            continue;
-        }
-
-        # v0.8.0: --watch is a real mode. It ACCUMULATES like -p rather than
-        # returning from mid-loop — the old early return meant `-p --watch`
-        # silently dropped the -p and `--watch --rate 2` never parsed --rate.
-        # An optional path may follow; anything starting with '-' is the next
-        # flag, not a path.
-        if (streq(a, "--watch") == 1) {
-            mode_watch = 1;
-            if (i + 1 < argc()) {
-                var wnext = argv(i + 1);
-                if (load8(wnext) != 45) {
-                    watch_path = wnext;
-                    i = i + 1;
-                }
-            }
-            i = i + 1;
-            continue;
-        }
-
-        # Already applied by the pre-scan above; just consume it here so it is
-        # not mistaken for an unknown flag.
-        if (streq(a, "--with-logs") == 1) { i = i + 1; continue; }
-
-        return print_unknown_flag(a);
+    if (cli_mode == CLI_MODE_EXPLAIN) { return ai_explain(cli_explain_pid); }
+    if (cli_mode == CLI_MODE_WATCH) {
+        tui_set_theme(cli_theme);
+        return watch_run(_mhz_to_ms(cli_rate_mhz), cli_color, cli_watch_path);
     }
+    if (cli_mode == CLI_MODE_PLAIN) { return snapshot_print(cli_sort, cli_rows); }
 
-    # Dispatch. Mode precedence: help > version > watch > -p > default-help.
-    if (mode_help    == 1) { return print_help(); }
-    if (mode_version == 1) { return print_version(); }
-
-    # --explain is a terminal one-shot, dispatched here rather than from the
-    # parse loop so the whole command line is validated first. NOTE the
-    # precedence change this implies and it is deliberate: `--explain 1 --help`
-    # now prints help instead of calling hoosh. --help/--version winning over
-    # every other mode is the conventional shape and matches -p and --watch.
-    if (mode_explain == 1) { return ai_explain(explain_pid); }
-
-    # R24 (v0.7.13): --pid is TUI-only, but `-p --pid N` used to discard it
-    # silently — while a *bad* pid still exited 1 via the parse-time probe, so the
-    # flag was half-honoured. Reject the combination explicitly instead.
-    # --watch is its own mode: it renders an event stream, not the process
-    # table, so combining it with -p or --pid is meaningless. Reject explicitly
-    # rather than silently honouring one and dropping the other (the R24 lesson
-    # from v0.7.13).
-    if (mode_watch == 1) {
-        if (mode_p == 1) {
-            eprintln("chakshu: --watch cannot be combined with -p");
-            return EXIT_USAGE;
-        }
-        if (focus_pid != 0) {
-            eprintln("chakshu: --watch cannot be combined with --pid");
-            return EXIT_USAGE;
-        }
-        tui_set_theme(theme_mode);
-        return watch_run(_mhz_to_ms(tui_rate_mhz), color_mode, watch_path);
+    # Default mode — the TUI. tui_run handles the not-a-TTY case (stdin
+    # redirected) by exiting EXIT_ERR with a stderr message pointing at `-p`.
+    if (cli_pid != 0) {
+        if (_cli_pid_exists(cli_pid) == 0) { return EXIT_ERR; }
     }
-
-    if (mode_p == 1) {
-        if (focus_pid != 0) {
-            eprintln("chakshu: --pid cannot be combined with -p (focus mode is TUI-only)");
-            return EXIT_USAGE;
-        }
-        return snapshot_print(sort_key, top_n);
-    }
-
-    # Default mode — launch the TUI. tui_run handles the not-a-TTY
-    # case (stdin redirected) by exiting EXIT_ERR with a stderr
-    # message pointing at `-p`.
-    tui_set_theme(theme_mode);
-    return tui_run(_mhz_to_ms(tui_rate_mhz), sort_key, top_n, color_mode, focus_pid);
+    tui_set_theme(cli_theme);
+    return tui_run(_mhz_to_ms(cli_rate_mhz), cli_sort, cli_rows, cli_color, cli_pid);
 }
-

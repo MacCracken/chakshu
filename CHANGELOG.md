@@ -4,6 +4,146 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-10-31 — the CLI on cmdit, every contract question decided
+
+A minor, because it changes the command surface on purpose, before the 1.0 freeze makes each change
+a semver event. The parser moves onto cmdit 1.5.0, and all ten open questions in
+`docs/cli-contract.md` are decided. The roadmap to 1.0 is also re-planned after a gap audit. Monitor
+output is unchanged: `-p`, the TUI and `--watch` render as in v0.11.1.
+
+### Changed — the command line moves onto cmdit 1.5.0, and every contract question is decided
+
+The CLI questions (`docs/cli-contract.md` Q1–Q10) were each decided as the roadmap recommended,
+and cmdit is how they are implemented.
+
+**What a user notices:**
+
+| Was | Now |
+|---|---|
+| `shu --watch PATH` | `shu --watch --watch-path PATH`. The old form exits 2 and names the new flag (Q1) |
+| `--` was an unknown flag | `--` ends the options (Q2) |
+| `--sort=mem` was an unknown flag | every value flag takes `--flag=value` (Q3) |
+| `-p` only | `-p` or `--plain` (Q4) |
+| `--top N` | `--rows N`; `--top` still works as an alias (Q5) |
+| `--explain` exited 0 when hoosh could not answer | exits 1, after printing the redacted context as before (Q6) |
+| `-p --rate 5`, `-p --color always`, `-p --theme light`, `--explain 1 -p` were silent no-ops | exit 2: a flag the chosen mode does not use is an error (Q7) |
+| on the lean `shu`, `--explain 1` exited 1 | exits 2, like `--with-logs` (Q8) |
+| `--top 5x` ran as `--top 5`; `--top 99999999999999999999` wrapped | both exit 2 |
+| `--pid 99999 --help` exited 1 ("no such process") | prints help: the probe runs only once the TUI is the chosen mode |
+
+Q9 (a repeated flag keeps its last value) and Q10 (enum values are case-sensitive) record the
+behaviour that already shipped. Three messages changed wording:
+- a bare word says `unexpected argument: foo`, not `unknown flag: foo`;
+- `--sort --top 5` says `--sort requires a value`, not `unknown key '--top'`, because a value that
+  looks like a flag is no longer taken as one;
+- the `--watch` "cannot read" hint names `--watch-path`.
+
+**How it is built.**
+- **`src/cli_parse.cyr` (new)** registers every flag on cmdit, turns cmdit's errors into chakshu's
+  messages and applies the mode rules. It is **pure**: it reads only the argv it is handed, so the
+  unit suite drives it with synthetic argv. Every message that existed before keeps its wording,
+  with the flag named as the user typed it (`--top` or `--rows`, `-p` or `--plain`).
+- **Text the user typed is now sanitized before it is echoed** (`tty_sanitize_buf`, as every other
+  untrusted-text path has been since v0.11.0) and capped at 128 bytes. Until now `--sort
+  $'\e[31m'` put the escape sequence on stderr raw.
+- **`src/cli.cyr`** keeps `print_help` / `print_version` (stdout, `Usage: shu`) and becomes a
+  dispatcher. It is the only place that is not pure: the `--pid` existence probe, and the AI calls.
+- **`CHAKSHU_WATCH_PATH` is deliberately not a `cmdit_env` fallback.** `cmdit_seen` counts an
+  env-set value as given, which would have made `CHAKSHU_WATCH_PATH=… shu -p` a Q7 error. The
+  fallback stays in `watch_resolve_path`.
+- **`ai_build()`** (1 in `src/ai.cyr`, 0 in `src/ai_stub.cyr`) tells the parser which binary it is
+  in. The pre-scan that resolved `--with-logs` before the main loop is gone.
+- **`[deps.cmdit] tag = "1.5.0"`** in both manifests. Its sidecar names `args alloc string io`,
+  all already in both stdlib lists.
+
+**Tests.**
+- **`tests/chakshu.tcyr` 208 → 357 assertions**, in five `cli_parse` groups: modes and defaults,
+  values, malformed input, one mode per run, and the AI-only flags on the lean build.
+- **Mutation-checked, 11 / 11 caught.** Planted one at a time:
+  - no flag-shaped-value refusal;
+  - a wrong `--color` mapping;
+  - `-p` accepting `--rate`;
+  - help honoured before `--rate` is validated, both deleted and reordered;
+  - positionals accepted;
+  - lean `--explain` allowed;
+  - echoed text not sanitized;
+  - a flag always named by its first spelling;
+  - the `--top` alias dropped;
+  - the `--rows` range dropped.
+- **`scripts/smoke.sh`** moves its `--watch` calls to `--watch-path` and adds a v0.12.0 block for
+  the rules only the whole binary can show: help beating the `--pid` probe, the probe still running
+  for the TUI, Q8 (build-aware), Q7 on `-p`, `--`, attached values with `--plain` / `--rows`, and
+  `--top 5x`. Each new gate fails against v0.11.1. `tests/integration_smoke.py`'s `--watch`
+  scenario uses `--watch-path`.
+- **Identity bar** against a v0.11.1 build: 68 invocations of the lean `shu` and 9 of `shu-ai`,
+  comparing stdout, stderr and exit status. 38 lean invocations are byte-identical. Every
+  difference is a row of the table above or one of the three wording changes.
+
+**Sizes.**
+
+| binary | v0.11.1 | now |
+|---|---:|---:|
+| lean `shu`, DCE'd (**shipped**) | 458,520 | **483,816** |
+| lean `shu`, plain | 728,856 | 791,016 |
+| `shu-ai`, DCE'd (**shipped**) | 1,735,392 | **1,764,736** |
+| `shu`, AGNOS | 739,560 | 801,720 |
+
+- **The shipped lean binary grows 25,296 B**, about the reachable part of cmdit's parser.
+- **The plain lean build is now over 768 KB.** It carries all of cmdit's unreachable code
+  (completions, verbs), which DCE removes. design-spec §8's target has always been read against the
+  shipped (DCE'd) binary; the 0.13.0 §8 pass should say so in the row itself.
+
+**Verified.**
+- `scripts/check.sh` 23 / 23.
+- Smoke passes against `shu`, `shu-ai` and the DCE'd `shu-ai`, and the with-logs and hoosh-stub
+  smokes pass against the DCE'd `shu-ai`.
+- `tests/agnos_qemu.py` 35 / 35 on agnos 1.57.14. On AGNOS the argv now reaches the parser through
+  `cmdit_argv`; `run /bin/shu -p` and the bare TUI both parse as before. The harness passes no
+  malformed argument, so AGNOS error paths are covered only by the shared unit suite.
+
+Not run: a manual TUI session.
+
+### Changed — docs: the roadmap to v1.0, re-planned after a gap audit
+
+No code change.
+
+- **`docs/development/roadmap.md` rewritten.** It now proposes four cuts to v1.0:
+  - **0.12.0** puts the CLI on cmdit 1.5.0 and decides every contract question;
+  - **0.12.1** fixes what the freeze would lock in;
+  - **0.13.0** defines and re-measures §8, files a delta security audit, adds the required root
+    files and ships AGNOS release artifacts;
+  - **1.0.0** freezes the contract and ships.
+
+  The cmdit plan is re-filed against 1.5.0. cmdit 1.3.3 – 1.3.6 closed four of the gaps the
+  2026-10-14 plan listed: echoing the bad token, help on stdout, long-flag aliases, and refusing a
+  flag-shaped value. The 1.0 decision block is replaced by a re-read of the AGNOS premise. Two of
+  its three blockers were struck long ago, and the base ISO's deferral of hoosh is a new
+  constraint. Shipped-release history moves out of the roadmap to a short milestones table.
+- **Gaps found by the audit, now scheduled:**
+  - `-p`'s PID column overflows at 7 digits;
+  - `-p`'s `disk:` / `net:` lines end in trailing whitespace;
+  - the TUI clips cmdlines by bytes, so it can cut a UTF-8 character in half;
+  - `--top 5x` is accepted as 5, and an overflowing `--top` wraps;
+  - `--pid N --help` exits 1 instead of printing help;
+  - the lean build's two AI-only flags exit with different codes;
+  - `SECURITY.md` and `CODE_OF_CONDUCT.md` are missing;
+  - `release.yml` ships no AGNOS binary.
+- **`docs/cli-contract.md`:**
+  - three open questions added: Q8 (the AI-only flags' exit code), Q9 (a repeated flag) and Q10
+    (enum case);
+  - `--explain 1 -p` added to Q7;
+  - `--color` and `--theme` marked as applying to `--watch`, which they always have;
+  - the no-procfs paragraph, which still described AGNOS before v0.9.8, rewritten;
+  - corrected: `with_logs_smoke.py` reads the printed context, not the exit status.
+- **`docs/design-spec.md`:** §3 and §7 said `--rate` was integer 1–10 and §7 lacked `--sort user`.
+  Fractional rates shipped at v0.9.4, so the "open decision" block is marked resolved. §8 said the
+  1 Hz CPU budget was "met"; benchmarks.md has recorded it as missed since v0.9.6. The binary-size
+  row now gives v0.11.1's size.
+- **`docs/development/state.md`:** the milestone, next-milestone and perf rows now agree with the
+  roadmap and benchmarks.md. The perf row had quoted v0.9.4's 0.500 % against benchmarks.md's
+  0.600 %.
+- **`CLAUDE.md`:** the first-party standards link pointed at a path that does not exist.
+
 ## [0.11.1] — 2026-10-31 — cyrius 6.7.18, and every dependency at its latest
 
 A patch: the toolchain and every git dependency move to their latest releases. No chakshu logic

@@ -4,9 +4,10 @@
 
 Version: 0.2 (revised at v0.9.4)
 Status: M3 closed v0.8.2, M4 closed v0.9.3. M5 (v1.0 ship) in progress — see
-        [roadmap.md](development/roadmap.md) for the v1.0 criteria and the open
-        AGNOS-premise decision. ⚠ This document is the CONTRACT a v1.0 publishes;
-        §7 below was reconciled against `shu --help` line by line at v0.9.4.
+        [roadmap.md](development/roadmap.md) for the v1.0 criteria and the decisions
+        left before the freeze. ⚠ This document is the CONTRACT a v1.0 publishes;
+        §7 below was reconciled against `shu --help` at v0.9.4 and corrected again
+        on 2026-10-31 (fractional `--rate`, `--sort user`).
 Audience: Implementation agent / contributors
 Name: Sanskrit **चक्षु** (*chakṣu*) — *the eye, the faculty of sight*. Same observational family as planned `drishti-*` video codecs (दृष्टि — *vision*).
 Binary name: `shu` — **S**ystem **H**ealth **U**tility, a contraction of *chak**shu***. See [ADR 0001](adr/0001-binary-name-shu.md).
@@ -89,7 +90,7 @@ Data lives in two layers:
 | Network I/O | `/proc/net/dev` deltas | 1 Hz |
 | Load avg | `/proc/loadavg` | 1 Hz |
 
-Refresh rate configurable via `--rate <hz>` (**integer 1-10**; the "0.2–10" this line claimed until v0.9.4 is not what the binary accepts — see the `--rate` note in §7, where the open decision is recorded).
+Refresh rate configurable via `--rate <hz>`: decimal Hz, **0.2–10**, up to three decimal places (fractional rates shipped at v0.9.4; see §7).
 
 ---
 
@@ -120,10 +121,10 @@ Layout is text-anchored rather than box-drawn — bars and graphs are M4-polish 
 | Mode | Trigger | Behavior |
 |------|---------|----------|
 | TUI | default | Full-screen interactive monitor |
-| Plain | `-p` / pipe-to-tty-detected | Single frame to stdout, no termios changes, no alt-buffer |
+| Plain | `-p` / `--plain` | Single frame to stdout, no termios changes, no alt-buffer |
 | Single-process | `--pid N` | TUI focused on one process (full process tree, fds, threads) |
 | Explain | `--explain N` | AI explanation of process N — redacted prompt → hoosh, answer printed, exit (`shu-ai`; v0.7.3) |
-| Watch | `--watch [PATH]` | Tail-mode: show security events as they occur, from aegis's append-only NDJSON sink. **Lean `shu`** — see §6.4. |
+| Watch | `--watch` (path: `--watch-path PATH`) | Tail-mode: show security events as they occur, from aegis's append-only NDJSON sink. **Lean `shu`** — see §6.4. |
 
 ---
 
@@ -217,52 +218,55 @@ shu -p
 shu -h | --help | -V | --version
 
 OPTIONS:
-  -p                      Plain snapshot mode (single frame, no TUI)
-  --sort cpu|mem|pid|name Process-table sort key (default cpu)
-  --top N                 Process-table row count (default 10)
-  --rate <HZ>             TUI refresh rate — INTEGER 1-10, default 1
-  --color <when>          auto | always | never (default auto; TUI only)
+  -p, --plain             Plain snapshot mode (single frame, no TUI)
+  --sort cpu|mem|pid|name|user  Process-table sort key (default cpu)
+  --rows N                Process-table row count (default 10); --top is an alias
+  --rate <HZ>             Refresh rate for the TUI and --watch, 0.2-10, default 1
+                          (fractional: 0.5 = btop's 2 s, 0.667 = htop's 1.5 s)
+  --color <when>          auto | always | never (default auto; TUI, --watch)
                           auto honours $NO_COLOR, $TERM and isatty(stdout)
-  --theme <name>          dark | light | auto (default dark; TUI only)
+  --theme <name>          dark | light | auto (default dark; TUI, --watch)
                           auto reads $COLORFGBG
   --pid <PID>             Focus a single process (validates PID at startup)
-  --explain <PID>         Ask hoosh to explain PID and exit (shu-ai build)
-  --watch [PATH]          Anomaly stream mode. Reads aegis's NDJSON event log;
-                          path, else $CHAKSHU_WATCH_PATH, else
-                          /var/log/aegis/events.jsonl. Non-TTY prints a plain dump.
-                          LEAN build — works on a no-libc AGNOS box.
+  --explain <PID>         Ask hoosh to explain PID and exit (shu-ai build);
+                          exit 1 when hoosh does not answer
+  --watch                 Anomaly stream mode. Reads aegis's NDJSON event log.
+                          Non-TTY prints a plain dump. LEAN build — works on a
+                          no-libc AGNOS box.
+  --watch-path <PATH>     The log --watch reads; else $CHAKSHU_WATCH_PATH, else
+                          /var/log/aegis/events.jsonl
   --with-logs             Fold recent log + anomaly context into AI prompts
                           (shu-ai only; off by default). Shipped v0.8.1.
   -h, --help              Show help
   -V, --version           Show version
 
-Exit codes: 0 success · 1 runtime failure · 2 usage error.
+Values may be attached (--sort=mem); `--` ends the options; a flag the chosen
+mode does not use is an error.
 
-⚠ `--rate` READ THIS: this block said "0.2–10" until v0.9.4 while the code has always rejected
-anything below 1 (`--rate 0` exits 2). The spec has been corrected to match the binary rather than
-the reverse, because publishing a range the binary refuses is the worse failure. But the DECISION is
-open and must be settled before the v1.0 freeze: **integer Hz 1-10 yields only 100-1000 ms, and
-neither incumbent's default is expressible — htop defaults to 1.5 s, btop to 2000 ms.** A monitor
-whose goal is replacing them should be settable to their default refresh. Options: implement
-fractional Hz as originally specified, or switch to a millisecond interval in btop's shape
-(`--update <ms>`). Either is breaking after the freeze.
+Exit codes: 0 success · 1 runtime failure · 2 usage error.
 ```
+
+The argument syntax, the per-mode rules and the decisions behind them (settled at v0.12.0, when
+the parser moved onto cmdit) are [`cli-contract.md`](cli-contract.md)'s. Where this block and
+`shu --help` disagree, `--help` is the truth. `--rate` was resolved at v0.9.4: fractional Hz
+(0.2–10, fixed-point millihertz, no float), so both incumbents' defaults are expressible.
 
 ---
 
 ## 8. Performance Targets
 
 Measured at v0.9.0 under a real pseudo-terminal at `--rate 1`, 295 processes on a
-16-core box, unless noted.
+16-core box, unless noted. **[`docs/benchmarks.md`](benchmarks.md) is the authority** for the
+current figures; two rows below are not yet defined well enough to check (roadmap D1, D2).
 
 | Target | Goal | Status |
 |--------|------|--------|
 | Cold start (`shu --version`) | < 5 ms | **met** — ~2.0 ms |
 | First TUI frame | < 50 ms | ⚠ **depends on the definition — unsettled.** First bytes on the wire measure 1.0 ms; the first COMPLETE frame (cpu/disk/net rates + PID header) measures ~109 ms median, gated by the deliberate 100 ms sample window. The `-p` row is qualified as "< 30 ms of *work*" and is met; this row carries no such qualifier and is 2.2x over on the complete-frame reading. Pick a definition and restate before the freeze. |
-| Steady-state CPU at 1 Hz | < 0.5% of one core | **met, at the margin** — 0.433–0.500% over five 60 s windows, mean 0.473% |
+| Steady-state CPU at 1 Hz | < 0.5% of one core | ⚠ **missed at the last capture** — 0.600 % at v0.9.6 (benchmarks.md; 0.473 % mean at v0.9.0). The budget names no process count, and the cost is linear in it, so it is unsettled as well as missed (roadmap D1) |
 | Memory resident | < 8 MB | **met** — 4.56 MB, flat |
 | `-p` snapshot | < 30 ms of work | met — ~12 ms (plus a deliberate 100 ms sample window) |
-| Lean `shu` binary | **< 768 KB** | met — 622 KB |
+| Lean `shu` binary | **< 768 KB** | met by the **shipped (DCE'd)** binary, which is what this row has always measured: 483,816 B with cmdit (v0.12.0). The plain build, 791,016 B, is over; it carries cmdit's unreachable code. Roadmap D1/D2's §8 pass should name the shipped binary in the target itself |
 
 ### On the binary-size target (revised at v0.9.0)
 

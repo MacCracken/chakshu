@@ -86,7 +86,7 @@ cannot cover is a real aegis writing concurrently.
 
 ```bash
 AEGIS_EVENT_LOG=/tmp/aegis.jsonl aegis &
-./build/shu --watch /tmp/aegis.jsonl
+./build/shu --watch --watch-path /tmp/aegis.jsonl
 ```
 
 - Events appear as they are written, without a restart.

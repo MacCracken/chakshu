@@ -114,7 +114,7 @@ echo "[M3] --watch anomaly stream"
 
 # Missing sink → EXIT_ERR with actionable stderr, nothing on stdout.
 set +e
-"$BIN" --watch "$TMPDIR/no-such-stream.jsonl" >"$TMPDIR/out" 2>"$TMPDIR/err"
+"$BIN" --watch --watch-path "$TMPDIR/no-such-stream.jsonl" >"$TMPDIR/out" 2>"$TMPDIR/err"
 rc=$?
 set -e
 [ "$rc" -eq 1 ]                                || fail "--watch missing sink exit was $rc, want 1"
@@ -128,7 +128,7 @@ cat >"$TMPDIR/events.jsonl" <<'JSONL'
 {"id":"b","timestamp":"2026-08-25T00:50:00Z","event_type":"MaliciousPayload","source":"phylax","agent_id":null,"threat_level":"Critical","description":"second event","metadata":{},"resolved":false}
 JSONL
 set +e
-"$BIN" --watch "$TMPDIR/events.jsonl" >"$TMPDIR/out" 2>"$TMPDIR/err"
+"$BIN" --watch --watch-path "$TMPDIR/events.jsonl" >"$TMPDIR/out" 2>"$TMPDIR/err"
 rc=$?
 set -e
 [ "$rc" -eq 0 ]                                || fail "--watch exit was $rc, want 0"
@@ -144,7 +144,7 @@ pass "--watch renders a real aegis record, newest-first"
 # process's output and one bad record must not kill the monitor.
 printf 'not json at all\n{"event_type":"SandboxEscape","threat_level":"High","description":"after garbage"}\n' >>"$TMPDIR/events.jsonl"
 set +e
-"$BIN" --watch "$TMPDIR/events.jsonl" >"$TMPDIR/out" 2>"$TMPDIR/err"
+"$BIN" --watch --watch-path "$TMPDIR/events.jsonl" >"$TMPDIR/out" 2>"$TMPDIR/err"
 rc=$?
 set -e
 [ "$rc" -eq 0 ]                                || fail "--watch died on a malformed line (rc $rc)"
@@ -166,6 +166,17 @@ for combo in "-p" "--pid 1"; do
     [ "$rc" -eq 2 ]                            || fail "--watch $combo exit was $rc, want 2"
 done
 pass "--watch rejects -p and --pid with exit 2"
+
+# v0.12.0 (contract Q1): the path is --watch-path; `--watch PATH`, the form until
+# then, is a usage error that names the replacement.
+set +e
+"$BIN" --watch "$TMPDIR/events.jsonl" >"$TMPDIR/out" 2>"$TMPDIR/err"
+rc=$?
+set -e
+[ "$rc" -eq 2 ]                                || fail "--watch PATH exit was $rc, want 2"
+grep -q "use --watch-path" "$TMPDIR/err"       || fail "--watch PATH did not name --watch-path"
+[ ! -s "$TMPDIR/out" ]                         || fail "--watch PATH wrote to stdout"
+pass "--watch PATH → exit 2, names --watch-path"
 
 # ============================================================
 # M1 — plain snapshot shape
@@ -326,6 +337,75 @@ set -e
 [ "$rc_theme"  -ne 0 ] || fail "--theme bogus exited 0, want non-zero"
 [ "$rc_unknown" -ne 0 ] || fail "--bogusflag exited 0, want non-zero"
 pass "invalid --pid/--rate/--color/--theme and unknown flags all rejected"
+
+# ============================================================
+# v0.12.0 — the contract decisions that run through dispatch
+# ============================================================
+# The parser itself is unit-tested (tests/chakshu.tcyr, cli_parse group). These
+# are the rules that only the whole binary can show: what happens AFTER the parse.
+echo "[v0.12.0] CLI contract"
+
+# Help wins over the --pid existence probe, which runs only once the TUI is chosen.
+set +e
+"$BIN" --pid 99999999 --help >"$TMPDIR/out" 2>"$TMPDIR/err"; rc=$?
+set -e
+[ "$rc" -eq 0 ]                                || fail "--pid 99999999 --help exit was $rc, want 0"
+grep -q "^Usage:" "$TMPDIR/out"                || fail "--pid 99999999 --help did not print help"
+pass "--pid N --help prints help (the probe runs after help)"
+
+# The probe still runs for the TUI: a pid that does not exist is exit 1.
+set +e
+"$BIN" --pid 99999999 </dev/null >/dev/null 2>"$TMPDIR/err"; rc=$?
+set -e
+[ "$rc" -eq 1 ]                                || fail "--pid 99999999 exit was $rc, want 1"
+grep -q "no such process" "$TMPDIR/err"        || fail "--pid 99999999 stderr missing 'no such process'"
+pass "--pid of a missing process → exit 1"
+
+# Contract Q8: on the lean build --explain is a usage error, like --with-logs.
+# Build-aware for the reason given above --with-logs; shu-ai would call hoosh.
+set +e
+"$BIN" --explain 1 -p >"$TMPDIR/out" 2>"$TMPDIR/err"; rc=$?
+set -e
+if grep -q "needs the AI build" "$TMPDIR/err"; then
+    [ "$rc" -eq 2 ]                            || fail "lean --explain exit was $rc, want 2"
+    pass "lean --explain → exit 2, needs the AI build"
+else
+    # shu-ai: --explain with -p is two modes (contract Q7).
+    [ "$rc" -eq 2 ]                            || fail "shu-ai --explain 1 -p exit was $rc, want 2"
+    grep -q "cannot be combined" "$TMPDIR/err" || fail "shu-ai --explain 1 -p stderr unhelpful"
+    pass "shu-ai --explain with -p → exit 2"
+fi
+
+# Contract Q7: a flag the chosen mode ignores is refused, never a silent no-op.
+for combo in "--rate 5" "--color always" "--theme light"; do
+    set +e
+    "$BIN" -p $combo >"$TMPDIR/out" 2>"$TMPDIR/err"; rc=$?
+    set -e
+    [ "$rc" -eq 2 ]                            || fail "-p $combo exit was $rc, want 2"
+    grep -q "cannot be combined with -p" "$TMPDIR/err" || fail "-p $combo stderr unhelpful"
+    [ ! -s "$TMPDIR/out" ]                     || fail "-p $combo wrote a snapshot"
+done
+pass "-p refuses --rate / --color / --theme with exit 2"
+
+# Contract Q2-Q5: `--`, attached values, --plain, --rows (with --top kept).
+set +e
+"$BIN" -- </dev/null >/dev/null 2>"$TMPDIR/err"; rc=$?
+set -e
+[ "$rc" -eq 1 ] && grep -q "not a TTY" "$TMPDIR/err" || fail "\`shu --\` did not reach the TUI (rc $rc)"
+pass "\`--\` ends the options"
+
+"$BIN" --plain --sort=pid --rows=3 > "$TMPDIR/attached" 2>"$TMPDIR/err" || fail "--plain --sort=pid --rows=3 exited non-zero"
+[ ! -s "$TMPDIR/err" ]                         || fail "--plain --sort=pid --rows=3 wrote to stderr"
+att_rows=$(awk '/^   PID USER/ {start=1; next} start' "$TMPDIR/attached" | wc -l)
+[ "$att_rows" -eq 3 ]                          || fail "--rows=3 produced $att_rows rows, want 3"
+grep -qE '^ +1 root ' "$TMPDIR/attached"       || fail "--sort=pid did not put pid 1 first"
+pass "--plain, --sort=pid and --rows=3 (attached values)"
+
+set +e
+"$BIN" -p --top 5x >"$TMPDIR/out" 2>"$TMPDIR/err"; rc=$?
+set -e
+[ "$rc" -eq 2 ]                                || fail "--top 5x exit was $rc, want 2"
+pass "--top 5x → exit 2 (no longer read as 5)"
 
 # ============================================================
 # M1 — pipe sanity (design-spec §2.2: -p is sacred for pipes)

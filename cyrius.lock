@@ -1,4 +1,5 @@
 commit	0586202bbdef73fe679ef4643f8459358fd45961	ai-hwaccel	https://github.com/MacCracken/ai-hwaccel.git	2.5.5
+commit	7671a28c2c7979faf354293b134d3839e664a887	cmdit	https://github.com/MacCracken/cmdit.git	1.5.0
 commit	02fb4675bb5056ed00283eee8b9b76c5dd06222f	darshana	https://github.com/MacCracken/darshana.git	1.7.0
 commit	978ed67a32fbc21d08b657693776691831e4c0e5	mihi	https://github.com/MacCracken/mihi.git	1.3.2
 f75a412a42475828964430d928634d77081ba692a14de5b98d5d09eba7d68204  lib/ai-hwaccel.cyr
@@ -16,6 +17,7 @@ f75a412a42475828964430d928634d77081ba692a14de5b98d5d09eba7d68204  lib/ai-hwaccel
 cd9321d9400401cd8895d1f488d969ea391a1194b327f7a1fa60b99912b73cf2  lib/bench.cyr
 b99081e633d572569ee63c6a915fe4aa39b3ac4ff5665c08cc4c9416ed2f6928  lib/boxed.cyr
 2e2e802085112d781225c517fca853b4adbf29850a96b21b6ff32469f0736516  lib/chrono.cyr
+bedb98f2ba4d36d381b66753b1d3dfd533250b677a920c7558d92d979d7b976e  lib/cmdit.cyr
 096eabc580c807f3e378fbe56058780a28cdf95b9c70b44672bca0a71cf969f6  lib/ct.cyr
 f733a642aa9218341ba88171e0598f8a26f581569d63eebcb18e433ff2e64556  lib/darshana.cyr
 217f7e11e89b826b5cb789f1eaef15b7acd00e9810a04a5cfa298f72612aabd3  lib/fmt.cyr

@@ -10,7 +10,7 @@
 
 # --- render -----------------------------------------------------------
 
-# Resolve the sink path: explicit `--watch <path>` wins, then
+# Resolve the sink path: explicit `--watch-path <path>` wins, then
 # CHAKSHU_WATCH_PATH, then the default. Returns a cstring.
 fn watch_resolve_path(explicit) {
     if (explicit != 0) { if (strlen(explicit) > 0) { return explicit; } }
@@ -28,7 +28,7 @@ fn watch_dump(path) {
     if (rc < 0) {
         eprint_cstr("chakshu: cannot read anomaly stream: ");
         eprintln(p);
-        eprintln("chakshu: set CHAKSHU_WATCH_PATH, or pass --watch <path>.");
+        eprintln("chakshu: set CHAKSHU_WATCH_PATH, or pass --watch-path <path>.");
         eprintln("chakshu: aegis writes this file when AEGIS_EVENT_LOG is set (aegis >= 1.1.7).");
         return EXIT_ERR;
     }

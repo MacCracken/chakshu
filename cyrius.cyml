@@ -65,3 +65,10 @@ modules = ["dist/mihi.cyr"]
 git = "https://github.com/MacCracken/ai-hwaccel.git"
 tag = "2.5.5"
 modules = ["dist/ai-hwaccel.cyr"]
+
+# CLI parsing (v0.12.0): getopt-long core, help/version, typed errors. Its
+# dist/cmdit.deps names args alloc string io, all declared above.
+[deps.cmdit]
+git = "https://github.com/MacCracken/cmdit.git"
+tag = "1.5.0"
+modules = ["dist/cmdit.cyr"]

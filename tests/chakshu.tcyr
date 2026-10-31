@@ -22,6 +22,11 @@ include "src/tui_event.cyr"
 # darshana — for the signalfd teardown regression guard below. It is already a
 # [deps.darshana] module of this manifest, so no new dependency is introduced.
 include "lib/darshana.cyr"
+# v0.12.0: the command-line parser. It is pure (no file, no environment, no
+# output), so it is driven here with synthetic argv; src/cli.cyr, which
+# dispatches, stays out because it pulls in the TUI and snapshot renderers.
+include "lib/cmdit.cyr"
+include "src/cli_parse.cyr"
 
 # Read /proc/self/status and report whether SigBlk is all-zero (no signal
 # blocked). Returns 1 = clear, 0 = something blocked, -1 = could not read.
@@ -43,6 +48,20 @@ fn _test_sigblk_clear() {
         i = i + 1;
     }
     return clear;
+}
+
+# Synthetic argv for cli_parse: "shu" plus up to five arguments (0 = unused).
+# Module-scope `var b[N]` is N u64 slots.
+var _t_argv[8];
+fn _t_cli(ai, a, b, c, d, e) {
+    store64(&_t_argv, "shu");
+    var n = 1;
+    if (a != 0) { store64(&_t_argv + n * 8, a); n = n + 1; }
+    if (b != 0) { store64(&_t_argv + n * 8, b); n = n + 1; }
+    if (c != 0) { store64(&_t_argv + n * 8, c); n = n + 1; }
+    if (d != 0) { store64(&_t_argv + n * 8, d); n = n + 1; }
+    if (e != 0) { store64(&_t_argv + n * 8, e); n = n + 1; }
+    return cli_parse(n, &_t_argv, ai);
 }
 
 fn main() {
@@ -632,6 +651,169 @@ fn main() {
     # Truncation must never yield a SLOWER frame than asked for, or a monitor set
     # to 1 Hz would drift to 1.1 s frames.
     assert_eq(_mhz_to_ms(3000),   333, "3 Hz -> 333 ms (truncates down, never up)");
+
+    # ----- cli_parse.cyr — the command line (v0.12.0, cmdit 1.5.0) -----
+    # Every rule in docs/cli-contract.md that the parser owns. The rules that
+    # run after it (the --pid probe, the AI calls) are smoke.sh's.
+    test_group("cli_parse — modes and defaults");
+    assert_eq(_t_cli(0, 0, 0, 0, 0, 0), CLI_RUN, "no arguments parses");
+    assert_eq(cli_mode, CLI_MODE_TUI, "no arguments is the TUI");
+    assert_eq(cli_sort, SORT_CPU, "default sort is cpu");
+    assert_eq(cli_rows, 10, "default rows is 10");
+    assert_eq(cli_rate_mhz, 1000, "default rate is 1 Hz");
+    assert_eq(cli_color, 1, "default colour is auto");
+    assert_eq(cli_theme, 0, "default theme is dark");
+    assert_eq(cli_pid, 0, "no --pid by default");
+    assert_eq(_t_cli(0, "-p", 0, 0, 0, 0), CLI_RUN, "-p parses");
+    assert_eq(cli_mode, CLI_MODE_PLAIN, "-p is plain mode");
+    assert_eq(_t_cli(0, "--plain", 0, 0, 0, 0), CLI_RUN, "--plain parses (Q4)");
+    assert_eq(cli_mode, CLI_MODE_PLAIN, "--plain is plain mode");
+    assert_eq(_t_cli(0, "--watch", 0, 0, 0, 0), CLI_RUN, "--watch parses");
+    assert_eq(cli_mode, CLI_MODE_WATCH, "--watch is watch mode");
+    assert_eq(cli_watch_path, 0, "--watch alone leaves the path to the env / default");
+    assert_eq(_t_cli(0, "--watch", "--watch-path", "/x.jsonl", 0, 0), CLI_RUN, "--watch-path parses (Q1)");
+    assert_streq(cli_watch_path, "/x.jsonl", "--watch-path value");
+    assert_eq(_t_cli(0, "--watch", "--watch-path=/y.jsonl", 0, 0, 0), CLI_RUN, "--watch-path=V parses");
+    assert_streq(cli_watch_path, "/y.jsonl", "--watch-path=V value");
+    assert_eq(_t_cli(1, "--explain", "7", 0, 0, 0), CLI_RUN, "--explain parses on shu-ai");
+    assert_eq(cli_mode, CLI_MODE_EXPLAIN, "--explain is explain mode");
+    assert_eq(cli_explain_pid, 7, "--explain value");
+    assert_eq(_t_cli(0, "--pid", "5", 0, 0, 0), CLI_RUN, "--pid parses (the probe is the dispatcher's)");
+    assert_eq(cli_pid, 5, "--pid value");
+    assert_eq(cli_mode, CLI_MODE_TUI, "--pid is a TUI option, not a mode");
+    assert_eq(_t_cli(0, "--help", 0, 0, 0, 0), CLI_HELP, "--help");
+    assert_eq(_t_cli(0, "-h", 0, 0, 0, 0), CLI_HELP, "-h");
+    assert_eq(_t_cli(0, "--version", 0, 0, 0, 0), CLI_VERSION, "--version");
+    assert_eq(_t_cli(0, "-V", 0, 0, 0, 0), CLI_VERSION, "-V");
+    assert_eq(_t_cli(0, "--", 0, 0, 0, 0), CLI_RUN, "`--` alone ends the options (Q2)");
+    assert_eq(cli_mode, CLI_MODE_TUI, "`--` alone is the TUI");
+
+    test_group("cli_parse — values");
+    assert_eq(_t_cli(0, "--sort", "cpu", 0, 0, 0), CLI_RUN, "--sort cpu");
+    assert_eq(cli_sort, SORT_CPU, "cpu -> SORT_CPU");
+    assert_eq(_t_cli(0, "--sort", "mem", 0, 0, 0), CLI_RUN, "--sort mem");
+    assert_eq(cli_sort, SORT_MEM, "mem -> SORT_MEM");
+    assert_eq(_t_cli(0, "--sort", "pid", 0, 0, 0), CLI_RUN, "--sort pid");
+    assert_eq(cli_sort, SORT_PID, "pid -> SORT_PID");
+    assert_eq(_t_cli(0, "--sort", "name", 0, 0, 0), CLI_RUN, "--sort name");
+    assert_eq(cli_sort, SORT_NAME, "name -> SORT_NAME");
+    assert_eq(_t_cli(0, "--sort", "user", 0, 0, 0), CLI_RUN, "--sort user");
+    assert_eq(cli_sort, SORT_USER, "user -> SORT_USER");
+    assert_eq(_t_cli(0, "--sort=mem", 0, 0, 0, 0), CLI_RUN, "--sort=mem (Q3)");
+    assert_eq(cli_sort, SORT_MEM, "--sort=mem value");
+    assert_eq(_t_cli(0, "--rows", "3", 0, 0, 0), CLI_RUN, "--rows (Q5)");
+    assert_eq(cli_rows, 3, "--rows value");
+    assert_eq(_t_cli(0, "--top", "4", 0, 0, 0), CLI_RUN, "--top is still accepted");
+    assert_eq(cli_rows, 4, "--top value");
+    assert_eq(_t_cli(0, "--top=6", 0, 0, 0, 0), CLI_RUN, "--top=6");
+    assert_eq(cli_rows, 6, "--top=6 value");
+    assert_eq(_t_cli(0, "--rows", "3", "--top", "4", 0), CLI_RUN, "a repeated flag parses");
+    assert_eq(cli_rows, 4, "a repeated flag keeps its last value (Q9)");
+    assert_eq(_t_cli(0, "--rate", "0.5", 0, 0, 0), CLI_RUN, "--rate 0.5");
+    assert_eq(cli_rate_mhz, 500, "--rate 0.5 -> 500 mHz");
+    assert_eq(_t_cli(0, "--color", "auto", 0, 0, 0), CLI_RUN, "--color auto");
+    assert_eq(cli_color, 1, "auto -> 1");
+    assert_eq(_t_cli(0, "--color", "always", 0, 0, 0), CLI_RUN, "--color always");
+    assert_eq(cli_color, 2, "always -> 2");
+    assert_eq(_t_cli(0, "--color", "never", 0, 0, 0), CLI_RUN, "--color never");
+    assert_eq(cli_color, 0, "never -> 0");
+    assert_eq(_t_cli(0, "--theme", "light", 0, 0, 0), CLI_RUN, "--theme light");
+    assert_eq(cli_theme, 1, "light -> 1");
+    assert_eq(_t_cli(0, "--theme", "auto", 0, 0, 0), CLI_RUN, "--theme auto");
+    assert_eq(cli_theme, 2, "auto -> 2");
+
+    test_group("cli_parse — malformed input is exit 2, and beats --help");
+    assert_eq(_t_cli(0, "--bogus", 0, 0, 0, 0), CLI_USAGE, "unknown flag");
+    assert_streq(cli_err(), "chakshu: unknown flag: --bogus\nTry 'shu --help' for usage.", "unknown flag message");
+    assert_eq(_t_cli(0, "foo", 0, 0, 0, 0), CLI_USAGE, "a positional");
+    assert_streq(cli_err(), "chakshu: unexpected argument: foo\nTry 'shu --help' for usage.", "positional message");
+    assert_eq(_t_cli(0, "--", "-p", 0, 0, 0), CLI_USAGE, "after `--` nothing is a flag");
+    assert_eq(_t_cli(0, "--help", "--bogus", 0, 0, 0), CLI_USAGE, "--help --bogus");
+    assert_eq(_t_cli(0, "--bogus", "--help", 0, 0, 0), CLI_USAGE, "--bogus --help");
+    assert_eq(_t_cli(0, "foo", "--help", 0, 0, 0), CLI_USAGE, "foo --help");
+    assert_eq(_t_cli(0, "--rate", "99", "--help", 0, 0), CLI_USAGE, "--rate 99 --help");
+    assert_eq(_t_cli(0, "--sort", 0, 0, 0, 0), CLI_USAGE, "--sort without a value");
+    assert_streq(cli_err(), "chakshu: --sort requires a value (cpu|mem|pid|name|user)", "--sort requires message");
+    assert_eq(_t_cli(0, "--sort", "--rows", "5", 0, 0), CLI_USAGE, "a flag is not taken as a value");
+    assert_streq(cli_err(), "chakshu: --sort requires a value (cpu|mem|pid|name|user)", "flag-shaped value message");
+    assert_eq(_t_cli(0, "--sort", "CPU", 0, 0, 0), CLI_USAGE, "enum values are case-sensitive (Q10)");
+    assert_streq(cli_err(), "chakshu: --sort: unknown key 'CPU' (want cpu|mem|pid|name|user)", "--sort unknown key message");
+    assert_eq(_t_cli(0, "--top", "5x", 0, 0, 0), CLI_USAGE, "--top 5x is not 5");
+    assert_streq(cli_err(), "chakshu: --top: '5x' is not a valid number", "bad int message names --top");
+    assert_eq(_t_cli(0, "--rows", "5x", 0, 0, 0), CLI_USAGE, "--rows 5x");
+    assert_streq(cli_err(), "chakshu: --rows: '5x' is not a valid number", "bad int message names --rows");
+    assert_eq(_t_cli(0, "--top", "99999999999999999999", 0, 0, 0), CLI_USAGE, "an overflowing --top does not wrap");
+    assert_eq(_t_cli(0, "--top=0", 0, 0, 0, 0), CLI_USAGE, "--top=0");
+    assert_streq(cli_err(), "chakshu: --top: N must be >= 1", "range message, flag named without =value");
+    assert_eq(_t_cli(0, "--pid", "0", 0, 0, 0), CLI_USAGE, "--pid 0");
+    assert_streq(cli_err(), "chakshu: --pid: N must be >= 1", "--pid range message");
+    assert_eq(_t_cli(0, "--pid", "-5", 0, 0, 0), CLI_USAGE, "--pid -5 is a value, out of range");
+    assert_streq(cli_err(), "chakshu: --pid: N must be >= 1", "--pid -5 message");
+    assert_eq(_t_cli(1, "--explain", "0", 0, 0, 0), CLI_USAGE, "--explain 0");
+    assert_streq(cli_err(), "chakshu: --explain: PID must be >= 1", "--explain range message");
+    assert_eq(_t_cli(0, "--rate", "0", 0, 0, 0), CLI_USAGE, "--rate 0");
+    assert_streq(cli_err(), "chakshu: --rate: Hz must be >= 0.2 (one frame per 5s is the floor)", "--rate floor message");
+    assert_eq(_t_cli(0, "--rate", "abc", 0, 0, 0), CLI_USAGE, "--rate abc");
+    assert_eq(_t_cli(0, "--color", "bogus", 0, 0, 0), CLI_USAGE, "--color bogus");
+    assert_streq(cli_err(), "chakshu: --color: unknown value 'bogus' (want auto|always|never)", "--color message");
+    assert_eq(_t_cli(0, "--plain=1", 0, 0, 0, 0), CLI_USAGE, "a bool takes no value");
+    assert_streq(cli_err(), "chakshu: --plain takes no value", "bool value message");
+    assert_eq(_t_cli(0, "--watch=/x", 0, 0, 0, 0), CLI_USAGE, "--watch=PATH");
+    assert_streq(cli_err(), "chakshu: --watch takes no value; use --watch-path PATH", "--watch=PATH names --watch-path");
+    assert_eq(_t_cli(0, "--watch", "/x.jsonl", 0, 0, 0), CLI_USAGE, "--watch PATH, the pre-v0.12.0 form (Q1)");
+    assert_streq(cli_err(), "chakshu: --watch takes no argument; use --watch-path /x.jsonl", "--watch PATH names the replacement");
+    # Echoed text is untrusted terminal input: an ESC in a value must not reach stderr.
+    assert_eq(_t_cli(0, "--sort", "\x1b[31mred", 0, 0, 0), CLI_USAGE, "an escape in a value");
+    assert_eq(strstr(cli_err(), "\x1b"), 0 - 1, "the echoed value carries no ESC");
+    assert(strstr(cli_err(), "unknown key '?[31mred'") >= 0, "the ESC is shown as '?'");
+
+    test_group("cli_parse — one mode per run (Q7)");
+    assert_eq(_t_cli(0, "-p", "--rate", "5", 0, 0), CLI_USAGE, "-p --rate");
+    assert_streq(cli_err(), "chakshu: --rate cannot be combined with -p", "-p --rate message");
+    assert_eq(_t_cli(0, "--plain", "--rate", "5", 0, 0), CLI_USAGE, "--plain --rate");
+    assert_streq(cli_err(), "chakshu: --rate cannot be combined with --plain", "the mode is named as typed");
+    assert_eq(_t_cli(0, "-p", "--color", "always", 0, 0), CLI_USAGE, "-p --color");
+    assert_eq(_t_cli(0, "-p", "--theme", "light", 0, 0), CLI_USAGE, "-p --theme");
+    assert_eq(_t_cli(0, "-p", "--watch-path", "/x", 0, 0), CLI_USAGE, "-p --watch-path");
+    assert_eq(_t_cli(1, "-p", "--with-logs", 0, 0, 0), CLI_USAGE, "-p --with-logs (shu-ai)");
+    assert_eq(_t_cli(0, "-p", "--pid", "1", 0, 0), CLI_USAGE, "-p --pid");
+    assert_streq(cli_err(), "chakshu: --pid cannot be combined with -p (focus mode is TUI-only)", "-p --pid message");
+    assert_eq(_t_cli(0, "-p", "--sort", "mem", "--rows", "3"), CLI_RUN, "-p takes --sort and --rows");
+    assert_eq(_t_cli(0, "--watch", "-p", 0, 0, 0), CLI_USAGE, "--watch -p");
+    assert_streq(cli_err(), "chakshu: --watch cannot be combined with -p", "--watch -p message");
+    assert_eq(_t_cli(0, "--watch", "--pid", "1", 0, 0), CLI_USAGE, "--watch --pid");
+    assert_streq(cli_err(), "chakshu: --watch cannot be combined with --pid", "--watch --pid message");
+    assert_eq(_t_cli(0, "--watch", "--sort", "cpu", 0, 0), CLI_USAGE, "--watch --sort");
+    assert_eq(_t_cli(0, "--watch", "--top", "3", 0, 0), CLI_USAGE, "--watch --top");
+    assert_streq(cli_err(), "chakshu: --top cannot be combined with --watch", "the flag is named as typed");
+    assert_eq(_t_cli(1, "--watch", "--with-logs", 0, 0, 0), CLI_USAGE, "--watch --with-logs (shu-ai)");
+    assert_eq(_t_cli(0, "--watch", "--rate", "2", "--color", "never"), CLI_RUN, "--watch takes --rate and --color");
+    assert_eq(_t_cli(0, "--watch", "--theme", "light", 0, 0), CLI_RUN, "--watch takes --theme");
+    assert_eq(_t_cli(1, "--explain", "1", "-p", 0, 0), CLI_USAGE, "--explain -p");
+    assert_streq(cli_err(), "chakshu: --explain cannot be combined with -p", "--explain -p message");
+    assert_eq(_t_cli(1, "--explain", "1", "--watch", 0, 0), CLI_USAGE, "--explain --watch");
+    assert_eq(_t_cli(1, "--explain", "1", "--pid", "2", 0), CLI_USAGE, "--explain --pid");
+    assert_streq(cli_err(), "chakshu: --pid cannot be combined with --explain", "--explain --pid message");
+    assert_eq(_t_cli(1, "--explain", "1", "--sort", "cpu", 0), CLI_USAGE, "--explain --sort");
+    assert_eq(_t_cli(1, "--explain", "1", "--with-logs", 0, 0), CLI_RUN, "--explain takes --with-logs");
+    assert_eq(cli_with_logs, 1, "--with-logs value");
+    assert_eq(_t_cli(0, "--watch-path", "/x", 0, 0, 0), CLI_USAGE, "--watch-path without --watch");
+    assert_streq(cli_err(), "chakshu: --watch-path needs --watch", "--watch-path alone message");
+    assert_eq(_t_cli(0, "--sort", "mem", "--rows", "5", "--theme=light"), CLI_RUN, "the TUI takes the table flags");
+    assert_eq(_t_cli(0, "--rate", "2", "--color", "never", 0), CLI_RUN, "the TUI takes --rate and --color");
+    assert_eq(_t_cli(0, "--pid", "3", "--rows", "4", 0), CLI_RUN, "the TUI takes --pid with the table flags");
+    assert_eq(_t_cli(0, "--help", "-p", "--rate", "5", 0), CLI_HELP, "help wins over the mode rules");
+
+    test_group("cli_parse — the AI-only flags on the lean build (Q8)");
+    assert_eq(_t_cli(0, "--with-logs", 0, 0, 0, 0), CLI_USAGE, "lean --with-logs");
+    assert_streq(cli_err(), "chakshu: --with-logs needs the AI build.\nchakshu: run `shu-ai` for --explain / ? with log context.", "lean --with-logs message");
+    assert_eq(_t_cli(0, "--explain", "1", 0, 0, 0), CLI_USAGE, "lean --explain is exit 2, like --with-logs");
+    assert_streq(cli_err(), "chakshu: --explain needs the AI build.\nchakshu: run `shu-ai` for --explain (hoosh-backed AI).", "lean --explain message");
+    assert_eq(_t_cli(0, "--explain", "1", "--with-logs", 0, 0), CLI_USAGE, "lean, both");
+    assert_eq(strstr(cli_err(), "chakshu: --with-logs needs"), 0, "--with-logs is reported first");
+    assert_eq(_t_cli(0, "--help", "--explain", "1", 0, 0), CLI_HELP, "lean --help --explain prints help");
+    assert_eq(_t_cli(1, "--with-logs", 0, 0, 0, 0), CLI_RUN, "shu-ai --with-logs runs the TUI");
+    assert_eq(cli_with_logs, 1, "shu-ai --with-logs value");
 
     return assert_summary();
 }

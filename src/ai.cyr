@@ -548,6 +548,10 @@ var AI_LOG_LINES   = 6;      # most recent log lines folded in
 var AI_ANOM_EVENTS = 3;      # most recent anomaly events folded in
 var _ai_with_logs  = 0;
 
+# 1 in shu-ai, 0 in the lean stub. src/cli_parse.cyr uses it to refuse the
+# AI-only flags on the lean build (contract Q8).
+fn ai_build() { return 1; }
+
 # Enable/disable the opt-in. Returns 0 — the lean stub returns non-zero so the
 # CLI can refuse `--with-logs` on a build that has no AI at all.
 fn ai_set_with_logs(on) {
@@ -1099,7 +1103,9 @@ fn ai_explain(pid) {
 
     # Send to hoosh; print its answer. On ANY failure, fall back to the
     # redacted-context preview so --explain always yields something useful
-    # and auditable, even with no gateway running.
+    # and auditable, even with no gateway running — and exit 1, so a caller
+    # can tell "answered" from "could not reach hoosh" (contract Q6, v0.12.0;
+    # it exited 0 here until then).
     var answer[16384];
     var rc = ai_hoosh_explain(&prompt, plen, &answer, 16384);
     if (rc >= 0) {
@@ -1119,7 +1125,7 @@ fn ai_explain(pid) {
     eprintln("; showing the redacted context that would be sent:");
     eprintln("");
     syscall(1, 1, &prompt, plen);
-    return EXIT_OK;
+    return EXIT_ERR;
 }
 
 # --- in-TUI explain overlay (the `?` key in shu-ai) -------------------

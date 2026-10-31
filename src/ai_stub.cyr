@@ -9,6 +9,11 @@
 # Keep this in signature-sync with the entry points cli.cyr / tui.cyr call:
 # only ai_explain(pid) is referenced from the shared CLI path today.
 
+# 0: this is the lean build. src/cli_parse.cyr refuses --explain and
+# --with-logs on it with exit 2 (contract Q8), so neither ai_explain nor
+# ai_set_with_logs below is reached from the command line any more.
+fn ai_build() { return 0; }
+
 # Lean-build peer of ai.cyr's ai_set_with_logs. Returns non-zero so the CLI can
 # refuse `--with-logs` outright rather than accepting a flag that could not
 # possibly do anything here — the lean build assembles no prompts at all.

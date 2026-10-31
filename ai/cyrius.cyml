@@ -38,7 +38,7 @@ stdlib = [
     "sandhi",
 ]
 
-# These three blocks are kept in lockstep with the root manifest; do not drift.
+# These four blocks are kept in lockstep with the root manifest; do not drift.
 [deps.darshana]
 git = "https://github.com/MacCracken/darshana.git"
 tag = "1.7.0"
@@ -54,6 +54,13 @@ modules = ["dist/mihi.cyr"]
 git = "https://github.com/MacCracken/ai-hwaccel.git"
 tag = "2.5.5"
 modules = ["dist/ai-hwaccel.cyr"]
+
+# CLI parsing (v0.12.0): getopt-long core, help/version, typed errors. Its
+# dist/cmdit.deps names args alloc string io, all declared above.
+[deps.cmdit]
+git = "https://github.com/MacCracken/cmdit.git"
+tag = "1.5.0"
+modules = ["dist/cmdit.cyr"]
 
 # re2 secret redaction (src/ai.cyr). Git dep ONLY — cyrius >= 6.5.30 also ships
 # lib/niyama.cyr, and consuming it both ways would duplicate every niyama_* symbol.

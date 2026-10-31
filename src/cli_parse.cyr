@@ -1,0 +1,446 @@
+# cli_parse.cyr — the command line, parsed (v0.12.0, on cmdit 1.5.0).
+#
+# PURE: cli_parse reads only the argv it is handed. It opens no file, reads no
+# environment variable and writes nothing, so tests/chakshu.tcyr drives it with
+# synthetic argv. src/cli.cyr materializes the process argv, calls it, prints
+# cli_err() on a usage error, and dispatches on cli_mode. Two checks are NOT
+# here because they are not pure: the --pid existence probe (it opens /proc,
+# and runs only once the TUI is the chosen mode) and the watch path's
+# $CHAKSHU_WATCH_PATH fallback (src/watch_render.cyr).
+#
+# The rules are docs/cli-contract.md's, settled at v0.12.0:
+#   - help and version win over every MODE rule, but not over a malformed
+#     command line: cmdit scans the whole argv first, so `--help --bogus` and
+#     `--help --rate 99` are exit 2, and `--pid 99999 --help` prints help;
+#   - chakshu takes no positional argument; `--` ends the options;
+#   - a value may be attached (`--sort=mem`); a separate value that looks like a
+#     flag is refused (`--sort --rows 5` is "--sort requires a value");
+#   - a flag given twice keeps its last value; enum values are case-sensitive;
+#   - a flag given to a mode that ignores it is an error, never a silent no-op;
+#   - an AI-only flag on the lean build is a usage error (exit 2).
+
+# cli_parse results. src/cli.cyr maps them to exit codes.
+var CLI_RUN     = 0;   # dispatch cli_mode with the cli_* config below
+var CLI_HELP    = 1;
+var CLI_VERSION = 2;
+var CLI_USAGE   = 3;   # usage error, exit 2; cli_err() holds the message
+var CLI_FAIL    = 4;   # the command line could not be read, exit 1; cli_err() too
+
+var CLI_MODE_TUI     = 0;
+var CLI_MODE_PLAIN   = 1;
+var CLI_MODE_WATCH   = 2;
+var CLI_MODE_EXPLAIN = 3;
+
+# The parsed command line. Valid after cli_parse returns CLI_RUN.
+var cli_mode        = 0;
+var cli_sort        = 0;   # SORT_CPU..SORT_USER (src/processes.cyr) — cmdit's enum index
+var cli_rows        = 0;
+var cli_rate_mhz    = 0;   # refresh rate in millihertz (src/rate.cyr)
+var cli_color       = 1;   # 0 never, 1 auto, 2 always
+var cli_theme       = 0;   # 0 dark, 1 light, 2 auto
+var cli_pid         = 0;   # --pid; 0 = none
+var cli_explain_pid = 0;
+var cli_watch_path  = 0;   # --watch-path; 0 = $CHAKSHU_WATCH_PATH, then the default
+var cli_with_logs   = 0;
+
+# Flag indices in the cmdit table, set by _cli_register.
+var _cli_f_plain   = 0 - 1;
+var _cli_f_sort    = 0 - 1;
+var _cli_f_rows    = 0 - 1;
+var _cli_f_rate    = 0 - 1;
+var _cli_f_color   = 0 - 1;
+var _cli_f_theme   = 0 - 1;
+var _cli_f_pid     = 0 - 1;
+var _cli_f_explain = 0 - 1;
+var _cli_f_watch   = 0 - 1;
+var _cli_f_wpath   = 0 - 1;
+var _cli_f_logs    = 0 - 1;
+
+# The argv being parsed, for naming a two-spelling flag the way it was typed.
+var _cli_argc = 0;
+var _cli_argv = 0;
+
+# The usage message. Module-scope `var b[N]` is N u64 slots: 512 bytes.
+var _cli_err_buf[64];
+var _cli_err_n    = 0;
+var CLI_ERR_CAP   = 511;
+var CLI_ECHO_MAX  = 128;   # bytes of one user-typed token echoed back
+var CLI_INT_MAX   = 9223372036854775807;
+
+fn cli_err() { return &_cli_err_buf; }
+
+fn _cli_put_n(p, n) {
+    var i = 0;
+    while (i < n) {
+        if (_cli_err_n >= CLI_ERR_CAP) { break; }
+        store8(&_cli_err_buf + _cli_err_n, load8(p + i));
+        _cli_err_n = _cli_err_n + 1;
+        i = i + 1;
+    }
+    store8(&_cli_err_buf + _cli_err_n, 0);
+    return 0;
+}
+
+fn _cli_put(s) { return _cli_put_n(s, strlen(s)); }
+
+# Append text the user typed. It is echoed to a terminal, so it goes through
+# darshana's sanitizer like every other untrusted text (v0.11.0), and it is
+# capped so one huge argument cannot crowd out the message. stop_eq = 1 stops at
+# the first '=', so `--rows=0` names the flag as `--rows`.
+fn _cli_put_arg(s, stop_eq) {
+    if (s == 0) { return 0; }
+    var n = 0;
+    while (load8(s + n) != 0) {
+        if (stop_eq == 1) { if (load8(s + n) == 61) { break; } }
+        if (n >= CLI_ECHO_MAX) { break; }
+        n = n + 1;
+    }
+    if (_cli_err_n + n > CLI_ERR_CAP) { n = CLI_ERR_CAP - _cli_err_n; }
+    if (n <= 0) { return 0; }
+    var m = tty_sanitize_buf(&_cli_err_buf, _cli_err_n, s, n, TTY_SANITIZE_UTF8, 0);
+    if (m >= 0) { _cli_err_n = m; }
+    store8(&_cli_err_buf + _cli_err_n, 0);
+    return 0;
+}
+
+fn _cli_hint() {
+    _cli_put("\nTry 'shu --help' for usage.");
+    return 0;
+}
+
+# 1 if argv token `tok` is the flag `name`, bare or with an attached `=value`.
+fn _cli_tok_is(tok, name) {
+    var n = strlen(name);
+    var i = 0;
+    while (i < n) {
+        if (load8(tok + i) != load8(name + i)) { return 0; }
+        i = i + 1;
+    }
+    var c = load8(tok + n);
+    if (c == 0) { return 1; }
+    if (c == 61) { return 1; }
+    return 0;
+}
+
+# For a flag with two spellings, the one the command line used last: `a` or
+# `b`, and `a` when neither appears. Stops at `--`, after which nothing is a flag.
+fn _cli_spelled(a, b) {
+    var pick = a;
+    var i = 1;
+    while (i < _cli_argc) {
+        var t = load64(_cli_argv + i * 8);
+        if (t != 0) {
+            if (streq(t, "--") == 1) { break; }
+            if (_cli_tok_is(t, a) == 1) { pick = a; }
+            elif (_cli_tok_is(t, b) == 1) { pick = b; }
+        }
+        i = i + 1;
+    }
+    return pick;
+}
+
+# A flag's name for a message, as the user typed it.
+fn _cli_flag_name(f) {
+    if (f == _cli_f_plain)   { return _cli_spelled("-p", "--plain"); }
+    if (f == _cli_f_rows)    { return _cli_spelled("--rows", "--top"); }
+    if (f == _cli_f_sort)    { return "--sort"; }
+    if (f == _cli_f_rate)    { return "--rate"; }
+    if (f == _cli_f_color)   { return "--color"; }
+    if (f == _cli_f_theme)   { return "--theme"; }
+    if (f == _cli_f_pid)     { return "--pid"; }
+    if (f == _cli_f_explain) { return "--explain"; }
+    if (f == _cli_f_watch)   { return "--watch"; }
+    if (f == _cli_f_wpath)   { return "--watch-path"; }
+    if (f == _cli_f_logs)    { return "--with-logs"; }
+    return "?";
+}
+
+# What a value flag wants, for "requires …".
+fn _cli_wants(f) {
+    if (f == _cli_f_sort)    { return "a value (cpu|mem|pid|name|user)"; }
+    if (f == _cli_f_rows)    { return "N (positive integer)"; }
+    if (f == _cli_f_rate)    { return "Hz (0.2-10, e.g. 1, 1.5, 0.5)"; }
+    if (f == _cli_f_color)   { return "a value (auto|always|never)"; }
+    if (f == _cli_f_theme)   { return "a value (dark|light|auto)"; }
+    if (f == _cli_f_pid)     { return "N (positive integer)"; }
+    if (f == _cli_f_explain) { return "<PID> (positive integer)"; }
+    if (f == _cli_f_wpath)   { return "PATH"; }
+    return "a value";
+}
+
+fn _cli_register(h) {
+    _cli_f_plain = cmdit_bool(h, 112, "plain", "Plain snapshot mode");
+    _cli_f_sort  = cmdit_enum(h, 0, "sort", "cpu", "cpu|mem|pid|name|user", "Process-table sort key");
+    _cli_f_rows  = cmdit_int(h, 0, "rows", PROC_DEFAULT_TOPN, "Process-table row count");
+    cmdit_long_alias(h, _cli_f_rows, "top");
+    cmdit_range(h, _cli_f_rows, 1, CLI_INT_MAX);
+    _cli_f_rate  = cmdit_str(h, 0, "rate", 0, "Refresh rate in Hz");
+    _cli_f_color = cmdit_enum(h, 0, "color", "auto", "auto|always|never", "Colour");
+    _cli_f_theme = cmdit_enum(h, 0, "theme", "dark", "dark|light|auto", "Palette");
+    _cli_f_pid   = cmdit_int(h, 0, "pid", 0, "Focus a single process");
+    cmdit_range(h, _cli_f_pid, 1, CLI_INT_MAX);
+    _cli_f_explain = cmdit_int(h, 0, "explain", 0, "AI explain PID");
+    cmdit_range(h, _cli_f_explain, 1, CLI_INT_MAX);
+    _cli_f_watch = cmdit_bool(h, 0, "watch", "Anomaly stream mode");
+    _cli_f_wpath = cmdit_str(h, 0, "watch-path", 0, "The log --watch reads");
+    _cli_f_logs  = cmdit_bool(h, 0, "with-logs", "Log context in AI prompts");
+    # Every value flag refuses a separate value that looks like a flag.
+    cmdit_reject_flag_value(h, _cli_f_sort);
+    cmdit_reject_flag_value(h, _cli_f_rows);
+    cmdit_reject_flag_value(h, _cli_f_rate);
+    cmdit_reject_flag_value(h, _cli_f_color);
+    cmdit_reject_flag_value(h, _cli_f_theme);
+    cmdit_reject_flag_value(h, _cli_f_pid);
+    cmdit_reject_flag_value(h, _cli_f_explain);
+    cmdit_reject_flag_value(h, _cli_f_wpath);
+    return 0;
+}
+
+# Turn a cmdit parse failure into chakshu's message. The wording of every
+# message that existed before v0.12.0 is kept; the flag is named as typed.
+fn _cli_parse_error(h) {
+    var e   = cmdit_error(h);
+    var f   = cmdit_err_flag(h);
+    var tok = cmdit_err_token(h);
+    var val = cmdit_err_value(h);
+    if (e == CMDIT_ERR_ARGV || e == CMDIT_ERR_NOMEM) {
+        _cli_put("chakshu: cannot read the command line");
+        return CLI_FAIL;
+    }
+    if (e == CMDIT_ERR_TOO_MANY_POSITIONAL) {
+        # `--watch PATH` was the form until v0.12.0 (contract Q1): say what replaced it.
+        if (cmdit_seen(h, _cli_f_watch) == 1) {
+            _cli_put("chakshu: --watch takes no argument; use --watch-path ");
+            _cli_put_arg(tok, 0);
+            return CLI_USAGE;
+        }
+        _cli_put("chakshu: unexpected argument: ");
+        _cli_put_arg(tok, 0);
+        _cli_hint();
+        return CLI_USAGE;
+    }
+    if (f < 0 || e == CMDIT_ERR_UNKNOWN || e == CMDIT_ERR_BUNDLED) {
+        _cli_put("chakshu: unknown flag: ");
+        _cli_put_arg(tok, 0);
+        _cli_hint();
+        return CLI_USAGE;
+    }
+    _cli_put("chakshu: ");
+    _cli_put_arg(tok, 1);
+    if (e == CMDIT_ERR_MISSING_VALUE) {
+        _cli_put(" requires ");
+        _cli_put(_cli_wants(f));
+    } elif (e == CMDIT_ERR_UNEXPECTED_VALUE) {
+        _cli_put(" takes no value");
+        if (f == _cli_f_watch) { _cli_put("; use --watch-path PATH"); }
+    } elif (e == CMDIT_ERR_BAD_ENUM) {
+        if (f == _cli_f_sort) { _cli_put(": unknown key '"); }
+        else { _cli_put(": unknown value '"); }
+        _cli_put_arg(val, 0);
+        _cli_put("' (want ");
+        if (f == _cli_f_sort)  { _cli_put("cpu|mem|pid|name|user"); }
+        if (f == _cli_f_color) { _cli_put("auto|always|never"); }
+        if (f == _cli_f_theme) { _cli_put("dark|light|auto"); }
+        _cli_put(")");
+    } elif (e == CMDIT_ERR_BAD_INT) {
+        _cli_put(": '");
+        _cli_put_arg(val, 0);
+        _cli_put("' is not a valid number");
+    } elif (e == CMDIT_ERR_OUT_OF_RANGE) {
+        if (f == _cli_f_explain) { _cli_put(": PID must be >= 1"); }
+        else { _cli_put(": N must be >= 1"); }
+    } else {
+        _cli_put(": invalid");
+    }
+    return CLI_USAGE;
+}
+
+# --rate is a decimal (cmdit has no float flag), validated here with the
+# messages it has carried since v0.9.4. Returns the millihertz, or -1 with the
+# message written.
+fn _cli_rate(s) {
+    var rv = parse_rate_mhz(s);
+    if (rv < 0) {
+        _cli_put("chakshu: --rate: not a number (expected e.g. 1, 1.5, 0.5)");
+        return 0 - 1;
+    }
+    if (rv < 200) {
+        _cli_put("chakshu: --rate: Hz must be >= 0.2 (one frame per 5s is the floor)");
+        return 0 - 1;
+    }
+    if (rv > 10000) {
+        _cli_put("chakshu: --rate: Hz must be <= 10 (above this each frame can't fit its 100ms sample window)");
+        return 0 - 1;
+    }
+    return rv;
+}
+
+# Contract Q7: a flag given to a mode that ignores it is refused. Returns 1, with
+# the message written, when flag `f` was given.
+fn _cli_refuse(h, f, mode_name) {
+    if (cmdit_seen(h, f) == 0) { return 0; }
+    _cli_put("chakshu: ");
+    _cli_put(_cli_flag_name(f));
+    _cli_put(" cannot be combined with ");
+    _cli_put(mode_name);
+    return 1;
+}
+
+fn _cli_reset() {
+    cli_mode        = CLI_MODE_TUI;
+    cli_sort        = SORT_CPU;
+    cli_rows        = PROC_DEFAULT_TOPN;
+    cli_rate_mhz    = 1000;    # 1 Hz
+    cli_color       = 1;
+    cli_theme       = 0;
+    cli_pid         = 0;
+    cli_explain_pid = 0;
+    cli_watch_path  = 0;
+    cli_with_logs   = 0;
+    _cli_err_n = 0;
+    store8(&_cli_err_buf, 0);
+    return 0;
+}
+
+# Parse `argc` cstrs at `argv` (argv[0] is the program). `ai_build` is 1 in
+# shu-ai and 0 in the lean shu (src/cli.cyr passes ai_build()). Returns a CLI_*
+# result; on CLI_RUN the cli_* config is filled.
+fn cli_parse(argc, argv, ai_build) {
+    _cli_reset();
+    _cli_argc = argc;
+    _cli_argv = argv;
+    var h = cmdit_new("shu");
+    if (h == 0) {
+        _cli_put("chakshu: out of memory");
+        return CLI_FAIL;
+    }
+    _cli_register(h);
+
+    # Everything malformed is reported before help or version is honoured.
+    var r = cmdit_parse_argv(h, argc, argv);
+    if (r == CMDIT_RESULT_ERR) { return _cli_parse_error(h); }
+    if (cmdit_require_positionals_max(h, 0) != CMDIT_OK) { return _cli_parse_error(h); }
+    if (cmdit_seen(h, _cli_f_rate) == 1) {
+        var rv = _cli_rate(cmdit_get_str(h, _cli_f_rate));
+        if (rv < 0) { return CLI_USAGE; }
+        cli_rate_mhz = rv;
+    }
+    if (r == CMDIT_HELP)    { return CLI_HELP; }
+    if (r == CMDIT_VERSION) { return CLI_VERSION; }
+
+    var plain   = cmdit_seen(h, _cli_f_plain);
+    var watch   = cmdit_seen(h, _cli_f_watch);
+    var explain = cmdit_seen(h, _cli_f_explain);
+    var pn = _cli_flag_name(_cli_f_plain);
+
+    # Contract Q8: the AI-only flags on the lean build. --with-logs is checked
+    # first, as it was when a pre-scan resolved it.
+    if (ai_build == 0) {
+        if (cmdit_seen(h, _cli_f_logs) == 1) {
+            _cli_put("chakshu: --with-logs needs the AI build.\n");
+            _cli_put("chakshu: run `shu-ai` for --explain / ? with log context.");
+            return CLI_USAGE;
+        }
+        if (explain == 1) {
+            _cli_put("chakshu: --explain needs the AI build.\n");
+            _cli_put("chakshu: run `shu-ai` for --explain (hoosh-backed AI).");
+            return CLI_USAGE;
+        }
+    }
+
+    # One mode per run. Each pair of mode flags is refused, and so is --pid
+    # outside the TUI (its messages predate v0.12.0 and are kept).
+    if (explain == 1) {
+        if (plain == 1) {
+            _cli_put("chakshu: --explain cannot be combined with ");
+            _cli_put(pn);
+            return CLI_USAGE;
+        }
+        if (watch == 1) {
+            _cli_put("chakshu: --explain cannot be combined with --watch");
+            return CLI_USAGE;
+        }
+        if (_cli_refuse(h, _cli_f_pid, "--explain") == 1) { return CLI_USAGE; }
+    }
+    if (watch == 1) {
+        if (plain == 1) {
+            _cli_put("chakshu: --watch cannot be combined with ");
+            _cli_put(pn);
+            return CLI_USAGE;
+        }
+        if (cmdit_seen(h, _cli_f_pid) == 1) {
+            _cli_put("chakshu: --watch cannot be combined with --pid");
+            return CLI_USAGE;
+        }
+    }
+    if (plain == 1) {
+        if (cmdit_seen(h, _cli_f_pid) == 1) {
+            _cli_put("chakshu: --pid cannot be combined with ");
+            _cli_put(pn);
+            _cli_put(" (focus mode is TUI-only)");
+            return CLI_USAGE;
+        }
+    }
+
+    # Contract Q7: every other flag the chosen mode would ignore.
+    if (explain == 1) {
+        cli_mode = CLI_MODE_EXPLAIN;
+        if (_cli_refuse(h, _cli_f_sort,  "--explain") == 1) { return CLI_USAGE; }
+        if (_cli_refuse(h, _cli_f_rows,  "--explain") == 1) { return CLI_USAGE; }
+        if (_cli_refuse(h, _cli_f_rate,  "--explain") == 1) { return CLI_USAGE; }
+        if (_cli_refuse(h, _cli_f_color, "--explain") == 1) { return CLI_USAGE; }
+        if (_cli_refuse(h, _cli_f_theme, "--explain") == 1) { return CLI_USAGE; }
+        if (_cli_refuse(h, _cli_f_wpath, "--explain") == 1) { return CLI_USAGE; }
+    } elif (watch == 1) {
+        cli_mode = CLI_MODE_WATCH;
+        if (_cli_refuse(h, _cli_f_sort, "--watch") == 1) { return CLI_USAGE; }
+        if (_cli_refuse(h, _cli_f_rows, "--watch") == 1) { return CLI_USAGE; }
+        if (_cli_refuse(h, _cli_f_logs, "--watch") == 1) { return CLI_USAGE; }
+    } elif (plain == 1) {
+        cli_mode = CLI_MODE_PLAIN;
+        if (_cli_refuse(h, _cli_f_rate,  pn) == 1) { return CLI_USAGE; }
+        if (_cli_refuse(h, _cli_f_color, pn) == 1) { return CLI_USAGE; }
+        if (_cli_refuse(h, _cli_f_theme, pn) == 1) { return CLI_USAGE; }
+        if (_cli_refuse(h, _cli_f_wpath, pn) == 1) { return CLI_USAGE; }
+        if (_cli_refuse(h, _cli_f_logs,  pn) == 1) { return CLI_USAGE; }
+    } else {
+        cli_mode = CLI_MODE_TUI;
+        if (cmdit_seen(h, _cli_f_wpath) == 1) {
+            _cli_put("chakshu: --watch-path needs --watch");
+            return CLI_USAGE;
+        }
+    }
+
+    cli_sort        = cmdit_get_enum(h, _cli_f_sort);
+    cli_rows        = cmdit_get_int(h, _cli_f_rows);
+    cli_theme       = cmdit_get_enum(h, _cli_f_theme);
+    cli_pid         = cmdit_get_int(h, _cli_f_pid);
+    cli_explain_pid = cmdit_get_int(h, _cli_f_explain);
+    cli_watch_path  = cmdit_get_str(h, _cli_f_wpath);
+    cli_with_logs   = cmdit_get_bool(h, _cli_f_logs);
+    # --color's choices read auto|always|never; the stored mode is 1/2/0.
+    var ci = cmdit_get_enum(h, _cli_f_color);
+    if (ci == 0) { cli_color = 1; }
+    elif (ci == 1) { cli_color = 2; }
+    else { cli_color = 0; }
+    return CLI_RUN;
+}
+
+# Parse the process's own command line. A scratch cmdit handle materializes it
+# (`/proc/self/cmdline` on Linux, the stdlib's own path on agnos).
+fn cli_parse_process(ai_build) {
+    var h = cmdit_new("shu");
+    if (h == 0) {
+        _cli_reset();
+        _cli_put("chakshu: out of memory");
+        return CLI_FAIL;
+    }
+    var n = cmdit_argv(h);
+    var av = cmdit_raw_argv(h);
+    if (av == 0) {
+        _cli_reset();
+        _cli_put("chakshu: cannot read the command line");
+        return CLI_FAIL;
+    }
+    return cli_parse(n, av, ai_build);
+}

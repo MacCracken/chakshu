@@ -364,9 +364,9 @@ var _watch_resync  = 0;      # 1 = discarding bytes until the next newline
 # The path actually opened, kept so rotation can be detected by re-stat.
 var _watch_open_path[64];    # 512 bytes
 var _watch_open_size = 0;    # size of the file we opened, at open time
-var _watch_path_arg = 0;    # `--watch <path>` argument, 0 when unset
+var _watch_path_arg = 0;    # `--watch-path <path>` argument, 0 when unset
 
-# Default sink path. Overridable with `--watch <path>` or CHAKSHU_WATCH_PATH,
+# Default sink path. Overridable with `--watch-path <path>` or CHAKSHU_WATCH_PATH,
 # because an unprivileged `shu` cannot necessarily read /var/log.
 fn watch_default_path() { return "/var/log/aegis/events.jsonl"; }
 

@@ -20,7 +20,7 @@ The Sanskrit name **चक्षु** *chakṣu* means *the eye* / *the faculty 
 
 ## Status
 
-**v0.11.1 — monitor feature-complete and audited; v1.0 is gated on the criteria in
+**v0.12.0 — monitor feature-complete and audited; v1.0 is gated on the criteria in
 [docs/development/roadmap.md](docs/development/roadmap.md), not on features.** What works today:
 
 - **Plain snapshot** (`shu -p`) — host / uptime / load / mem / cpu / disk / net, GPU telemetry, and a
@@ -118,12 +118,13 @@ Why two binaries? The Cyrius toolchain links every declared stdlib module into t
 shu                       # full TUI: processes + cpu + mem + disk + net + gpu
 shu -p                    # plain snapshot, one frame to stdout (pipeable)
 shu --pid 1234            # focus a single process
-shu --sort mem --top 25   # sort by memory, show 25 rows
+shu --sort mem --rows 25  # sort by memory, show 25 rows (--top also works)
 shu --sort user           # group the table by owning user
 shu --rate 0.5            # refresh every 2s (btop's default; 0.2-10, fractional OK)
 shu --theme light         # re-tint for a light terminal background
 shu --color never         # no colour (auto honours $NO_COLOR / $TERM / isatty)
 shu --watch               # anomaly stream — tails aegis's NDJSON event log
+shu --watch --watch-path /tmp/events.jsonl   # ...from a given file
 
 # AI — the shu-ai build only:
 shu-ai --explain 1234              # ask hoosh to explain what PID 1234 is doing
@@ -141,7 +142,7 @@ The AI build talks to the `hoosh` gateway over HTTP. Configure via env:
 | `CHAKSHU_MODEL` | `default` | model name passed to hoosh |
 | `CHAKSHU_HOOSH_TOKEN` | *(unset)* | sent as `Authorization: Bearer …` when set (hoosh 2.3.5+ auth) |
 
-Only the redacted, on-screen process facts are sent — no `/home` contents, no env vars, no un-redacted command-line args (secrets like `--password=`/`--token=`/`*KEY*` are stripped). The lean `shu` is monitor-only; `--explain` / `?` there point you at `shu-ai`.
+Only the redacted, on-screen process facts are sent — no `/home` contents, no env vars, no un-redacted command-line args (secrets like `--password=`/`--token=`/`*KEY*` are stripped). The lean `shu` is monitor-only: `--explain` and `--with-logs` there are usage errors (exit 2) naming `shu-ai`, and `?` points you at it.
 
 Inside the TUI:
 

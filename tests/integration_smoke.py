@@ -146,7 +146,7 @@ def expect_rc(label, rc, want, failures):
 
 
 def _watch_scenario(shu_path):
-    """Drive `shu --watch <fixture>` under a PTY: assert the panel renders the
+    """Drive `shu --watch --watch-path <fixture>` under a PTY: assert the panel renders the
     events already present, then append a NEW record and assert it appears
     without a restart. Returns (ok, reason)."""
     import re
@@ -164,7 +164,7 @@ def _watch_scenario(shu_path):
 
     pid, fd = pty.fork()
     if pid == 0:
-        os.execv(shu_path, [shu_path, "--watch", path])
+        os.execv(shu_path, [shu_path, "--watch", "--watch-path", path])
         os._exit(1)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
     flags = fcntl.fcntl(fd, fcntl.F_GETFL)

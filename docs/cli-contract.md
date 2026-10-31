@@ -1,8 +1,8 @@
 # chakshu — the v1.0 CLI contract
 
-**Status: proposed for the v1.0 freeze. Not frozen yet** — the open questions are listed at the
-end, and each must be settled *before* a 1.0 tag, because after it every one of them is a breaking
-change.
+**Status: settled at v0.12.0, freezes at 1.0.0.** Every question this document used to end with was
+decided at v0.12.0, when the parser moved onto cmdit 1.5.0; the answers are recorded at the end.
+Until the 1.0 tag a change here is still free; after it, the semver policy below applies.
 
 This document exists because chakshu ships a **binary**, not a library. The ecosystem's v1.0 bar
 asks for "public API frozen and documented"; for a binary that means the **command surface** — every
@@ -36,39 +36,54 @@ disagree, `shu --help` is the truth and both docs are wrong.
 
 ## Modes
 
-Exactly one mode runs per invocation. Precedence, highest first:
+Exactly one mode runs per invocation.
 
-| Order | Mode | Selected by |
-|---|---|---|
-| 1 | help | `-h`, `--help` |
-| 2 | version | `-V`, `--version` |
-| 3 | explain | `--explain <PID>` |
-| 4 | watch | `--watch [PATH]` |
-| 5 | plain | `-p` |
-| 6 | TUI | *(default, no mode flag)* |
+| Mode | Selected by |
+|---|---|
+| help | `-h`, `--help` |
+| version | `-V`, `--version` |
+| explain | `--explain <PID>` (`shu-ai`) |
+| watch | `--watch` |
+| plain | `-p`, `--plain` |
+| TUI | *(default, no mode flag)* |
 
-⚠ `--help` and `--version` win over every other mode. That is conventional, and it changed at
-v0.9.4 — before then `--explain` returned from inside the argument loop and beat them.
+**Two mode flags together are a usage error** (exit 2): `--explain` with `-p` or `--watch`, and
+`--watch` with `-p`. So is a flag the chosen mode does not use (see "Applies to" below) — never a
+silent no-op. `--help` and `--version` win over all of that, but **not** over a malformed command
+line: the whole argv is read first, so `--help --bogus` and `--help --rate 99` exit 2, while
+`--help -p --rate 5` prints help.
 
 ## Flags
 
 | Flag | Argument | Default | Applies to |
 |---|---|---|---|
-| `-p` | — | off | — |
+| `-p`, `--plain` | — | off | selects plain |
 | `--sort` | `cpu\|mem\|pid\|name\|user` | `cpu` | plain, TUI |
-| `--top` | integer ≥ 1 | `10` | plain, TUI |
+| `--rows` (alias `--top`) | integer ≥ 1 | `10` | plain, TUI |
 | `--rate` | decimal Hz, `0.2`–`10` | `1` | TUI, watch |
-| `--color` | `auto\|always\|never` | `auto` | TUI only |
-| `--theme` | `dark\|light\|auto` | `dark` | TUI only |
-| `--pid` | integer ≥ 1, must exist | — | TUI only |
-| `--explain` | integer ≥ 1 | — | `shu-ai` only |
-| `--watch` | optional path | `$CHAKSHU_WATCH_PATH`, else `/var/log/aegis/events.jsonl` | — |
-| `--with-logs` | — | off | `shu-ai` only |
+| `--color` | `auto\|always\|never` | `auto` | TUI, watch |
+| `--theme` | `dark\|light\|auto` | `dark` | TUI, watch |
+| `--pid` | integer ≥ 1, must exist | — | TUI |
+| `--explain` | integer ≥ 1 | — | selects explain (`shu-ai`) |
+| `--watch` | — | off | selects watch |
+| `--watch-path` | path | `$CHAKSHU_WATCH_PATH`, else `/var/log/aegis/events.jsonl` | watch |
+| `--with-logs` | — | off | TUI, explain (`shu-ai`) |
 | `-h`, `--help` | — | — | — |
 | `-V`, `--version` | — | — | — |
 
-**Argument form is `--flag value`, space-separated.** `--flag=value` is **not** accepted — see the
-open questions.
+**Argument syntax.**
+
+- A value follows its flag (`--sort mem`) or is attached with `=` (`--sort=mem`).
+- A separate value that looks like a flag is refused: `--sort --rows 5` is "`--sort` requires a
+  value", not a sort key of `--rows`. A negative number is still a value (`--pid -5` is out of
+  range, not missing), and an attached value is taken as written (`--watch-path=-odd`).
+- `--` ends the options. chakshu takes **no positional argument**, so anything after `--`, or any
+  bare word, is "unexpected argument" (exit 2).
+- A flag given twice keeps its **last** value (`--rows 3 --rows 4` is 4), getopt's convention.
+- Enum values are **case-sensitive** (`--sort CPU` exits 2).
+- Integers are strict: `--rows 5x` and a value past the 64-bit range are refused, never read as a
+  prefix or wrapped.
+- Short flags do not bundle (`-hV` is an unknown flag).
 
 `--rate` accepts up to three decimal places; a fourth and beyond is below millihertz resolution and
 is ignored rather than rejected (`1.0001` = `1`).
@@ -84,10 +99,13 @@ is ignored rather than rejected (`1.0001` = `1`).
 ⚠ **Every mode validates the whole command line.** `shu-ai --explain 1 --bogusflag` exits `2`, the
 same as `-p --bogusflag`. Until v0.9.4 `--explain` was the one path that did not, and exited `0`.
 
-⚠ `--explain` against an unreachable gateway exits **0**, printing the redacted context it would have
-sent. That is deliberate — it is what makes the prompt inspectable offline, and
-`tests/with_logs_smoke.py` depends on it — but it means **exit 0 does not imply the model answered**.
-Flagged as an open question below.
+⚠ `--explain` exits **0 only when the model answered**. If hoosh is unreachable or its reply is
+unusable, it still prints the redacted context it would have sent — that is what makes the prompt
+inspectable offline, and `tests/with_logs_smoke.py` reads it — and then exits **1** (since v0.12.0;
+it exited 0 before).
+
+⚠ **The AI-only flags on the lean `shu`** — `--explain` and `--with-logs` — are usage errors,
+exit **2**, with a message naming `shu-ai`. (Until v0.12.0 `--explain` exited 1 there.)
 
 ## Output streams
 
@@ -116,8 +134,9 @@ net:  <iface> rx <rate> tx <rate>  ...                                       (ex
 ```
 
 Where a source is unreadable the field reads `n/a` rather than `0` — a measured zero and an
-unmeasurable value are different facts. On a kernel with no procfs the `cpu:` line is
-`cpu:  n/a   disk: n/a   net: n/a` and the table renders its header with no rows.
+unmeasurable value are different facts. AGNOS has no procfs: there the table and the cpu, disk and
+net rates come from agnos syscalls (`proclist` #99 and its counters, since v0.9.8 – v0.10.1), and
+`load:` reads `n/a` because agnos exposes no load average.
 
 ## TUI key bindings
 
@@ -136,7 +155,7 @@ unmeasurable value are different facts. On a kernel with no procfs the `cpu:` li
 
 | Variable | Used by | Purpose |
 |---|---|---|
-| `CHAKSHU_WATCH_PATH` | both | default `--watch` path |
+| `CHAKSHU_WATCH_PATH` | both | the `--watch` log when `--watch-path` is not given |
 | `CHAKSHU_LOG_PATH` | `shu-ai` | `--with-logs` source; validated — regular files only, never `/proc`, `/sys`, `/dev`, `/home` |
 | `CHAKSHU_HOOSH_URL` | `shu-ai` | gateway endpoint |
 | `CHAKSHU_MODEL` | `shu-ai` | model name |
@@ -153,23 +172,21 @@ unmeasurable value are different facts. On a kernel with no procfs the `cpu:` li
 
 ---
 
-## ⛔ Open questions — settle before the freeze
+## Decisions settled at v0.12.0
 
-1. **`--watch`'s optional argument.** It swallows the next non-`-` token, so `shu --watch 5` opens a
-   file named `5`, and a path beginning with `-` is unreachable. It is the only optional-argument
-   flag in the surface. Options: make the argument required, or add `--watch-path P`.
-2. **No `--` end-of-options.** `shu --` exits 2. This is the standard escape hatch and the thing that
-   would make (1) survivable.
-3. **`--flag=value` unsupported.** htop's surface is `--sort-key=`, `--delay=`, `--user=`, `--pid=`.
-   Adding `=` later is additive so it is not a semver trap — but the first command a migrating htop
-   user types fails with "unknown flag".
-4. **`-p` has no long form,** and collides with both incumbents (`htop -p` = pid list, `btop -p` =
-   preset). Adding `--plain` now makes `-p` an alias that could later be deprecated, rather than a
-   name we are stuck with.
-5. **`--top` reads as a mode** and collides with `top(1)`. `-n` / `--rows` / `--limit` is the
-   conventional spelling for a row count.
-6. **`--explain` exits 0 when the gateway is unreachable.** Inspectable-offline is a real property,
-   but a caller cannot distinguish "answered" from "could not reach hoosh" by exit code alone.
-7. **Mode-incompatible flags are handled inconsistently.** `-p --pid 1` is a hard error; `-p --rate 5`,
-   `-p --color always` and `-p --theme light` are silent no-ops. Pick one policy — v1.0 locks
-   whichever ships.
+The questions this document ended with until v0.12.0, and their answers. The reasoning is in
+[`development/roadmap.md`](development/roadmap.md#decisions-before-the-freeze); the parser that
+implements them is `src/cli_parse.cyr`, unit-tested in `tests/chakshu.tcyr`.
+
+| # | Question | Decision |
+|---|---|---|
+| 1 | `--watch [PATH]` swallowed the next non-`-` token (`shu --watch 5` opened a file named `5`) | `--watch` takes no argument; the path is `--watch-path PATH`. `--watch PATH` is exit 2 with a message naming `--watch-path` |
+| 2 | No `--` | `--` ends the options |
+| 3 | No `--flag=value` | Accepted for every value flag |
+| 4 | `-p` had no long form | `--plain` |
+| 5 | `--top` reads as a mode | `--rows`; `--top` stays as an alias |
+| 6 | `--explain` exited 0 when hoosh could not answer | Exits 1, after printing the context |
+| 7 | Mode-incompatible flags were sometimes errors, sometimes silent no-ops | Always an error (exit 2) |
+| 8 | On the lean build `--with-logs` exited 2, `--explain` 1 | Both exit 2 |
+| 9 | A repeated flag's behaviour was undocumented | Last value wins |
+| 10 | Enum case was undocumented | Case-sensitive |
