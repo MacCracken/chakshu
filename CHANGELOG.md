@@ -4,6 +4,125 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.11.1] — 2026-10-31 — cyrius 6.7.18, and every dependency at its latest
+
+A patch: the toolchain and every git dependency move to their latest releases. No chakshu logic
+changed. Two comments in `src/tui.cyr` are corrected because darshana 1.5.0 made them false. On
+Linux the output is unchanged. On AGNOS ≥ 1.57.13, three behaviours change through darshana (below).
+
+### Changed — cyrius `6.7.9` → `6.7.18` (both manifests)
+
+These are patch releases inside the 6.7 language minor, and chakshu's source needed no change. The
+folds chakshu consumes moved with the toolchain:
+
+- **sandhi 1.10.9 → 1.13.7**, the hoosh transport. The nine sandhi functions `src/ai.cyr` calls have
+  the same signature in both folds (diffed). The hoosh-stub smoke passes against both the plain and
+  the DCE'd `shu-ai`. 1.13.7 carries the CYRIUS-2026-0044 fix (HPACK / HTTP/2 header-list bounds).
+- **sakshi 2.5.8 → 2.5.10.**
+- **bayan 1.5.13 → 1.11.1.**
+- **niyama stays 1.1.0.**
+
+Both lockfiles were regenerated from empty (`rm -rf lib cyrius.lock && cyrius deps`, at the root and
+in `ai/`). That also dropped stale entries the old locks still carried: darshana 1.1.1, bayan 1.5.5
+and niyama 1.0.10.
+
+### Changed — dependencies
+
+| dep | was | now | why this tag |
+|---|---|---|---|
+| darshana | 1.3.0 | **1.7.0** | latest |
+| mihi | 1.2.6 | **1.3.2** | latest |
+| ai-hwaccel | 2.3.22 | **2.5.5** | mihi 1.3.2's own pin (the tracking rule); also latest |
+| bayan (`ai/`) | 1.5.13 | **1.11.1** | what 6.7.18 folds, byte-identical (`cmp`); also latest |
+| niyama (`ai/`) | 1.1.0 | 1.1.0 | already latest, and what 6.7.18 folds (`cmp`) |
+
+The dependency sidecars were unioned and diffed against both `[deps].stdlib` lists. ai-hwaccel
+2.5.5's sidecar newly names `atomic` and `sync`. Both were already vendored transitively: the lean
+`lib/` file set is identical before and after. The AI `lib/` gains `math.cyr`, which bayan 1.11.1's
+JSON float parsing pulls in.
+
+**darshana 1.4.0 – 1.7.0 add four functions on Linux** (`tty_sgr_len`, `tty_sgr_strip_buf`,
+`tty_isatty_is_per_fd`, `tty_winsize_px`). chakshu calls none of them. Nothing it does call changed:
+the API is frozen and all 20 of darshana's digests are unchanged.
+
+⚠ **darshana 1.5.0 changed the AGNOS arm**, on agnos ≥ 1.57.13 (older kernels keep the 1.4.0
+answers):
+
+- `tty_isatty(fd)` now answers about `fd`, not about the console. On AGNOS, `--color auto` with
+  stdout on a file or pipe stops emitting colour (`_tui_color_auto`). `--watch` with stdin that is
+  not a terminal falls back to the plain dump, as on Linux.
+- `tty_flush_input(0)` is now console_mode#110's `CM_FLUSH`. The kill confirm discards keys waiting
+  in `kb_buf`, the queue `kbscan#42` reads, where it used to do nothing. The dwell guard stays.
+- An AGNOS build of darshana ≥ 1.5.0 needs cyrius ≥ 6.7.11; the 6.7.18 pin satisfies that.
+
+**mihi 1.3.1 / 1.3.2** is a toolchain move and an audit-and-hardening release:
+
+- The read path takes regular files only and opens them `O_NOCTTY`.
+- Malformed input returns the error value.
+- `mihi_cpu_model` returns null instead of `""` for an empty value. On AGNOS, `mihi_cpu_count`
+  returns -1 for a reported 0. Neither reaches chakshu's output: it null-checks the model and prints
+  a core count only when it is > 0 (`src/snapshot.cyr`).
+- ai-hwaccel 2.5.5 stops reporting a phantom "Google TPU v4" for every `/sys/class/accel` node. It
+  now finds Gaudi, Neuron, Cerebras and Graphcore without running a tool. chakshu prints
+  `mihi_gpu_name`, not the type, so new accelerators appear by name with no change here.
+
+### Changed — two comments in `src/tui.cyr`
+
+- **The kill-confirm flush** said `tty_flush_input` "returns -1 and does nothing" on AGNOS. It now
+  says when it flushes (agnos ≥ 1.57.13, fd 0 the console) and when the dwell guard is the only
+  defence.
+- **The AGNOS TUI entry** said agnos "has no isatty-equivalent". agnos 1.57.13 has one (`fd_kind#111`).
+  The entry still gates on the console grid alone, and adding the isatty check is now on the roadmap.
+
+### Warnings
+
+- **Lean build:** `undefined function 'bayan_json_v_*'` rose from 7 to 10. The new ones come from
+  ai-hwaccel 2.5.5's input checks in `profile_from_json`. They are unreachable (no caller outside
+  `json_out`), DCE removes them, and mihi 1.3.1 documents them. The roadmap item that expected
+  them to clear at this bump is corrected.
+- **Lean build:** `large static data` is gone. The toolchain alone removed it: v0.11.0's tree under
+  6.7.18 does not print it.
+- **Gone from the AI build:** the three `'bayan_json_v_obj_get' is deprecated` warnings (ai-hwaccel
+  2.5.5) and the `lib/sigil.cyr` oversized-local warning.
+- **Still in the AI build:** the four expected `nolibc.cyr` redefinitions, `refusing to overwrite
+  stdlib leaf 'bayan'`, and `large static data (244208 bytes)`.
+
+### Sizes
+
+To separate the toolchain from the deps, v0.11.0's tree was also built under 6.7.18 with its own
+dep tags.
+
+| binary | v0.11.0 (6.7.9) | toolchain only | v0.11.1 |
+|---|---:|---:|---:|
+| lean `shu` | 688,520 | 628,360 | 728,856 |
+| lean `shu`, DCE'd (**shipped**) | 434,568 | 374,408 | **458,520** |
+| `shu-ai` | 3,222,184 | 3,216,016 | 3,316,448 |
+| `shu-ai`, DCE'd (**shipped**) | 1,907,368 | 1,651,344 | **1,735,392** |
+| `shu`, AGNOS | 694,904 | — | 739,560 |
+| `shu-ai`, AGNOS | 3,190,504 | — | 3,280,688 |
+
+- **darshana 1.7.0 adds 0 B to file size.** Its four new functions are 2,336 B of code, none of it
+  reachable from chakshu. The page padding before the data segment absorbs it.
+- **mihi 1.3.2 and ai-hwaccel 2.5.5 add the rest:** +100,496 B plain and +84,112 B DCE'd in the
+  lean build. mihi's changelog attributes it to ai-hwaccel's added no-exec detectors and audit checks.
+- **The shipped lean binary is 458,520 B**, against the < 768 KB target.
+
+### Verified
+
+- `scripts/check.sh` **23 / 23**, run both before and after the version bump. That covers:
+  - monitor 208, AI 53;
+  - PTY 16 scenarios, against both `shu` and the DCE'd `shu`;
+  - the with-logs privacy smoke and the hoosh-stub smoke;
+  - no-libc: both binaries static, 0 `NEEDED`.
+- The DCE'd `shu-ai` that `release.yml` ships passes smoke, the with-logs privacy smoke and the
+  hoosh-stub smoke.
+- `tests/agnos_qemu.py` **35 / 35** on agnos 1.57.14, `-smp 4`. That kernel is ≥ 1.57.13, so
+  darshana's new AGNOS arm is the code under test. Scenario [5] opens the kill confirm, so it runs
+  the new `CM_FLUSH` call, and `n` still cancels. The harness types no keys ahead of the prompt,
+  so it cannot show that typeahead is actually discarded.
+
+Not run: a manual TUI session on a real terminal. aarch64 was not re-measured.
+
 ## [0.11.0] — 2026-10-12 — cyrius 6.7.9, darshana 1.3.0, and the defects darshana's survey found
 
 A minor: the toolchain moves across the 6.7 **language** minor, darshana moves 1.1.1 → 1.3.0, and

@@ -555,8 +555,10 @@ fn _tui_enter_confirm_kill(pid) {
     # enough, a burst can still be waiting there. darshana 1.3.0's
     # tty_flush_input; chakshu issued the same ioctl by hand (behind an
     # #ifndef CYRIUS_TARGET_AGNOS, since agnos has no ioctl) until v0.11.0.
-    # On agnos it returns -1 and does nothing — the kernel's keyboard buffer has
-    # no flush call — so the dwell guard below is the typeahead defence there.
+    # On agnos >= 1.57.13 (darshana >= 1.5.0) it is console_mode#110's CM_FLUSH,
+    # which empties kb_buf — the queue kbscan#42 reads — when fd 0 is the console.
+    # On an older kernel, or any other fd 0, it returns -1 and does nothing, so
+    # the dwell guard below stays the typeahead defence there.
     tty_flush_input(0);
     _tui_confirm_at = clock_now_ms();
     tui_render_frame();
@@ -1674,9 +1676,10 @@ fn tui_run(refresh_ms, sort_key, top_n, color_mode, focus_pid) {
     #endif
 
     #ifdef CYRIUS_TARGET_AGNOS
-    # agnos has no isatty-equivalent for the framebuffer console, but it also
-    # has no pipe case to guard against: if the grid cannot be read the console
-    # is not up, and there is nothing to render to.
+    # The gate here is the grid alone: if it cannot be read the console is not
+    # up, and there is nothing to render to. agnos >= 1.57.13 also answers
+    # tty_isatty per fd (fd_kind#111, darshana >= 1.5.0), so stdout on a pipe or
+    # file is detectable there now; this entry does not check it yet (roadmap).
     var ag_r = 0;
     var ag_c = 0;
     if (tty_winsize(0, &ag_r, &ag_c) < 0) {

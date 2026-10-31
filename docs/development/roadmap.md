@@ -5,7 +5,7 @@
 > [`state.md`](state.md). This file answers one question: *what is left to reach
 > v1.0, and in which release does it land?*
 >
-> **Current: v0.11.0.** | **Last Updated**: 2026-10-12
+> **Current: v0.11.1.** | **Last Updated**: 2026-10-31
 
 ---
 
@@ -36,6 +36,7 @@ inside it are additive or corrective only.
 | ~~0.10.2~~ | ~~pid-0 sentinel fix; multi-core harness~~ | **shipped 2026-09-08.** Found a fabricated 59% CPU% by running the harness at `-smp 4` for the first time — the baseline map was keyed by pid and 0 is the hashmap empty sentinel. Filed with cyrius; nameless-row filter dropped now agnos 1.57.1 fixed the idle park. Cyrius 6.6.1 |
 | ~~0.10.3~~ | ~~Cyrius 6.6.2~~ | **shipped 2026-09-11.** Toolchain patch only; no source change |
 | ~~0.11.0~~ | ~~Cyrius 6.7.9; darshana 1.3.0; the darshana survey's defects~~ | **shipped 2026-10-12.** The 6.7 language minor needed no source change; it surfaced three build-config repairs (the `ai/` manifest's `${file:../VERSION}`, nolibc.cyr's refusals becoming redefinitions, niyama/bayan tags off the toolchain folds). darshana 1.3.0 replaced the hand-rolled SGR, TCIFLUSH, siginfo read and winsize guard; fixed C1 controls in every untrusted-text path, the aarch64 epoll tag, `shu \| head` leaving the terminal raw, the teardown order, and `?` killing shu on AGNOS |
+| ~~0.11.1~~ | ~~Cyrius 6.7.18; every dep at its latest~~ | **shipped 2026-10-31.** No logic change. darshana 1.7.0, mihi 1.3.2, ai-hwaccel 2.5.5 (mihi's pin), bayan 1.11.1 (the 6.7.18 fold); niyama already latest. darshana 1.5.0's AGNOS arm makes `tty_isatty` per-fd and `tty_flush_input` real on agnos ≥ 1.57.13. Shipped lean `shu` 458,520 B: the toolchain took 60 KB off, mihi/ai-hwaccel added 84 KB |
 | **1.0.0** | Ship as the AGNOS default monitor | Registry promotion, ISO default, announce |
 
 ---
@@ -133,12 +134,22 @@ inside it are additive or corrective only.
       not a supported target (state.md), so this is recorded rather than scheduled — but it blocks
       proving the v0.11.0 epoll-tag fix end to end on ARM. That fix is proven by the unit suite on
       the Pi instead: with the old `+4` read the tag comes back as `0x25A5A5A5A`, not 2.
-- [ ] **Move mihi / ai-hwaccel when mihi pins a 6.7-built ai-hwaccel.** ai-hwaccel 2.3.22
-      calls `bayan_json_v_obj_get`, which the 6.7.9 bayan fold marks `#deprecated` — three
-      warnings in the `shu-ai` build — and its optional-bayan code is what leaves seven
-      `undefined function 'bayan_json_v_*'` warnings in the lean build. Both are dependency code
-      and both clear at a dep bump; the tracking rule (ai-hwaccel follows mihi's own pin) means
-      mihi moves first. mihi 1.2.7 still pins 2.3.22.
+- [x] **Move mihi / ai-hwaccel when mihi pins a 6.7-built ai-hwaccel.** Done at v0.11.1
+      (mihi 1.3.2, ai-hwaccel 2.5.5). The three `bayan_json_v_obj_get` deprecation warnings in
+      `shu-ai` are gone. ⚠ This item's other claim was wrong: the lean build's `undefined function
+      'bayan_json_v_*'` warnings did not clear. They rose from 7 to 10, because 2.5.5's
+      `profile_from_json` checks reference three more. They are unreachable and DCE removes them,
+      as mihi 1.3.1 documents. They clear only if ai-hwaccel stops referencing bayan without
+      requiring it, or if chakshu supplies `bayan-json`, which would add bytes to silence a warning.
+
+## Found at v0.11.1, not scheduled
+
+- [ ] **The AGNOS TUI entry could check `tty_isatty(1)`.** `tui_run`'s AGNOS arm gates on the
+      console grid alone, because agnos had no isatty equivalent. agnos 1.57.13 added `fd_kind#111`,
+      and darshana ≥ 1.5.0's `tty_isatty` uses it, so `shu > file` on AGNOS is detectable now.
+      Gate it on `tty_isatty_is_per_fd() == 1` so an older kernel, where `tty_isatty` answers
+      about the console, keeps today's behaviour. This is a behaviour change, so it is not part of
+      a dependency patch.
 
 ---
 
