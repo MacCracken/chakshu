@@ -184,3 +184,103 @@ These bind every release above; they are not work items.
   `/home` contents, no env vars, no unredacted cmdline.
 - **Version bumps at milestone close, not per feature** — patches inside a minor
   are additive or corrective only.
+
+---
+
+## Adopting cmdit (CLI parsing)
+
+This is demand-gated, not a forced sweep, but the **timing** matters. v1.0 criterion 1 freezes the
+CLI (`docs/cli-contract.md`). Before that, syntax changes cost nothing; after it, each one is a
+semver event. chakshu is a Tier-3 candidate in the 2026-06-25 ecosystem CLI review
+(`agnosticos/docs/development/planning/cmdit.md`).
+
+**What is hand-rolled.** `chakshu_main` (`src/cli.cyr:88-392`) is shared by both entries
+(`src/main.cyr`, `ai/main.cyr`). It already has cmdit's shape: accumulate, then dispatch. Underneath
+it is `args_init`/`argc`/`argv` + `streq`, values must be space-separated, there is no `--`, and
+any non-flag token is reported as `unknown flag` (`:345`). The exit codes 0/1/2 (`:13-15`) are
+exactly `CMDIT_EXIT_OK/RUN/USAGE`. Help (`:22-61`) and version (`:17-20`) go to **stdout**. Every
+error is a custom `chakshu: …` line on stderr that echoes the bad token or value (`:81-86`,
+`:167-169`, `:235-237`, `:254-256`).
+
+**Site → cmdit.**
+
+- [ ] `cmdit_new("chakshu")`. The automatic `-h`/`--help` and `-V`/`--version` match exactly, and
+      so does help-before-version (`:349-350`). Keep `CHAKSHU_VERSION` at `:10`, because
+      `.github/workflows/ci.yml:474`, `release.yml:55` and `scripts/check.sh:191` grep for it there.
+- [ ] `-p` → `cmdit_bool(h, 112, 0, …)`, since cmdit allows a short-only flag. The `--plain` from
+      open question 4 is the same call with a long name.
+- [ ] `--sort cpu|mem|pid|name|user` (`:155-174`) → `cmdit_enum`; the index is
+      `SORT_CPU..SORT_USER` (`src/processes.cyr:43-47`). `--theme dark|light|auto` (`:225-242`) is
+      0/1/2 the same way. `--color auto|always|never` (`:244-261`) stores 1/2/0, so it needs a
+      small mapping table.
+- [ ] `--top`, `--pid` and `--explain` (`:203-216`, `:267-276`, `:298-307`) → `cmdit_int` +
+      `cmdit_range(h, f, 1, <i64 max>)`. Stdlib `atoi` accepts `5x` as 5 and wraps on overflow,
+      and cmdit rejects both. Move the `--pid` `/proc` probe (`:277-288`, exit 1) to after
+      help/version dispatch. Then `--pid 99999 --help` prints help, following the contract's
+      "help wins" rule.
+- [ ] `--with-logs` → `cmdit_bool`. The pre-scan (`:101-113`) exists only for order independence,
+      and reading the flag after the parse already gives that. In the lean build,
+      `shu --with-logs --bogus` then reports the unknown flag instead of "needs the AI build"
+      (both exit 2).
+- [ ] Mode precedence (`:348-391`) and the `--watch` × `-p`/`--pid` and `-p` × `--pid` rejections
+      (`:366-383`) stay as they are. The comment at `:120-122` says "the last one wins", but the
+      code implements a fixed precedence.
+
+**Gaps.**
+
+- **`--watch [PATH]` (`:328-339`) has no cmdit equivalent**, because optional-value flags are in the
+  v2 backlog. This is contract open question 1, so settle it first. Both options the contract
+  names can be expressed in cmdit:
+  - **`--watch-path P`**: `cmdit_env(h, f, "CHAKSHU_WATCH_PATH")` reproduces the CLI → env →
+    default order of `src/watch_render.cyr:15-19`.
+  - **A required argument**: a plain `cmdit_str`.
+  - **Stopgap closest to today**: `--watch` as a bool plus at most one positional
+    (`cmdit_require_positionals_max(h, 1)`), rejected unless `--watch` is set. It is looser than
+    today, because PATH no longer has to follow `--watch` directly.
+- `--rate` is a float flag (v2 backlog): fixed-point milli-Hz, 0.2–10, parsed in
+  `src/rate.cyr:33`. It stays `cmdit_str` + `parse_rate_mhz` + the bounds at `:188-195`, and does
+  not block adoption.
+- Open question 5, renaming `--top` but keeping it as an alias, would take two registrations,
+  because cmdit only supports long aliases for verbs.
+- `NO_COLOR`/`TERM`/`COLORFGBG` (`src/tui.cyr:367-386`) drive `auto` resolution and are not
+  fallbacks for any flag. `CHAKSHU_HOOSH_*`/`CHAKSHU_MODEL`/`CHAKSHU_LOG_PATH`
+  (`src/ai.cyr:850`, `:960`) are read from the environment only. All of these stay caller-side.
+  The `CHAKSHU_*` allowlist at `check.sh:177` scans the AI source, not `lib/`, so cmdit's own
+  `getenv` does not trip it.
+- Adopting cmdit also answers open questions 2 and 3: `--` and `--flag=value` start working. The
+  contract counts both as additive. Its line "`--flag=value` is **not** accepted" must change in the
+  same commit.
+
+**Output identity.** Keep `print_help`/`print_version` and the custom messages, and branch on
+`cmdit_error(h)` + `cmdit_err_flag(h)`. `cmdit_help_flags` writes to stderr. The contract puts help
+on stdout, and `scripts/smoke.sh:53-58` captures it there. `cmdit_help` would print `Usage:
+chakshu`, while the binary is `shu`. `cmdit_print_error` echoes no token, and cmdit does not store
+the unknown token or the rejected value. So the `'foo'`/`--bogus` echoes must come from
+`cmdit_raw_argv`.
+
+**Manifests — both of them.** The AI build has its own manifest (`ai/cyrius.cyml`). Neither manifest
+declares stdlib `flags`, and both already carry `"args"` and `"io"`. kii and anuenue already pin
+cmdit under cyrius 6.7.9. Add this to `cyrius.cyml` **and** `ai/cyrius.cyml`:
+
+    [deps.cmdit]
+    git = "https://github.com/MacCracken/cmdit.git"
+    tag = "1.3.0"
+    modules = ["dist/cmdit.cyr"]
+
+**Tests and gates.** No unit test drives `chakshu_main`. `tests/chakshu.tcyr` includes modules
+directly (`:4-6`). Its `parse_rate_mhz` group (`:601-621`) stays, and `:58-59` are cosmetic `streq`
+checks. The bar is `scripts/smoke.sh`, which `scripts/check.sh` runs against `shu`, `shu-ai` and the
+DCE'd `shu` (`:76`, `:89`, `:122`). It checks help parity on stdout (`:53-58`), that an unknown flag
+exits 2 with stderr only (`:76-82`), build-aware `--with-logs` (`:96-108`), `--watch` combinations
+(`:161-168`), `--top` (`:262-273`), `--sort foo` with "unknown key" (`:298-304`) and the rejection
+matrix (`:309-328`). The PTY gates drive flags too: `tests/integration_smoke.py:167`, `:246`, `:406`,
+`:593-594`, `:620`, `tests/with_logs_smoke.py:124-125` and `tests/hoosh_stub_smoke.py:93`.
+
+- [ ] Identity bar: byte-compare stdout, stderr and exit status before and after, for every
+      invocation above plus `--bogus`, `foo`, `--sort` (no value), `--top 5x` and
+      `--pid 99999 --help`. Each changed line must be either intended, and recorded in the CHANGELOG
+      and `docs/cli-contract.md`, or fixed.
+
+References: cmdit `README.md` (API reference), `docs/adr/0001-flag-modifiers.md` (scope),
+`docs/development/roadmap.md` (v2 backlog: optional-value and float flags). Worked examples: kii,
+anuenue (custom help framing), dig (Tier-3).
