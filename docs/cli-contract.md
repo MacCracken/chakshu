@@ -129,9 +129,16 @@ cpu:  <N>%   disk: rd <rate> wr <rate>   net: rx <rate> tx <rate>
 core: <N> <N> ...                                                            (one field per core)
 disk: <dev> rd <rate> wr <rate>  ...                                         (whole disks only)
 net:  <iface> rx <rate> tx <rate>  ...                                       (excludes lo)
-   PID USER      S  CPU%  MEM% CMD
+    PID USER      S  CPU%  MEM% CMD
 <rows>
 ```
+
+The PID field is **7 wide**, right-aligned: the width of Linux's largest possible pid
+(`PID_MAX_LIMIT`, 4,194,304 on 64-bit), so USER starts in column 9 on the header and on every row.
+It was 6 wide until v0.12.1, and a pid past 999,999 pushed its row one column right. USER is 9
+wide, clipped (never widened) and never cut inside a UTF-8 character. **No line above the table
+ends in whitespace**; the `disk:` and `net:` lines did until v0.12.1. A table row ends with the
+process's own cmdline, which may.
 
 Where a source is unreadable the field reads `n/a` rather than `0` — a measured zero and an
 unmeasurable value are different facts. AGNOS has no procfs: there the table and the cpu, disk and

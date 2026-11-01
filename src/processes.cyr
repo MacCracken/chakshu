@@ -526,10 +526,14 @@ fn proc_rec_uid(rec) {
 
 # Render the top-N rows of the sorted process table to stdout. Layout:
 #
-#      PID USER      S  CPU%  MEM% CMD
-#    1234 macro     R    18     3 firefox
-#     892 root      S     6     1 Web Content
+#       PID USER      S  CPU%  MEM% CMD
+#      1234 macro     R    18     3 firefox
+#   4194303 root      S     6     1 Web Content
 #
+# v0.12.1: PID is 7 wide. It was 6, and Linux's pid ceiling (PID_MAX_LIMIT,
+# 4,194,304 on 64-bit) has 7 digits, so a pid past 999,999 pushed its whole row
+# one column right of the header. 7 holds every pid Linux can issue, so the
+# header stays one fixed string for the -p line contract.
 # v0.9.5: USER added — design-spec §1 listed sort/filter by user as in scope from
 # M0 and there was no column at all. It sits second because that is where htop and
 # ps put it, and a migrating user reads left-to-right.
@@ -537,7 +541,7 @@ fn proc_rec_uid(rec) {
 # mem_pct = rss_pages × 4096 × 100 / (mem_total_kb × 1024) simplifies
 # to rss × 400 / mem_total_kb (integer truncation; sub-1% reads as 0).
 fn processes_render(top_n, mem_total_kb) {
-    syscall(1, 1, "   PID USER      S  CPU%  MEM% CMD\n", 35);
+    syscall(1, 1, "    PID USER      S  CPU%  MEM% CMD\n", 36);
     var n = _proc_n;
     if (n > top_n) { n = top_n; }
     var i = 0;
@@ -555,7 +559,7 @@ fn processes_render(top_n, mem_total_kb) {
                 mem = rss * 400 / mem_total_kb;
             }
         }
-        _proc_print_int_pad(pid, 6);
+        _proc_print_int_pad(pid, 7);
         syscall(1, 1, " ", 1);
         # USER, left-aligned in a 9-wide column. Names longer than that are
         # CLIPPED rather than widening the row: the column budget belongs to CMD,
@@ -571,7 +575,7 @@ fn processes_render(top_n, mem_total_kb) {
         } else {
             ul = users_name_for(uidv, &unm, 24);
         }
-        if (ul > 9) { ul = 9; }
+        if (ul > 9) { ul = utf8_cut_len(&unm, ul, 9); }
         syscall(1, 1, &unm, ul);
         var upad = 9 - ul;
         while (upad > 0) { syscall(1, 1, " ", 1); upad = upad - 1; }

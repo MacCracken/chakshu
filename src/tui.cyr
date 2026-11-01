@@ -894,8 +894,7 @@ fn tui_render_focus_frame() {
     var avail = _tui_cols - 9;
     if (avail < 0) { avail = 0; }
     if (cmd_n > 0) {
-        var to_print = cmd_n;
-        if (to_print > avail) { to_print = avail; }
+        var to_print = utf8_cut_len(&cmd_buf, cmd_n, avail);
         if (to_print > 0) { syscall(1, 1, &cmd_buf, to_print); }
     } else {
         # Kernel thread — show bracketed comm
@@ -1261,7 +1260,7 @@ fn tui_render_table_frame() {
         if (_proc_n == 0) { processes_sample_delta(total_delta, ncores, sort_key); }
     }
     tty_move(5, 1);
-    syscall(1, 1, "   PID USER      S  CPU%  MEM% CMD", 34);
+    syscall(1, 1, "    PID USER      S  CPU%  MEM% CMD", 35);
     tty_clear_to_eol();
 
     # Slice E.5: build the filtered index list. Walks _proc_recs in
@@ -1347,7 +1346,7 @@ fn tui_render_table_frame() {
         var rowbuf[512];
         var rp = 0;
         rp = _tui_row_col(&rowbuf, rp, 512, _tui_c_faint());
-        rp = _tui_row_pad(&rowbuf, rp, 512, pid, 6);
+        rp = _tui_row_pad(&rowbuf, rp, 512, pid, 7);
         rp = _tui_row_reset(&rowbuf, rp, 512);
         rp = _tui_row_app(&rowbuf, rp, 512, " ");
         # v0.9.5: USER, left-aligned in a 9-wide column, dim like the pid — it is
@@ -1355,7 +1354,7 @@ fn tui_render_table_frame() {
         # the column budget belongs to CMD, which is the field a reader scans.
         var unm[24];
         var ul = users_name_for(proc_rec_uid(rec), &unm, 24);
-        if (ul > 9) { ul = 9; store8(&unm + 9, 0); }
+        if (ul > 9) { ul = utf8_cut_len(&unm, ul, 9); store8(&unm + ul, 0); }
         rp = _tui_row_col(&rowbuf, rp, 512, _tui_c_faint());
         rp = _tui_row_app(&rowbuf, rp, 512, &unm);
         rp = _tui_row_reset(&rowbuf, rp, 512);
@@ -1389,9 +1388,11 @@ fn tui_render_table_frame() {
         # advances past row _tui_rows, and the alt-screen scrolls the header
         # off — the exact failure the original 21 was introduced to fix, just
         # one pid_max bump later. Derived per row so it cannot drift again.
+        # v0.12.1: the column is 7 wide (the header too), the width of Linux's
+        # PID_MAX_LIMIT, so a 7-digit pid no longer shifts its row right either.
         var pid_str[24];
         var pid_w = _proc_int_to_cstr(pid, &pid_str);
-        if (pid_w < 6) { pid_w = 6; }
+        if (pid_w < 7) { pid_w = 7; }
         var cmd_buf[256];
         # v0.9.0: cached. This is the per-row read that put the full table over
         # design-spec §8's < 0.5% CPU target (0.517% full vs 0.467% at --top 1
@@ -1401,8 +1402,7 @@ fn tui_render_table_frame() {
         var avail = _tui_cols - (pid_w + 25);
         if (avail < 0) { avail = 0; }
         if (cmd_n > 0) {
-            var to_print = cmd_n;
-            if (to_print > avail) { to_print = avail; }
+            var to_print = utf8_cut_len(&cmd_buf, cmd_n, avail);
             if (to_print > 0) { syscall(1, 1, &cmd_buf, to_print); }
         } else {
             # Bracketed [comm] for kernel threads. Keep brackets if
@@ -1417,8 +1417,7 @@ fn tui_render_table_frame() {
                 syscall(1, 1, "]", 1);
             }
             else {
-                var to_print = comm_l;
-                if (to_print > avail) { to_print = avail; }
+                var to_print = utf8_cut_len(comm_p, comm_l, avail);
                 if (to_print > 0) { syscall(1, 1, comm_p, to_print); }
             }
         }
@@ -1676,10 +1675,21 @@ fn tui_run(refresh_ms, sort_key, top_n, color_mode, focus_pid) {
     #endif
 
     #ifdef CYRIUS_TARGET_AGNOS
-    # The gate here is the grid alone: if it cannot be read the console is not
-    # up, and there is nothing to render to. agnos >= 1.57.13 also answers
-    # tty_isatty per fd (fd_kind#111, darshana >= 1.5.0), so stdout on a pipe or
-    # file is detectable there now; this entry does not check it yet (roadmap).
+    # v0.12.1: stdin must be a terminal, as on Linux (the tty_raw(0) gate above,
+    # same message). Keys come from kbscan#42 whatever fd 0 is, so without this a
+    # script that piped into shu (`shu -p | shu`) handed it the console. agnos >=
+    # 1.57.13 answers tty_isatty per fd (fd_kind#111, darshana >= 1.5.0); an older
+    # kernel answers about the console, so the check is skipped there and the entry
+    # behaves as it did. stdout is not checked, on either platform: `shu | head`
+    # is a supported shape (PTY scenario 15).
+    if (tty_isatty_is_per_fd() == 1) {
+        if (tty_isatty(0) == 0) {
+            eprintln("chakshu: stdin is not a TTY (use -p for plain mode)");
+            return EXIT_ERR;
+        }
+    }
+    # The console grid: if it cannot be read the console is not up, and there is
+    # nothing to render to.
     var ag_r = 0;
     var ag_c = 0;
     if (tty_winsize(0, &ag_r, &ag_c) < 0) {

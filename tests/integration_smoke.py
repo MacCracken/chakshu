@@ -22,9 +22,13 @@ Default binary: ../build/shu relative to this file.
 import fcntl
 import os
 import pty
+import re
 import select
+import shutil
 import struct
+import subprocess
 import sys
+import tempfile
 import termios
 import time
 
@@ -449,6 +453,38 @@ def _kill_scenario(shu_path, burst):
             pass
 
 
+def _utf8_probe():
+    """v0.12.1. Start a sleeping process whose cmdline puts a 4-byte UTF-8
+    character across every cmdline cut point the TUI has had at 80 columns: the
+    table's (80 - (7 + 25) = 48 bytes; 49 before v0.12.1 widened the PID column)
+    and the focus panel's (80 - 9 = 71). The cmdline is
+    "u8 -c import time; time.sleep(30) " (34 bytes) and then U+1F600
+    (F0 9F 98 80) repeated. 14, 15 and 37 bytes into the run are 2, 3 and 1 mod 4,
+    so a byte cut lands inside a character at all three. (A 3-byte character
+    cannot do it: three consecutive residues mod 3 always include 0.) Its comm is
+    `utf8probe`, for the filter. Returns (Popen, temp dir)."""
+    d = tempfile.mkdtemp(prefix="shu-u8-")
+    link = os.path.join(d, "utf8probe")
+    os.symlink(sys.executable, link)
+    p = subprocess.Popen(["u8", "-c", "import time; time.sleep(30)", "\U0001F600" * 40],
+                         executable=link)
+    time.sleep(0.2)
+    return p, d
+
+
+def _utf8_clean(out):
+    """None if `out` is well-formed UTF-8, else where it is not."""
+    try:
+        out.decode("utf-8")
+        return None
+    except UnicodeDecodeError as e:
+        return f"byte {e.start}: {out[max(0, e.start - 12):e.start + 4]!r}"
+
+
+def _strip_csi(out):
+    return re.sub(rb"\x1b\[[0-9;?]*[A-Za-z]", b"", out)
+
+
 def main():
     shu = sys.argv[1] if len(sys.argv) > 1 else SHU_DEFAULT
     if not os.path.isfile(shu) or not os.access(shu, os.X_OK):
@@ -461,6 +497,7 @@ def main():
 
     print(f"PTY smoke: driving {shu}")
     failures = []
+    skipped = []
 
     # ---------------- 1: launch + q quit ----------------
     print("[1] launch + q quit")
@@ -679,14 +716,78 @@ def main():
     else:
         passed(f"q with the reader gone: exit status {status}, ICANON|ECHO restored")
 
+    # ---------------- 17/18: a cmdline cut never splits a character ----------
+    # v0.12.1. The CMD column and the focus panel clipped by BYTES, so a UTF-8
+    # cmdline could end a row on a lone lead byte. The probe's cmdline straddles
+    # both cut points (see _utf8_probe), and the assertion is on the WHOLE output:
+    # every byte the TUI wrote is well-formed UTF-8.
+    probe, probe_dir = _utf8_probe()
+    try:
+        print("[17] the CMD column cuts at a character boundary")
+        out, rc = drive([b"f"] + [bytes([c]) for c in b"utf8probe"] + [b"\r", b"q"],
+                        args=["--color", "never"], shu_path=shu, timeout=8.0)
+        expect_rc("filter to the probe + q exits 0", rc, 0, failures)
+        expect_in("the probe's row was drawn", b"time.sleep(30) \xf0\x9f\x98\x80", out, failures)
+        bad = _utf8_clean(out)
+        if bad:
+            fail("table cut", "output is not well-formed UTF-8 at " + bad)
+            failures.append("table cut: not UTF-8 at " + bad)
+        else:
+            passed("the table's output is well-formed UTF-8")
+
+        print("[18] the focus panel's cmdline cuts at a character boundary")
+        out, rc = drive([b"q"], args=["--pid", str(probe.pid), "--color", "never"],
+                        shu_path=shu)
+        expect_rc("--pid probe + q exits 0", rc, 0, failures)
+        expect_in("the probe's cmdline was drawn", b"time.sleep(30) \xf0\x9f\x98\x80", out, failures)
+        bad = _utf8_clean(out)
+        if bad:
+            fail("focus cut", "output is not well-formed UTF-8 at " + bad)
+            failures.append("focus cut: not UTF-8 at " + bad)
+        else:
+            passed("the focus panel's output is well-formed UTF-8")
+    finally:
+        probe.kill()
+        probe.wait()
+        shutil.rmtree(probe_dir, ignore_errors=True)
+
+    # ---------------- 19: a 7-digit pid row aligns to the header ----------------
+    # v0.12.1. The PID column was 6 wide and Linux pids reach 7 digits. A real
+    # pid 1234567 is made in a private pid namespace (ns_last_pid is writable by
+    # the namespace's own root). Unprivileged user namespaces are refused on some
+    # CI runners; there the scenario SKIPS, and smoke.sh's -p alignment gate
+    # still covers the shared width.
+    print("[19] a 7-digit pid row aligns to the 7-wide PID header")
+    unshare = shutil.which("unshare")
+    ns_ok = unshare is not None and subprocess.run(
+        [unshare, "-Urpf", "--mount-proc", "sh", "-c",
+         "echo 1234566 > /proc/sys/kernel/ns_last_pid"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    if not ns_ok:
+        print("  skip: no unprivileged pid namespace here")
+        skipped.append(19)
+    else:
+        script = ("echo 1234566 > /proc/sys/kernel/ns_last_pid || exit 77; "
+                  "sleep 30 & exec \"$0\" --sort pid --color never")
+        out, rc = drive([b"", b"", b"q"], args=["-Urpf", "--mount-proc", "sh", "-c", script, shu],
+                        shu_path=unshare, timeout=8.0)
+        expect_rc("shu in a pid namespace + q exits 0", rc, 0, failures)
+        flat = _strip_csi(out)
+        expect_in("the header's PID field is 7 wide", b"    PID USER      S  CPU%  MEM% CMD", flat, failures)
+        expect_in("pid 1234567 fills it exactly", b"1234567 root ", flat, failures)
+
     # ---------------- summary ----------------
     print()
-    total = 16
+    total = 19
     if failures:
         print(f"PTY smoke: FAIL ({len(failures)} of {total} tests)")
         for f in failures:
             print(f"  - {f}")
         sys.exit(1)
+    if skipped:
+        print(f"PTY smoke: PASS ({total - len(skipped)}/{total}, "
+              f"{len(skipped)} skipped: scenario {', '.join(map(str, skipped))})")
+        return
     print(f"PTY smoke: PASS ({total}/{total})")
 
 

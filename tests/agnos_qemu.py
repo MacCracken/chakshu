@@ -215,7 +215,8 @@ def boot_and_run(work, img, ovmf, command, hold, keys=""):
         else:
             return None, "boot never reached the agnsh prompt"
 
-        km = {" ": "spc", "\n": "ret", "-": "minus", ".": "dot", "/": "slash"}
+        km = {" ": "spc", "\n": "ret", "-": "minus", ".": "dot", "/": "slash",
+              "|": "shift-backslash"}
 
         def typ(text):
             for ch in text:
@@ -423,6 +424,17 @@ def main():
         check("the TUI repaints after the overlay closes", "[q] quit" in after)
         check("`q` then quits cleanly: alt screen left", "\x1b[?1049l" in after)
         check("`q` then quits cleanly: cursor restored", "\x1b[?25h" in after)
+
+        print("[7] a TUI whose stdin is not a terminal refuses, as on Linux")
+        # ⛔ ADDED v0.12.1. Keys come from kbscan#42 whatever fd 0 is, so the agnos
+        # entry never looked at stdin: the second stage of `shu -p | shu` took the
+        # console over, where Linux exits 1 with "stdin is not a TTY". darshana >=
+        # 1.5.0's tty_isatty answers per fd on agnos >= 1.57.13 (fd_kind#111), and
+        # the entry now asks it. agnsh's two-stage pipeline puts the pipe's read
+        # end on the second stage's stdin.
+        out = run_or_die(work, img, ovmf, "shu -p | shu", 10)
+        check("the second stage says stdin is not a TTY", "stdin is not a TTY" in out)
+        check("no TUI took the console (no alt screen)", "\x1b[?1049h" not in out)
     except BootFailed as e:
         print(f"  FAIL: {e}")
         failures.append(str(e))

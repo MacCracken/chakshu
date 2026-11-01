@@ -1164,16 +1164,8 @@ fn _ai_overlay_put(src, len) {
     var tmp[512];
     var off = 0;
     while (off < len) {
-        var take = len - off;
-        if (take > 512) {
-            take = 512;
-            var back = 0;
-            while (back < 3) {
-                if ((load8(src + off + take) & 192) != 128) { break; }
-                take = take - 1;
-                back = back + 1;
-            }
-        }
+        # v0.12.1: the cut is the shared utf8_cut_len (src/proc.cyr).
+        var take = utf8_cut_len(src + off, len - off, 512);
         var m = tty_sanitize_buf(&tmp, 0, src + off, take, TTY_SANITIZE_UTF8, TTY_KEEP_TAB);
         if (m > 0) { syscall(1, 1, &tmp, m); }
         off = off + take;

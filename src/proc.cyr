@@ -729,6 +729,34 @@ fn proc_pid_stat_parse(buf, n, out_rec) {
     return 0;
 }
 
+# How many of the `n` bytes at `s` to write when at most `max` fit, without
+# ending inside a UTF-8 sequence. v0.12.1: every render-side clip goes through
+# this — the TUI's CMD column, its kernel-thread comm, the focus panel's cmdline,
+# both USER columns, the --watch panel and the AI overlay. A byte cut can leave
+# a lone lead byte at the end of a row, which a terminal draws as a replacement
+# glyph or holds while it waits for the rest, eating what comes next.
+#
+# s[max] is the first byte left out. While it is a continuation byte
+# (0b10xxxxxx) the cut is inside a sequence, so that sequence is given back
+# whole — at most 3 steps, the longest UTF-8 tail. The text reaching this point
+# has been through tty_sanitize_buf, so it is well-formed. It is still bytes, not
+# display columns: a CJK glyph is 3 bytes and 2 columns, so a clipped row can
+# under-fill the line, but no UTF-8 character is wider in columns than in bytes,
+# so it can never overflow it.
+fn utf8_cut_len(s, n, max) {
+    if (max >= n) { return n; }
+    if (max <= 0) { return 0; }
+    var k = max;
+    var back = 0;
+    while (back < 3) {
+        if (k == 0) { break; }
+        if ((load8(s + k) & 192) != 128) { break; }
+        k = k - 1;
+        back = back + 1;
+    }
+    return k;
+}
+
 # Sum rx_bytes and tx_bytes across non-loopback interfaces in a
 # /proc/net/dev buffer of length n. The first two lines are headers
 # ("Inter-|..." and " face |..."); they're skipped by line count, not

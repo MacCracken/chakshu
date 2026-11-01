@@ -4,6 +4,105 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.12.1] — 2026-10-31 — what the 1.0 freeze would have locked in
+
+A patch, corrective only. It fixes four defects in output the v1.0 contract freezes, or in the
+render path beside it:
+- the PID column was too narrow for 7-digit pids;
+- `-p` had lines ending in whitespace;
+- clipped text could stop in the middle of a UTF-8 character;
+- on AGNOS, a TUI whose stdin is a pipe took over the console.
+
+Each one has a test that fails against v0.12.0.
+
+### Fixed — what the 1.0 freeze would have locked in
+
+#### `-p`'s PID column is 7 wide, and so is the TUI's
+
+It was 6. Linux's largest possible pid (`PID_MAX_LIMIT`, 4,194,304 on 64-bit) has 7 digits, and a pid
+past 999,999 pushed its whole row one column right of the header. That was seen on this box at v0.11.1.
+The field is now 7 wide in `-p` and the TUI, which holds every pid Linux can issue. The header stays
+one fixed string for the line contract, and USER starts in column 9 on every line.
+
+⚠ **Visible change:** the `-p` header gains a leading space (`    PID USER …`). A parser that
+matched it with three leading spaces must match four.
+
+#### `-p`'s `disk:` and `net:` lines no longer end in whitespace
+
+A two-space separator was written after every device, the last one included. It now goes before
+each device after the first. Both lines are also written lazily, so a device set that changed
+entirely between the two samples emits no line instead of a bare `disk: `. They were the only `-p`
+lines that ended in whitespace.
+
+#### No render-side clip ends inside a UTF-8 character
+
+The TUI's CMD column and the focus panel cut cmdlines by **bytes**. A multi-byte character at the
+cut left its lead byte at the end of the row, right before the clear-to-end-of-line escape. A
+terminal draws that as a replacement glyph, or holds it while waiting for the rest and loses what
+follows. PTY scenario 17 caught v0.12.0 writing `F0 9F 98 1B`.
+
+- **`utf8_cut_len` (`src/proc.cyr`)** is now the one cut. It gives back a sequence the cut would
+  split, bounded at 3 bytes.
+- **Sites moved onto it:**
+  - the TUI's CMD column, its kernel-thread comm, the focus panel's cmdline and its USER column,
+    which had no protection;
+  - `-p`'s USER column, which had none either;
+  - the `--watch` panel and the AI overlay, which each had their own copy.
+- **Still bytes, not display columns.** A CJK row can under-fill the line, but it can never
+  overflow it.
+
+#### On AGNOS, the TUI refuses a stdin that is not a terminal, as on Linux
+
+Linux's TUI gate is `tty_raw(0)`: `shu < /dev/null` exits 1 with "stdin is not a TTY (use -p for
+plain mode)". On AGNOS, keys come from `kbscan#42` whatever fd 0 is, so the entry never looked at
+stdin. The second stage of `shu -p | shu` took the console over. It now asks darshana's `tty_isatty(0)`
+and gives the Linux message.
+
+- **Only where the answer is per fd:** agnos ≥ 1.57.13, through `fd_kind#111`. On an older kernel
+  `tty_isatty` answers about the console, so the check is skipped and the entry behaves as before.
+- **stdout is not checked**, on either platform. `shu | head` is supported (PTY scenario 15).
+- ⚠ **This corrects the roadmap item** it came from, which said to check stdout.
+
+### Tests
+
+- **`tests/chakshu.tcyr` 357 → 370:** a `utf8_cut_len` group covering 2-, 3- and 4-byte
+  characters, cuts on and off boundaries, no room, a negative room, and a malformed run (the bound
+  of 3).
+- **`scripts/smoke.sh`:**
+  - the header pattern is now 7 wide;
+  - a gate that no `-p` line above the table ends in whitespace;
+  - a gate that every row aligns to the header. It fails closed: no header, a header with USER
+    elsewhere, or no rows is an error.
+  - the same alignment for a **real 7-digit pid**, made in a private pid namespace
+    (`unshare -Urpf`, with `ns_last_pid` written by the namespace's own root).
+- **`tests/integration_smoke.py` 16 → 19 scenarios:**
+  - 17 and 18 start a probe whose cmdline puts a 4-byte character across the table's and the focus
+    panel's cut points, and require the TUI's whole output to be well-formed UTF-8;
+  - 19 draws a 7-digit pid row in the TUI, in a pid namespace.
+- **`tests/agnos_qemu.py` scenario 7:** `shu -p | shu` on a real kernel, with `|` added to the
+  harness's key map. The second stage must say "stdin is not a TTY" and never enter the alt screen.
+- **Each new gate was run against a v0.12.0 build and fails there.** One did not at first:
+  - scenario 17's first probe used a 3-byte character, which happened to land on a boundary at
+    v0.12.0's cut (49 bytes, before the PID column widened);
+  - no 3-byte character can straddle 48, 49 and 71 at once, because three consecutive residues
+    mod 3 include 0;
+  - a 4-byte one can, so the probe uses U+1F600.
+- **The pid-namespace cases skip, not fail,** where unprivileged user namespaces are refused, as on
+  some CI runners. Their probe tests the `ns_last_pid` write as well as `unshare`, so a runner that
+  allows one but not the other also skips. The PTY summary now says what it skipped
+  (`PASS (18/19, 1 skipped: scenario 19)`). The skip path was run with a stand-in `unshare` that
+  refuses. The fail-closed alignment gate runs everywhere.
+
+### Verified
+
+- `scripts/check.sh` 23 / 23. PTY 19 / 19, against both `shu` and the DCE'd `shu`.
+- `tests/agnos_qemu.py` **37 / 37** on agnos 1.57.14. The v0.12.0 AGNOS build fails both of
+  scenario 7's checks: its second stage entered the alt screen and took the console.
+- Sizes: the shipped lean binary is 487,912 B (+4,096, one page), and the plain one is unchanged at
+  791,016 B.
+
+Not run: a manual TUI session.
+
 ## [0.12.0] — 2026-10-31 — the CLI on cmdit, every contract question decided
 
 A minor, because it changes the command surface on purpose, before the 1.0 freeze makes each change

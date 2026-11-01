@@ -1,6 +1,6 @@
 # Manual TTY checks
 
-Everything that can be automated **is** — `tests/integration_smoke.py` drives 14
+Everything that can be automated **is** — `tests/integration_smoke.py` drives 19
 scenarios under a real pseudo-terminal, and CI runs it on every push. This file
 lists only the checks that still need human eyes, and says *why* each one resists
 automation. If you find a way to automate one, delete it from here.

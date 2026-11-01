@@ -496,39 +496,49 @@ fn snapshot_print(sort_key, top_n) {
     # between the two samples (a USB disk, an interface coming up), and pairing
     # slot i of one sample with slot i of the other would then subtract one
     # device's counter from another's — producing an enormous fabricated rate.
+    #
+    # v0.12.1: the two-space separator goes BEFORE every entry but the first. It
+    # used to follow every entry, so both lines ended in trailing whitespace, which
+    # a pipe-safe line contract should not freeze. The prefix is written with the
+    # first entry, so a device set that changed entirely between the two samples
+    # emits no line rather than a bare "disk: ".
     if (dn2 > 0) {
-        syscall(1, 1, "disk: ", 6);
         var di = 0;
+        var dshown = 0;
         while (di < dn2) {
             var dprev = _snap_match_name(&dnm2 + di * 16, &dnm1, 16, dn1);
             if (dprev >= 0) {
+                if (dshown == 0) { syscall(1, 1, "disk: ", 6); }
+                if (dshown > 0) { syscall(1, 1, "  ", 2); }
+                dshown = dshown + 1;
                 syscall(1, 1, &dnm2 + di * 16, strlen(&dnm2 + di * 16));
                 syscall(1, 1, " rd ", 4);
                 _snap_print_rate_bps((load64(&dr2p + di * 8) - load64(&dr1 + dprev * 8)) * 512 * 1000 / SNAP_SAMPLE_MS);
                 syscall(1, 1, " wr ", 4);
                 _snap_print_rate_bps((load64(&dw2p + di * 8) - load64(&dw1 + dprev * 8)) * 512 * 1000 / SNAP_SAMPLE_MS);
-                syscall(1, 1, "  ", 2);
             }
             di = di + 1;
         }
-        syscall(1, 1, "\n", 1);
+        if (dshown > 0) { syscall(1, 1, "\n", 1); }
     }
     if (nn2 > 0) {
-        syscall(1, 1, "net:  ", 6);
         var ni = 0;
+        var nshown = 0;
         while (ni < nn2) {
             var nprev = _snap_match_name(&nnm2 + ni * 16, &nnm1, 16, nn1);
             if (nprev >= 0) {
+                if (nshown == 0) { syscall(1, 1, "net:  ", 6); }
+                if (nshown > 0) { syscall(1, 1, "  ", 2); }
+                nshown = nshown + 1;
                 syscall(1, 1, &nnm2 + ni * 16, strlen(&nnm2 + ni * 16));
                 syscall(1, 1, " rx ", 4);
                 _snap_print_rate_bps((load64(&nrx2 + ni * 8) - load64(&nrx1 + nprev * 8)) * 1000 / SNAP_SAMPLE_MS);
                 syscall(1, 1, " tx ", 4);
                 _snap_print_rate_bps((load64(&ntx2 + ni * 8) - load64(&ntx1 + nprev * 8)) * 1000 / SNAP_SAMPLE_MS);
-                syscall(1, 1, "  ", 2);
             }
             ni = ni + 1;
         }
-        syscall(1, 1, "\n", 1);
+        if (nshown > 0) { syscall(1, 1, "\n", 1); }
     }
 
     # Slice C — process table. Sample 2 needs the aggregate cpu_total

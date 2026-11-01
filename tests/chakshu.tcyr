@@ -815,6 +815,28 @@ fn main() {
     assert_eq(_t_cli(1, "--with-logs", 0, 0, 0, 0), CLI_RUN, "shu-ai --with-logs runs the TUI");
     assert_eq(cli_with_logs, 1, "shu-ai --with-logs value");
 
+    # ----- proc.cyr — utf8_cut_len, the one render-side clip (v0.12.1) -----
+    test_group("proc.cyr — utf8_cut_len never ends inside a UTF-8 sequence");
+    assert_eq(utf8_cut_len("abcdef", 6, 3), 3, "ASCII cuts where asked");
+    assert_eq(utf8_cut_len("abc", 3, 8), 3, "a room wider than the text takes it all");
+    assert_eq(utf8_cut_len("abc", 3, 0), 0, "no room takes nothing");
+    assert_eq(utf8_cut_len("abc", 3, 0 - 4), 0, "a negative room takes nothing");
+    # "aé" = 61 C3 A9. A cut at 2 would keep C3 alone.
+    assert_eq(utf8_cut_len("a\xc3\xa9", 3, 2), 1, "a 2-byte character is given back whole");
+    # "éé" = C3 A9 C3 A9. 2 is a boundary.
+    assert_eq(utf8_cut_len("\xc3\xa9\xc3\xa9", 4, 2), 2, "a cut on a boundary stands");
+    assert_eq(utf8_cut_len("\xc3\xa9\xc3\xa9", 4, 3), 2, "a cut after a lead byte drops it");
+    # "a€b" = 61 E2 82 AC 62.
+    assert_eq(utf8_cut_len("a\xe2\x82\xacb", 5, 2), 1, "a 3-byte character, cut after its lead");
+    assert_eq(utf8_cut_len("a\xe2\x82\xacb", 5, 3), 1, "a 3-byte character, cut before its last byte");
+    assert_eq(utf8_cut_len("a\xe2\x82\xacb", 5, 4), 4, "after a 3-byte character");
+    # U+1F600 = F0 9F 98 80: every cut inside it gives back to 0.
+    assert_eq(utf8_cut_len("\xf0\x9f\x98\x80", 4, 3), 0, "a 4-byte character, cut before its last byte");
+    assert_eq(utf8_cut_len("\xf0\x9f\x98\x80", 4, 1), 0, "a 4-byte character, cut after its lead");
+    # Not UTF-8: a run of continuation bytes. The back-up stops after 3, so a
+    # malformed run cannot drive the cut all the way to 0.
+    assert_eq(utf8_cut_len("\x80\x80\x80\x80\x80\x80", 6, 5), 2, "the back-up is bounded at 3");
+
     return assert_summary();
 }
 

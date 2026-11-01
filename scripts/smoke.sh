@@ -198,8 +198,44 @@ grep -q '^cpu:'   "$TMPDIR/snap"                               || fail "missing 
 # v0.9.5 widened the table header with a USER column, so this assertion moved
 # with it. Asserting the FULL header rather than a prefix is deliberate: a prefix
 # match would have silently accepted the column being dropped again.
-grep -q '^   PID USER      S  CPU%  MEM% CMD$' "$TMPDIR/snap" || fail "missing/!changed PID table header"
+grep -q '^    PID USER      S  CPU%  MEM% CMD$' "$TMPDIR/snap" || fail "missing/!changed PID table header"
 pass "header shape (host/kern/proc/[gpu?]/mem/swap/cpu/core/disk/net/PID-header)"
+
+# v0.12.1: no line above the table ends in whitespace. The disk: and net: lines
+# both did (a separator written after every entry). Table rows are left out: a
+# process's own cmdline may end in a space, and that is the process's text.
+trailing=$(awk '/^    PID USER/ {exit} / +$/ {print NR": "$0}' "$TMPDIR/snap")
+[ -z "$trailing" ]                              || fail "-p header line ends in whitespace: $trailing"
+pass "no -p header line ends in whitespace"
+
+# v0.12.1: every row's PID fills the header's 7-wide PID field, so USER starts in
+# column 9 on the header and on every row. The field was 6 wide, and a pid past
+# 999,999 pushed its whole row one column right of the header. The check fails
+# closed: no header, a header with USER elsewhere, or no rows at all is an error,
+# so it cannot pass on a layout it did not recognise.
+pid_align() {
+    awk '/PID USER/ {start = 1; hdr = 1; if (index($0, "USER") != 9) print "header: " $0; next}
+         start {rows++; if (!(substr($0, 1, 7) ~ /^ *[0-9]+$/ && substr($0, 8, 1) == " " && substr($0, 9, 1) != " ")) print "row: " $0}
+         END {if (!hdr) print "no PID USER header"; else if (!rows) print "no rows"}' "$1"
+}
+misaligned=$(pid_align "$TMPDIR/snap")
+[ -z "$misaligned" ]                            || fail "-p table not aligned: $misaligned"
+pass "every -p row aligns to the 7-wide PID header"
+
+# The same with a real 7-digit pid, made in a private pid namespace: ns_last_pid
+# is writable by the namespace's own root, so the next fork is pid 1234567. This
+# needs unprivileged user namespaces, which some CI runners refuse, so it skips
+# there rather than failing; the alignment gate above still runs everywhere.
+if unshare -Urpf --mount-proc sh -c 'echo 1234566 > /proc/sys/kernel/ns_last_pid' 2>/dev/null; then
+    unshare -Urpf --mount-proc sh -c 'echo 1234566 > /proc/sys/kernel/ns_last_pid; sleep 5 & exec "$0" -p --sort pid --rows 5' "$BIN" \
+        > "$TMPDIR/ns" 2>"$TMPDIR/ns.err" || fail "-p in a pid namespace exited non-zero: $(head -1 "$TMPDIR/ns.err")"
+    grep -q '^1234567 ' "$TMPDIR/ns"            || fail "the pid namespace produced no pid 1234567 row (gate vacuous)"
+    misaligned=$(pid_align "$TMPDIR/ns")
+    [ -z "$misaligned" ]                        || fail "a 7-digit pid row is not aligned: $misaligned"
+    pass "a 7-digit pid row aligns to the header"
+else
+    echo "  skip: no unprivileged pid namespace here, so no 7-digit pid row (alignment still gated above)"
+fi
 
 # v0.9.5: the design-spec §1 features that were in scope from M0 and unimplemented
 # until this release. Each is asserted by its own line so a regression names itself
@@ -261,12 +297,12 @@ echo "[M1] --top N"
 # M2.5 reshape: count rows AFTER the PID header rather than total lines
 # — header size now varies (5 or 6 fixed lines + optional gpu) across
 # hosts; the rows-after-PID count is the actual invariant.
-top5_rows=$(awk '/^   PID USER/ {start=1; next} start' "$TMPDIR/top5" | wc -l)
+top5_rows=$(awk '/^    PID USER/ {start=1; next} start' "$TMPDIR/top5" | wc -l)
 [ "$top5_rows" -eq 5 ]                         || fail "--top 5 produced $top5_rows process rows, want 5"
 pass "--top 5 → 5 process rows"
 
 "$BIN" -p --top 1 > "$TMPDIR/top1" 2>/dev/null || fail "--top 1 exited non-zero"
-top1_rows=$(awk '/^   PID USER/ {start=1; next} start' "$TMPDIR/top1" | wc -l)
+top1_rows=$(awk '/^    PID USER/ {start=1; next} start' "$TMPDIR/top1" | wc -l)
 [ "$top1_rows" -eq 1 ]                         || fail "--top 1 produced $top1_rows process rows, want 1"
 pass "--top 1 → 1 process row"
 
@@ -291,7 +327,7 @@ echo "[M1] --sort"
 for key in cpu mem pid name; do
     "$BIN" -p --sort "$key" --top 5 > "$TMPDIR/sort.$key" 2>/dev/null \
         || fail "--sort $key exited non-zero"
-    sort_rows=$(awk '/^   PID USER/ {start=1; next} start' "$TMPDIR/sort.$key" | wc -l)
+    sort_rows=$(awk '/^    PID USER/ {start=1; next} start' "$TMPDIR/sort.$key" | wc -l)
     [ "$sort_rows" -eq 5 ] \
         || fail "--sort $key produced $sort_rows process rows, want 5"
 done
@@ -300,8 +336,8 @@ pass "--sort {cpu,mem,pid,name} all exit 0"
 # --sort pid asc → first row PID < last row PID. PID header line is no
 # longer at NR==4; awk-extract via row index 1/5 in the rows-after-PID
 # stream so the assertion stays stable across header reshapes.
-first_pid=$(awk '/^   PID USER/ {start=1; next} start' "$TMPDIR/sort.pid" | awk 'NR==1 { print $1 }')
-last_pid=$(awk '/^   PID USER/ {start=1; next} start' "$TMPDIR/sort.pid" | awk 'NR==5 { print $1 }')
+first_pid=$(awk '/^    PID USER/ {start=1; next} start' "$TMPDIR/sort.pid" | awk 'NR==1 { print $1 }')
+last_pid=$(awk '/^    PID USER/ {start=1; next} start' "$TMPDIR/sort.pid" | awk 'NR==5 { print $1 }')
 [ "$first_pid" -lt "$last_pid" ] \
     || fail "--sort pid asc broken: first=$first_pid last=$last_pid"
 pass "--sort pid is ascending"
@@ -396,7 +432,7 @@ pass "\`--\` ends the options"
 
 "$BIN" --plain --sort=pid --rows=3 > "$TMPDIR/attached" 2>"$TMPDIR/err" || fail "--plain --sort=pid --rows=3 exited non-zero"
 [ ! -s "$TMPDIR/err" ]                         || fail "--plain --sort=pid --rows=3 wrote to stderr"
-att_rows=$(awk '/^   PID USER/ {start=1; next} start' "$TMPDIR/attached" | wc -l)
+att_rows=$(awk '/^    PID USER/ {start=1; next} start' "$TMPDIR/attached" | wc -l)
 [ "$att_rows" -eq 3 ]                          || fail "--rows=3 produced $att_rows rows, want 3"
 grep -qE '^ +1 root ' "$TMPDIR/attached"       || fail "--sort=pid did not put pid 1 first"
 pass "--plain, --sort=pid and --rows=3 (attached values)"

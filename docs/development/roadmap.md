@@ -4,8 +4,7 @@
 > volatile state (version, pins, sizes, test counts) is in [`state.md`](state.md). This file
 > answers one question: *what is left to reach v1.0, and in which release does it land?*
 >
-> **Current: v0.12.0.** | **Last Updated**: 2026-10-31 (the CLI on cmdit; every contract question
-> decided)
+> **Current: v0.12.1.** | **Last Updated**: 2026-10-31 (the 0.12.1 fixes)
 
 ---
 
@@ -21,7 +20,7 @@ The release numbers below are proposals. Each version bump stays the owner's cal
 | Release | Theme | Exit gate |
 |---|---|---|
 | ~~0.12.0~~ | ~~The CLI on cmdit; every contract question decided~~ | ✅ **shipped 2026-10-31.** No open question in `cli-contract.md`; identity bar run; `check.sh` green |
-| **0.12.1** | Fix what the freeze would lock in | `-p` line shape correct for every pid width; no byte-clipped UTF-8 anywhere |
+| ~~0.12.1~~ | ~~Fix what the freeze would lock in~~ | ✅ **shipped 2026-10-31.** `-p` line shape correct for every pid width; no byte-clipped UTF-8 anywhere |
 | **0.13.0** | v1.0 evidence and hygiene | §8 fully defined and re-measured; delta audit filed; required root files; AGNOS artifacts in `release.yml` |
 | **1.0.0** | Freeze and ship | contract marked frozen; distribution acts done |
 
@@ -60,29 +59,30 @@ unit-tested); `src/cli.cyr` dispatches.
       decision above or a deliberate wording change, listed in the CHANGELOG.
 - [x] design-spec §5 and §7 match `shu --help`.
 
-## 0.12.1 — fix what the freeze would lock in
+## 0.12.1 — fix what the freeze would lock in ✅ shipped 2026-10-31
 
-A patch, corrective only. Each item is either part of the `-p` line contract, which freezes at
-1.0, or a render defect.
+A patch, corrective only. Detail in the CHANGELOG's `[0.12.1]`.
 
-- [ ] **The `-p` PID column overflows at 7 digits.** It is 6 wide (`   PID`), and Linux's
-      `pid_max` reaches 4,194,304, so a 7-digit pid pushes its whole row one column right. Seen on
-      this box at v0.11.1. Size it to the widest pid in the frame, as the TUI does (`pid_w`,
-      `src/tui.cyr:1401`), or fix it at 7.
-- [ ] **`-p`'s `disk:` and `net:` lines end in two spaces.** A pipe-safe line contract should not
-      freeze trailing whitespace.
-- [ ] **The CMD column and the focus panel clip by bytes**, not characters (`src/tui.cyr:1401`,
-      `:894`). A UTF-8 cmdline can be cut mid-sequence and leave a lone lead byte at the line's
-      end. `_ai_overlay_put` (`src/ai.cyr:1157`) already cuts only at a UTF-8 boundary, but
-      `src/ai.cyr` is AI-build only, so move that cut into shared code. Byte-clipping never
-      overflows the line, because no UTF-8 character is wider in columns than in bytes.
-- [ ] **The AGNOS TUI entry should check `tty_isatty(1)`.** `tui_run`'s AGNOS arm
-      (`src/tui.cyr:1679`) gates on the console grid alone, because agnos had no isatty. agnos
-      1.57.13 added `fd_kind#111`, which darshana ≥ 1.5.0's `tty_isatty` uses, so `shu > file`
-      on AGNOS is detectable. Gate it on `tty_isatty_is_per_fd() == 1` so an older kernel keeps
-      today's behaviour.
-- [ ] A PTY scenario for each render fix: a 7-digit pid row, a multibyte cmdline cut at the
-      width. The TUI render path is the least-covered surface (state.md).
+- [x] **The `-p` PID column is 7 wide**, the width of Linux's `PID_MAX_LIMIT` (4,194,304), so
+      the header stays one fixed string and every row's USER starts in column 9. The TUI's column
+      moved with it.
+- [x] **`-p`'s `disk:` and `net:` lines no longer end in two spaces.** The separator now goes
+      before each entry after the first.
+- [x] **No render-side clip ends inside a UTF-8 character.** `utf8_cut_len` (`src/proc.cyr`) is
+      the one cut, used by the TUI's CMD column, kernel-thread comm, focus-panel cmdline and USER
+      column, `-p`'s USER column, the `--watch` panel and the AI overlay (the last two had their
+      own copies).
+- [x] **The AGNOS TUI refuses a stdin that is not a terminal**, as Linux does. ⚠ This item first
+      said to check `tty_isatty(1)` (stdout). That was wrong: Linux's gate is stdin
+      (`tty_raw(0)`), and `shu > file` / `shu | head` are supported there (PTY scenario 15), so a
+      stdout check would have made the two platforms disagree. The real gap was stdin: on AGNOS
+      keys come from `kbscan#42` whatever fd 0 is, so `shu -p | shu` handed the console to the
+      second stage. Gated on `tty_isatty_is_per_fd() == 1`, so an older kernel behaves as before.
+- [x] Tests for each: `utf8_cut_len` unit cases; `smoke.sh` gates for trailing whitespace and for
+      PID alignment, including a real 7-digit pid from a private pid namespace; PTY scenarios 17
+      and 18 (a 4-byte character across the table's and the focus panel's cut points) and 19 (a
+      7-digit pid row in the TUI); `agnos_qemu.py` scenario 7 (`shu -p | shu`). Each fails against
+      v0.12.0. The namespace cases skip where unprivileged user namespaces are refused.
 
 ## 0.13.0 — v1.0 evidence and hygiene
 

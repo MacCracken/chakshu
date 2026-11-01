@@ -135,7 +135,6 @@ fn watch_render_frame() {
         var cap = _tui_cols - 6;
         if (cap < 0) { cap = 0; }
         if (tn > cap) {
-            tn = cap;
             # v0.9.4 (audit W6): back the cut up to a UTF-8 lead byte. Clipping by
             # BYTES mid-codepoint emits an orphaned continuation byte (0b10xxxxxx),
             # which terminals render as a replacement glyph or, worse, swallow the
@@ -147,10 +146,8 @@ fn watch_render_frame() {
             # columns wide, so a row of CJK still under-fills the line. A real width
             # table is the complete fix and the lean build deliberately does not link
             # one; this closes the corruption without pretending to solve width.
-            while (tn > 0) {
-                if (load8(t + tn) & 192 == 128) { tn = tn - 1; }
-                else { break; }
-            }
+            # v0.12.1: the shared utf8_cut_len (src/proc.cyr) does the backing-up.
+            tn = utf8_cut_len(t, tn, cap);
         }
         if (tn > 0) { syscall(1, 1, t, tn); }
         tty_clear_to_eol();
